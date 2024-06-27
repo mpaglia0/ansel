@@ -40,6 +40,8 @@ typedef struct dt_variables_data_t
 {
   /** cached values that shouldn't change between variables in the same expansion process */
   GDateTime *time;
+  GDateTime *file_datetime;
+
   char exif_time[DT_DATETIME_LENGTH];
   guint sequence;
 
@@ -104,6 +106,25 @@ typedef enum _image_case
 
 static char *_expand_source(dt_variables_params_t *params, char **source, char extra_stop);
 
+gboolean dt_get_user_pictures_dir(const gchar *homedir, gchar *picdir, size_t picdir_size)
+{
+  if(!homedir || picdir_size == 0 || !picdir)
+    return 0;
+
+  gchar dir[PATH_MAX] = { 0 };
+  if(g_get_user_special_dir(G_USER_DIRECTORY_PICTURES) == NULL)
+    g_strlcpy(dir, g_build_path(G_DIR_SEPARATOR_S, homedir, "Pictures", (char *)NULL), sizeof(dir));
+  else
+    g_strlcpy(dir, g_strdup(g_get_user_special_dir(G_USER_DIRECTORY_PICTURES)), sizeof(dir));
+
+  if(*dir == 0)
+    fprintf(stderr,"Error: Can't get user's pictures folder.\n");
+  else
+    return g_strlcpy(picdir, dir, picdir_size) >= 1;
+
+  return 0;
+}
+
 // gather some data that might be used for variable expansion
 static void _init_expansion(dt_variables_params_t *params, gboolean iterate)
 {
@@ -111,15 +132,15 @@ static void _init_expansion(dt_variables_params_t *params, gboolean iterate)
 
   params->data->homedir = dt_loc_get_home_dir(NULL);
 
-  if(g_get_user_special_dir(G_USER_DIRECTORY_PICTURES) == NULL)
-    params->data->pictures_folder = g_build_path(G_DIR_SEPARATOR_S, params->data->homedir, "Pictures", (char *)NULL);
-  else
-    params->data->pictures_folder = g_strdup(g_get_user_special_dir(G_USER_DIRECTORY_PICTURES));
+  gchar picture_folder[PATH_MAX] = { 0 };
+  dt_get_user_pictures_dir(params->data->homedir, picture_folder, sizeof(picture_folder));
+  params->data->pictures_folder = g_strdup(picture_folder);
 
   if(params->filename)
   {
     params->data->file_ext = (g_strrstr(params->filename, ".") + 1);
     if(params->data->file_ext == (gchar *)1) params->data->file_ext = params->filename + strlen(params->filename);
+    params->data->file_datetime = dt_util_get_file_datetime(params->filename);
   }
   else
     params->data->file_ext = NULL;
@@ -147,19 +168,12 @@ static void _init_expansion(dt_variables_params_t *params, gboolean iterate)
 
   if(params->img)
   {
-    img = (dt_image_t *) params->img;
+    img = (dt_image_t *)params->img;
   }
   else if(params->imgid > -1)
   {
     img = dt_image_cache_get(darktable.image_cache, params->imgid, 'r');
     release = IMGID;
-  }
-  else if (params->filename)
-  {
-    img = malloc(sizeof(dt_image_t));
-    dt_exif_read(img, params->filename);
-    dt_exif_xmp_read(img, params->filename, 0);
-    release = FILENAME;
   }
 
   if(img)
@@ -216,12 +230,8 @@ static void _init_expansion(dt_variables_params_t *params, gboolean iterate)
   switch (release)
   {
     case NONE:
-    {
-      break;
-    }
     case FILENAME:
     {
-      free(img);
       break;
     }
     case IMGID:
@@ -474,6 +484,36 @@ static char *_get_base_value(dt_variables_params_t *params, char **variable)
   {
     if(params->filename)
       result = g_path_get_dirname(params->filename);
+  }
+  else if(_has_prefix(variable, "FILE.YEAR"))
+  {
+    if(params->data->file_datetime)
+      result = g_date_time_format(params->data->file_datetime, "%Y");
+  }
+  else if(_has_prefix(variable, "FILE.MONTH"))
+  {
+    if(params->data->file_datetime)
+      result = g_date_time_format(params->data->file_datetime, "%m");
+  }
+  else if(_has_prefix(variable, "FILE.DAY"))
+  {
+    if(params->data->file_datetime)
+      result = g_date_time_format(params->data->file_datetime, "%d");
+  }
+  else if(_has_prefix(variable, "FILE.HOUR"))
+  {
+    if(params->data->file_datetime)
+      result = g_date_time_format(params->data->file_datetime, "%H");
+  }
+  else if(_has_prefix(variable, "FILE.MINUTE"))
+  {
+    if(params->data->file_datetime)
+      result = g_date_time_format(params->data->file_datetime, "%M");
+  }
+  else if(_has_prefix(variable, "FILE.SECOND"))
+  {
+    if(params->data->file_datetime)
+      result = g_date_time_format(params->data->file_datetime, "%S");
   }
   // for watermark backward compatibility
   else if(_has_prefix(variable, "IMAGE.FILENAME"))
@@ -1065,6 +1105,7 @@ void dt_variables_params_init(dt_variables_params_t **params)
   *params = g_malloc0(sizeof(dt_variables_params_t));
   (*params)->data = g_malloc0(sizeof(dt_variables_data_t));
   (*params)->data->time = g_date_time_new_now_local();
+  (*params)->data->file_datetime = NULL;
   (*params)->data->exif_time[0] = 0;
   (*params)->sequence = -1;
   (*params)->img = NULL;
@@ -1074,8 +1115,18 @@ void dt_variables_params_destroy(dt_variables_params_t *params)
 {
   if(params->data->time)
     g_date_time_unref(params->data->time);
+
+  if(params->data->time)
+    g_date_time_unref(params->data->file_datetime);
+
   g_free(params->data);
   g_free(params);
+}
+
+void dt_variables_set_datetime(dt_variables_params_t *params, GDateTime *datetime)
+{
+  if(params->data->time) g_date_time_unref(params->data->time);
+  params->data->time = g_date_time_ref(datetime);
 }
 
 void dt_variables_set_max_width_height(dt_variables_params_t *params, int max_width, int max_height)
@@ -1087,16 +1138,6 @@ void dt_variables_set_max_width_height(dt_variables_params_t *params, int max_wi
 void dt_variables_set_upscale(dt_variables_params_t *params, gboolean upscale)
 {
   params->data->upscale = upscale;
-}
-
-void dt_variables_set_time(dt_variables_params_t *params, const char *time)
-{
-  params->data->time = dt_datetime_exif_to_gdatetime(time, darktable.utc_tz);
-}
-
-void dt_variables_set_exif_time(dt_variables_params_t *params, const char *exif_time)
-{
-  g_strlcpy(params->data->exif_time, exif_time, sizeof(params->data->exif_time));
 }
 
 void dt_variables_reset_sequence(dt_variables_params_t *params)

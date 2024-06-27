@@ -338,16 +338,16 @@ static uint64_t _node_hash(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_
   // to be called at runtime, not at pipe init.
 
   // Only at the first step of pipe, we don't have a module because we init the base buffer.
-  uint64_t hash = piece ? piece->global_hash : _default_pipe_hash(pipe);
-
-  // module->hash represents user params for a module.
-  // piece->hash represents user params and runtime pipeline params for a module.
-  // piece->global_hash is the cumulative piece->hash across the pipe, it tracks pipeline order.
-  // pipe->hash represents the output size and position.
-  // So when we mix piece->global_hash with pipe->hash, we have the complete integrity checksum
-  // for a pixel buffer cache line, including pipe order, upstream module params, and image size.
-  hash = dt_hash(hash, (const char *)&pipe->hash, sizeof(uint64_t));
-  return hash;
+  if(piece)
+    return piece->global_hash;
+  else
+  {
+    // This is used for the first step of the pipe, before modules, when initing base buffer
+    // We need to take care of the ROI manually
+    uint64_t hash = _default_pipe_hash(pipe);
+    hash = dt_hash(hash, (const char *)roi_out, sizeof(dt_iop_roi_t));
+    return dt_hash(hash, (const char *)&pos, sizeof(int));
+  }
 }
 
 
@@ -374,32 +374,29 @@ void dt_pixelpipe_get_global_hash(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
     bypass_cache |= piece->module->bypass_cache;
     piece->bypass_cache = bypass_cache;
 
-    // Combine with the previous modules hashes : have an unique step hash even when disabled
-    hash = dt_hash(hash, (const char *)&piece->hash, sizeof(uint64_t));
-
     if(piece->enabled)
     {
-      // if modify_roi_in/out are implented, buf_in/out sizes will change.
-      // Though they should change according to user params.
-      // So this should be redundant with piece->hash. Is it ?
-      hash = dt_hash(hash, (const char *)&piece->buf_in, sizeof(dt_iop_roi_t));
-      hash = dt_hash(hash, (const char *)&piece->buf_out, sizeof(dt_iop_roi_t));
+      // Combine with the previous modules hashes
+      uint64_t local_hash = piece->hash;
 
-      if(pipe->type & DT_DEV_PIXELPIPE_FULL)
+      // Panning and zooming change the ROI. Some GUI modes (crop in editing mode) too.
+      local_hash = dt_hash(local_hash, (const char *)&piece->planned_roi_in, sizeof(dt_iop_roi_t));
+      local_hash = dt_hash(local_hash, (const char *)&piece->planned_roi_out, sizeof(dt_iop_roi_t));
+
+      if((pipe->type & DT_DEV_PIXELPIPE_FULL) && dev->gui_module)
       {
-        // Full-preview-centric tweaks : mask display
-        if(dev->gui_module && dev->gui_module != piece->module)
-        {
-          // Crop and perspective need a full ROI to set-up bounds in GUI, but only temporarily
-          // FIXME: this should probably use dt_iop_set_bypass_cache because there is no point
-          // caching setting intermediate steps.
-          const int distort_tags = dev->gui_module->operation_tags_filter() & piece->module->operation_tags();
-          hash = dt_hash(hash, (const char *)&distort_tags, sizeof(int));
-        }
+        // Crop and perspective need a full ROI to set-up bounds in GUI, but only temporarily
+        // FIXME: this should probably use dt_iop_set_bypass_cache because there is no point
+        // caching setting intermediate steps.
+        const int distort_tags = dev->gui_module->operation_tags_filter() & piece->module->operation_tags();
+        local_hash = dt_hash(local_hash, (const char *)&distort_tags, sizeof(int));
       }
+
+      hash = dt_hash(hash, (const char *)&local_hash, sizeof(uint64_t));
+
+      dt_print(DT_DEBUG_PARAMS, "[params] global hash for %s in pipe %i with hash %lu\n", piece->module->op, pipe->type, (long unsigned int)hash);
     }
 
-    // Write
     piece->global_hash = hash;
   }
 }
@@ -415,8 +412,9 @@ void dt_dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, GList *
   // find piece in nodes list
   dt_dev_pixelpipe_iop_t *piece = NULL;
 
+  // FIXME: this is not the place to handle masks.
+  // Shitty darktable code as usual: unable to do one thing at one time.
   const dt_image_t *img = &pipe->image;
-  const int32_t imgid = img->id;
   const gboolean rawprep_img = dt_image_is_rawprepare_supported(img);
   const gboolean raw_img     = dt_image_is_raw(img);
 
@@ -431,29 +429,7 @@ void dt_dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, GList *
 
     if(piece->module == hist->module)
     {
-      const gboolean active = hist->enabled;
-      piece->enabled = active;
-
-      // Styles, presets or history copy&paste might set history items not appropriate for the image.
-      // Fixing that seemed to be almost impossible after long discussions but at least we can test,
-      // correct and add a problem hint here.
-      if((strcmp(piece->module->op, "demosaic") == 0) || (strcmp(piece->module->op, "rawprepare") == 0))
-      {
-        if(rawprep_img && !active)
-          piece->enabled = TRUE;
-        else if(!rawprep_img && active)
-          piece->enabled = FALSE;
-      }
-      else if((strcmp(piece->module->op, "rawdenoise") == 0) ||
-              (strcmp(piece->module->op, "hotpixels") == 0) ||
-              (strcmp(piece->module->op, "cacorrect") == 0))
-      {
-        if(!rawprep_img && active) piece->enabled = FALSE;
-      }
-
-      if(piece->enabled != hist->enabled)
-        dt_print(DT_DEBUG_DEV, "[pixelpipe_synch] enabling mismatch for module %s in image %i\n", piece->module->op, imgid);
-
+      piece->enabled = hist->enabled;
       dt_iop_commit_params(hist->module, hist->params, hist->blend_params, pipe, piece);
 
       if(piece->blendop_data)
@@ -548,13 +524,12 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev)
   }
 
   pipe->changed = DT_DEV_PIPE_UNCHANGED;
-  dt_dev_pixelpipe_get_dimensions(pipe, dev, pipe->iwidth, pipe->iheight, &pipe->processed_width,
+
+  // Get the final output size of the pipe, for GUI coordinates mapping between image buffer and window
+  dt_dev_pixelpipe_get_roi_out(pipe, dev, pipe->iwidth, pipe->iheight, &pipe->processed_width,
                                   &pipe->processed_height);
 
-  // This needs correct roi_out, so run get_dimensions before
   // TODO: if DT_DEV_PIPE_TOP_CHANGED, compute global hash only for the top ?
-  dt_pixelpipe_get_global_hash(pipe, dev);
-
   dt_pthread_mutex_unlock(&dev->history_mutex);
 
   dt_show_times(&start, "[dt_dev_pixelpipe_change] pipeline resync on the current modules stack");
@@ -1475,7 +1450,7 @@ static int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev,
       {
         /* Nice, everything went fine */
 
-        /* OLD COMMENT: 
+        /* OLD COMMENT:
            this is reasonable on slow GPUs only, where it's more expensive to reprocess the whole pixelpipe
            than regularly copying device buffers back to host. This would slow down fast GPUs considerably.
            NEW COMMENT:
@@ -1661,8 +1636,6 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
     if(module)
       dt_print(DT_DEBUG_DEV, "[pixelpipe] dt_dev_pixelpipe_process_rec, cache available for pipe %i and module %s with hash %llu\n",
              pipe->type, module->op, (long long unsigned int)hash);
-    else
-      dt_print(DT_DEBUG_DEV, "[pixelpipe] dt_dev_pixelpipe_process_rec has no module at pos %i\n", pos);
 
     (void)dt_dev_pixelpipe_cache_get(&(pipe->cache), hash, bufsize, output, out_format);
 
@@ -1738,6 +1711,10 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
 
   // get region of interest which is needed in input
   module->modify_roi_in(module, piece, roi_out, &roi_in);
+  /*
+  fprintf(stdout, "ROI IN Process for %s: %i × %i at (%i, %i) @ %f\n", module->op, roi_in.width, roi_in.height, roi_in.x, roi_in.y, roi_in.scale);
+  */
+
 
   // recurse to get actual data of input buffer
   dt_iop_buffer_dsc_t _input_format = { 0 };
@@ -1884,12 +1861,6 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
   // in case we get this buffer from the cache in the future, cache some stuff:
   **out_format = piece->dsc_out = pipe->dsc;
 
-  if(dev->gui_attached && module == dev->gui_module)
-  {
-    // give the input buffer to the currently focused plugin more weight.
-    // the user is likely to change that one soon, so keep it in cache.
-    dt_dev_pixelpipe_cache_reweight(&(pipe->cache), input);
-  }
 
   // warn on NaN or infinity
 #ifndef _DEBUG
@@ -2221,14 +2192,14 @@ void dt_dev_pixelpipe_flush_caches(dt_dev_pixelpipe_t *pipe)
   dt_dev_pixelpipe_cache_flush(&pipe->cache);
 }
 
-void dt_dev_pixelpipe_get_dimensions(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev, int width_in,
+void dt_dev_pixelpipe_get_roi_out(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev, int width_in,
                                      int height_in, int *width, int *height)
 {
   dt_pthread_mutex_lock(&pipe->busy_mutex);
   dt_iop_roi_t roi_in = (dt_iop_roi_t){ 0, 0, width_in, height_in, 1.0 };
   dt_iop_roi_t roi_out;
-  GList *modules = pipe->iop;
-  GList *pieces = pipe->nodes;
+  GList *modules = g_list_first(pipe->iop);
+  GList *pieces = g_list_first(pipe->nodes);
   while(modules)
   {
     dt_iop_module_t *module = (dt_iop_module_t *)modules->data;
@@ -2257,6 +2228,54 @@ void dt_dev_pixelpipe_get_dimensions(dt_dev_pixelpipe_t *pipe, struct dt_develop
   }
   *width = roi_out.width;
   *height = roi_out.height;
+  dt_pthread_mutex_unlock(&pipe->busy_mutex);
+}
+
+void dt_dev_pixelpipe_get_roi_in(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev, const struct dt_iop_roi_t roi_out)
+{
+  // while module->modify_roi_out describes how the current module will change the size of
+  // the output buffer depending on its parameters (pretty intuitive),
+  // module->modify_roi_in describes "how much material" the current module needs from the previous one,
+  // because some modules (lens correction) need a padding on their input.
+  // The tricky part is therefore that the effect of the current module->modify_roi_in() needs to be repercuted
+  // upstream in the pipeline for proper pipeline cache invalidation, so we need to browse the pipeline
+  // backwards.
+
+  dt_pthread_mutex_lock(&pipe->busy_mutex);
+  dt_iop_roi_t roi_out_temp = roi_out;
+  dt_iop_roi_t roi_in;
+  GList *modules = g_list_last(pipe->iop);
+  GList *pieces = g_list_last(pipe->nodes);
+  while(modules)
+  {
+    dt_iop_module_t *module = (dt_iop_module_t *)modules->data;
+    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)pieces->data;
+
+    piece->planned_roi_out = roi_out_temp;
+
+    // skip this module?
+    if(piece->enabled && !(dev->gui_module && dev->gui_module != module
+            && dev->gui_module->operation_tags_filter() & module->operation_tags()))
+    {
+      module->modify_roi_in(module, piece, &roi_out_temp, &roi_in);
+
+      /*
+      if(dev)
+        fprintf(stdout, "ROI IN in for %s on pipe %i: %i × %i at (%i, %i) @ %f\n", module->op, dev->pipe->type, roi_in.width, roi_in.height, roi_in.x, roi_in.y, roi_in.scale);
+      */
+    }
+    else
+    {
+      // pass through regions of interest for gui post expose events
+      roi_in = roi_out_temp;
+    }
+
+    piece->planned_roi_in = roi_in;
+    roi_out_temp = roi_in;
+
+    modules = g_list_previous(modules);
+    pieces = g_list_previous(pieces);
+  }
   dt_pthread_mutex_unlock(&pipe->busy_mutex);
 }
 

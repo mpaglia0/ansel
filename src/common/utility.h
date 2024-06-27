@@ -120,9 +120,11 @@ gchar *dt_cleanup_separators(gchar *string);
 
 gchar *dt_util_remove_whitespace(const gchar *path);
 
+// Get the datetime of modification for a given file, identified by its full path
+GDateTime *dt_util_get_file_datetime(const char *const path);
+
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

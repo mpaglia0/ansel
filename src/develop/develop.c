@@ -327,7 +327,10 @@ void dt_dev_process_preview_job(dt_develop_t *dev)
                            .width = dev->preview_pipe->processed_width,
                            .height = dev->preview_pipe->processed_height,
                            .scale = 1.f };
-  dev->preview_pipe->hash = dt_hash(5381, (const char *)&roi_out, sizeof(dt_iop_roi_t));
+
+  // Get the previous output size of the module, for cache invalidation.
+  dt_dev_pixelpipe_get_roi_in(dev->preview_pipe, dev, roi_out);
+  dt_pixelpipe_get_global_hash(dev->preview_pipe, dev);
 
   if(dt_dev_pixelpipe_process(
          dev->preview_pipe, dev, 0, 0, dev->preview_pipe->processed_width,
@@ -435,7 +438,10 @@ restart:;
 
   // Get the roi_out hash
   dt_iop_roi_t roi_out = { .x = x, .y = y, .width = wd, .height = ht, .scale = scale };
-  dev->pipe->hash = dt_hash(5381, (const char *)&roi_out, sizeof(dt_iop_roi_t));
+
+  // Get the previous output size of the module, for cache invalidation.
+  dt_dev_pixelpipe_get_roi_in(dev->pipe, dev, roi_out);
+  dt_pixelpipe_get_global_hash(dev->pipe, dev);
 
   dt_get_times(&start);
 

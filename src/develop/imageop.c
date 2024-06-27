@@ -1678,9 +1678,6 @@ void dt_iop_commit_params(dt_iop_module_t *module, dt_iop_params_t *params,
 {
   assert(piece->pipe == pipe);
 
-  piece->hash = piece->global_hash = module->hash;
-  if(!piece->enabled) return;
-
   // 1. commit params
   memcpy(piece->blendop_data, blendop_params, sizeof(dt_develop_blend_params_t));
 
@@ -1727,7 +1724,14 @@ void dt_iop_commit_params(dt_iop_module_t *module, dt_iop_params_t *params,
   *      most-downstream module which _node_hash() is known in cache, to spare computations, or recomputed entirely if
   *      the cache is empty or entirely out-of-sync.
   */
-  piece->hash = piece->global_hash = dt_hash(module->hash, (const char *)piece->data, piece->data_size);
+
+  // Take mask display into account. It might be cleaner to handle it as part of module->hash at the module level,
+  // issue may be that mask states are GUI events, not commited to history, so the params update may not be triggered.
+  piece->global_hash = piece->hash
+      = dt_hash(module->hash, (const char *)&module->request_mask_display, sizeof(int));
+
+  // EDIT: piece->hash is neutered for now, set to module->hash. Seems like it's too aggressive.
+  // piece->hash = dt_hash(module->hash, (const char *)piece->data, piece->data_size);
 
   dt_print(DT_DEBUG_PARAMS, "[params] commit for %s in pipe %i with hash %lu\n", module->op, pipe->type, (long unsigned int)piece->hash);
 }
