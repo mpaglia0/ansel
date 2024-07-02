@@ -792,9 +792,8 @@ static void _dev_add_history_item_ext(dt_develop_t *dev, dt_iop_module_t *module
     hist->forms = NULL;
   }
 
-  if(enable) hist->enabled = module->enabled = TRUE;
-  else       hist->enabled = module->enabled;
-
+  if(enable) module->enabled = TRUE;
+  hist->enabled = module->enabled;
   hist->hash = module->hash;
 
   // WARNING: dev->history_item refers to GUI index where 0 is the original image.
@@ -869,6 +868,7 @@ void dt_dev_add_history_item_real(dt_develop_t *dev, dt_iop_module_t *module, gb
   dt_dev_invalidate_all(dev);
   dt_control_queue_redraw_center();
   dt_dev_refresh_ui_images(dev);
+  if(darktable.gui) dt_iop_gui_set_enable_button(module);
 }
 
 // FIXME : merge that with the generic add_history_item_ext()
