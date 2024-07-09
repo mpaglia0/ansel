@@ -2360,7 +2360,6 @@ gboolean _import_image(const GList *img, dt_control_import_t *data, const int in
       _write_xmp_id(filename, imgid);
       fprintf(stdout, "imgid: %i\n", imgid);
       dt_conf_set_int("ui_last/import_last_image", imgid);
-      DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_GEOTAG_CHANGED, g_list_copy((GList *)img), 0);
     }
   }
 

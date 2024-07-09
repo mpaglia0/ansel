@@ -55,7 +55,6 @@ void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)
   dev->gui_module = NULL;
   dev->average_delay = DT_DEV_AVERAGE_DELAY_START;
   dev->preview_average_delay = DT_DEV_PREVIEW_AVERAGE_DELAY_START;
-  dev->gui_leaving = 0;
   dt_pthread_mutex_init(&dev->history_mutex, NULL);
   dev->history_end = 0;
   dev->history = NULL; // empty list
@@ -277,8 +276,6 @@ void dt_dev_invalidate_all_real(dt_develop_t *dev)
 
 void dt_dev_process_preview_job(dt_develop_t *dev)
 {
-  if(dev->gui_leaving) return;
-
   dt_pthread_mutex_lock(&dev->pipe_mutex);
   dt_control_log_busy_enter();
   dt_control_toast_busy_enter();
@@ -301,15 +298,6 @@ void dt_dev_process_preview_job(dt_develop_t *dev)
                              buf.height, buf.iscale);
 
 // always process the whole downsampled mipf buffer, to allow for fast scrolling and mip4 write-through.
-  if(dev->gui_leaving)
-  {
-    dt_control_log_busy_leave();
-    dt_control_toast_busy_leave();
-    dev->preview_status = DT_DEV_PIXELPIPE_INVALID;
-    dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-    dt_pthread_mutex_unlock(&dev->pipe_mutex);
-    return;
-  }
 
   restart:;
   // adjust pipeline according to changed flag set by {add,pop}_history_item.
@@ -320,17 +308,6 @@ void dt_dev_process_preview_job(dt_develop_t *dev)
   // adjust pipeline according to changed flag set by {add,pop}_history_item.
   // this locks dev->history_mutex.
   dt_dev_pixelpipe_change(dev->preview_pipe, dev);
-
-  // Get the roi_out hash
-  dt_iop_roi_t roi_out = { .x = 0,
-                           .y = 0,
-                           .width = dev->preview_pipe->processed_width,
-                           .height = dev->preview_pipe->processed_height,
-                           .scale = 1.f };
-
-  // Get the previous output size of the module, for cache invalidation.
-  dt_dev_pixelpipe_get_roi_in(dev->preview_pipe, dev, roi_out);
-  dt_pixelpipe_get_global_hash(dev->preview_pipe, dev);
 
   if(dt_dev_pixelpipe_process(
          dev->preview_pipe, dev, 0, 0, dev->preview_pipe->processed_width,
@@ -366,8 +343,6 @@ void dt_dev_process_preview_job(dt_develop_t *dev)
 
 void dt_dev_process_image_job(dt_develop_t *dev)
 {
-  if(dev->gui_leaving) return;
-
   dt_pthread_mutex_lock(&dev->pipe_mutex);
   dt_control_log_busy_enter();
   dt_control_toast_busy_enter();
@@ -387,16 +362,6 @@ void dt_dev_process_image_job(dt_develop_t *dev)
   }
 
   dt_dev_pixelpipe_set_input(dev->pipe, dev, (float *)buf.buf, buf.width, buf.height, 1.0);
-
-  if(dev->gui_leaving)
-  {
-    dt_control_log_busy_leave();
-    dt_control_toast_busy_leave();
-    dev->image_status = DT_DEV_PIXELPIPE_INVALID;
-    dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-    dt_pthread_mutex_unlock(&dev->pipe_mutex);
-    return;
-  }
 
 restart:;
   dt_times_t start;
@@ -436,13 +401,6 @@ restart:;
   int x = MAX(0, scale * dev->pipe->processed_width  * (.5 + zoom_x) - wd / 2);
   int y = MAX(0, scale * dev->pipe->processed_height * (.5 + zoom_y) - ht / 2);
 
-  // Get the roi_out hash
-  dt_iop_roi_t roi_out = { .x = x, .y = y, .width = wd, .height = ht, .scale = scale };
-
-  // Get the previous output size of the module, for cache invalidation.
-  dt_dev_pixelpipe_get_roi_in(dev->pipe, dev, roi_out);
-  dt_pixelpipe_get_global_hash(dev->pipe, dev);
-
   dt_get_times(&start);
 
   if(dt_dev_pixelpipe_process(dev->pipe, dev, x, y, wd, ht, scale))
@@ -476,7 +434,7 @@ restart:;
   dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
   dt_pthread_mutex_unlock(&dev->pipe_mutex);
 
-  if(dev->gui_attached && !dev->gui_leaving)
+  if(dev->gui_attached)
     DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED);
 }
 
@@ -1026,6 +984,44 @@ static inline void _dt_dev_modules_reload_defaults(dt_develop_t *dev)
   }
 }
 
+void _sanitize_modules(dt_iop_module_t *module)
+{
+  // Ensure mandatory modules are enabled and unapplicable modules are disabled
+  if(dt_image_is_monochrome(&module->dev->image_storage))
+  {
+    if(!strcmp(module->op, "demosaic") ||
+       !strcmp(module->op, "temperature") ||
+       !strcmp(module->op, "cacorrect") ||
+       !strcmp(module->op, "highlights"))
+      module->enabled = FALSE;
+
+  }
+  else if(dt_image_is_matrix_correction_supported(&module->dev->image_storage))
+  {
+    if(!strcmp(module->op, "demosaic"))
+      module->enabled = TRUE;
+  }
+  else
+  {
+    // JPG, PNG, etc.
+    if(!strcmp(module->op, "demosaic") ||
+       !strcmp(module->op, "cacorrect") ||
+       !strcmp(module->op, "rawdenoise") ||
+       !strcmp(module->op, "hotpixels") ||
+       !strcmp(module->op, "highlights")) // FIXME: highlights should be allowed
+      module->enabled = FALSE;
+  }
+
+  if(!strcmp(module->op, "rawprepare"))
+    module->enabled = dt_image_is_rawprepare_supported(&module->dev->image_storage);
+
+  // Always on.
+  if(!strcmp(module->op, "colorin") ||
+     !strcmp(module->op, "colorout") ||
+     !strcmp(module->op, "dither"))
+    module->enabled = TRUE;
+}
+
 void dt_dev_pop_history_items_ext(dt_develop_t *dev, int32_t cnt)
 {
   dt_ioppr_check_iop_order(dev, 0, "dt_dev_pop_history_items_ext begin");
@@ -1046,6 +1042,8 @@ void dt_dev_pop_history_items_ext(dt_develop_t *dev, int32_t cnt)
 
     hist->module->iop_order = hist->iop_order;
     hist->module->enabled = hist->enabled;
+    _sanitize_modules(hist->module);
+    hist->enabled = hist->module->enabled;
 
     g_strlcpy(hist->module->multi_name, hist->multi_name, sizeof(hist->module->multi_name));
     if(hist->forms) forms = hist->forms;
