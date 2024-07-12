@@ -411,7 +411,7 @@ void dt_free_align(void *mem);
 void dt_free_align(void *mem);
 #define dt_free_align_ptr dt_free_align
 #else
-#define dt_free_align(A) free(A)
+#define dt_free_align(A) if(A) free(A)
 #define dt_free_align_ptr free
 #endif
 
