@@ -1834,6 +1834,103 @@ static void _print_nan_debug(dt_dev_pixelpipe_t *pipe, void *cl_mem_output, void
 }
 
 
+static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void **output,
+                             void **cl_mem_output, dt_iop_buffer_dsc_t **out_format,
+                             dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,
+                             const uint64_t hash,
+                             const gboolean bypass_cache,
+                             const size_t bufsize, const size_t bpp)
+{
+// we're looking for the full buffer
+  if(roi_out->scale == 1.0 && roi_out->x == 0 && roi_out->y == 0 && pipe->iwidth == roi_out->width
+      && pipe->iheight == roi_out->height)
+  {
+    *output = pipe->input;
+    return 0;
+  }
+  else if(bypass_cache || dt_dev_pixelpipe_cache_get(&(pipe->cache), hash, bufsize, output, out_format))
+  {
+    if(roi_in->scale == 1.0f)
+    {
+      // fast branch for 1:1 pixel copies.
+      // last minute clamping to catch potential out-of-bounds in roi_in and roi_out
+      const int in_x = MAX(roi_in->x, 0);
+      const int in_y = MAX(roi_in->y, 0);
+      const int cp_width = MAX(0, MIN(roi_out->width, pipe->iwidth - in_x));
+      const int cp_height = MIN(roi_out->height, pipe->iheight - in_y);
+
+      if(cp_width > 0 && cp_height > 0)
+      {
+        _copy_buffer((const char *const)pipe->input, (char *const)*output, cp_height, roi_out->width,
+                      pipe->iwidth, in_x, in_y, bpp * cp_width, bpp);
+        return 0;
+      }
+      else
+      {
+        // Invalid dimensions
+        return 1;
+      }
+    }
+    else if(bpp == 16)
+    {
+      // dt_iop_clip_and_zoom() expects 4 * float 32 only
+      roi_in->x /= roi_out->scale;
+      roi_in->y /= roi_out->scale;
+      roi_in->width = pipe->iwidth;
+      roi_in->height = pipe->iheight;
+      roi_in->scale = 1.0f;
+      dt_iop_clip_and_zoom(*output, pipe->input, roi_out, roi_in, roi_out->width, pipe->iwidth);
+      return 0;
+    }
+    else
+    {
+      fprintf(stdout,
+                "Base buffer init: scale %f != 1.0 but the input has %li bytes per pixel. This case is not "
+                "covered by the pipeline, please report the bug.\n",
+                roi_out->scale, bpp);
+      return 1;
+    }
+  }
+  // else found in cache.
+  return 0;
+}
+
+static int _process_masks_preview(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, dt_dev_pixelpipe_iop_t *piece,
+                                  void *input, void **output,
+                                  void *cl_mem_input, void **cl_mem_output, dt_iop_buffer_dsc_t **out_format,
+                                  const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out,
+                                  const size_t in_bpp, const size_t out_bpp, dt_iop_module_t *module)
+{
+  // special case: user requests to see channel data in the parametric mask of a module, or the blending
+  // mask. In that case we skip all modules manipulating pixel content and only process image distorting
+  // modules. Finally "gamma" is responsible for displaying channel/mask data accordingly.
+  if(strcmp(module->op, "gamma") != 0
+     && (pipe->mask_display != DT_DEV_PIXELPIPE_DISPLAY_NONE)
+     && !(module->operation_tags() & IOP_TAG_DISTORT)
+     && (in_bpp == out_bpp) && !memcmp(roi_in, roi_out, sizeof(struct dt_iop_roi_t)))
+  {
+    // since we're not actually running the module, the output format is the same as the input format
+    **out_format = pipe->dsc = piece->dsc_out = piece->dsc_in;
+
+#ifdef HAVE_OPENCL
+    if(dt_opencl_is_inited() && pipe->opencl_enabled && pipe->devid >= 0 && (cl_mem_input != NULL))
+      *cl_mem_output = cl_mem_input;
+    else
+      *output = input;
+#else
+    *output = input;
+#endif
+    /* Previously: used full buffer copy on CPU:
+    _copy_buffer((const char *const)input, (char *const)*output, roi_out->height, roi_out->width, roi_in.width,
+                   0, 0, in_bpp * roi_in.width, in_bpp); */
+
+    return 0;
+  }
+
+  return 1;
+}
+
+
 // recursive helper for process:
 static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void **output,
                                         void **cl_mem_output, dt_iop_buffer_dsc_t **out_format,
@@ -1900,42 +1997,10 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
     // 3a) import input array with given scale and roi
     dt_times_t start;
     dt_get_times(&start);
-    // we're looking for the full buffer
-    {
-      if(roi_out->scale == 1.0 && roi_out->x == 0 && roi_out->y == 0 && pipe->iwidth == roi_out->width
-         && pipe->iheight == roi_out->height)
-      {
-        *output = pipe->input;
-      }
-      else if(bypass_cache || dt_dev_pixelpipe_cache_get(&(pipe->cache), hash, bufsize, output, out_format))
-      {
-        if(roi_in.scale == 1.0f)
-        {
-          // fast branch for 1:1 pixel copies.
-          // last minute clamping to catch potential out-of-bounds in roi_in and roi_out
-          const int in_x = MAX(roi_in.x, 0);
-          const int in_y = MAX(roi_in.y, 0);
-          const int cp_width = MAX(0, MIN(roi_out->width, pipe->iwidth - in_x));
-          const int cp_height = MIN(roi_out->height, pipe->iheight - in_y);
 
-          if(cp_width > 0)
-            _copy_buffer((const char *const)pipe->input, (char *const)*output, cp_height, roi_out->width,
-                         pipe->iwidth, in_x, in_y, bpp * cp_width, bpp);
-          else
-            return 1; // Something is wrong
-        }
-        else
-        {
-          roi_in.x /= roi_out->scale;
-          roi_in.y /= roi_out->scale;
-          roi_in.width = pipe->iwidth;
-          roi_in.height = pipe->iheight;
-          roi_in.scale = 1.0f;
-          dt_iop_clip_and_zoom(*output, pipe->input, roi_out, &roi_in, roi_out->width, pipe->iwidth);
-        }
-      }
-      // else found in cache.
-    }
+    if(_init_base_buffer(pipe, dev, output, cl_mem_output, out_format, &roi_in, roi_out, hash, bypass_cache, bufsize,
+                      bpp))
+      return 1;
 
     dt_show_times_f(&start, "[dev_pixelpipe]", "initing base buffer [%s]", _pipe_type_to_str(pipe->type));
     return 0;
@@ -1977,31 +2042,10 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
 
   dt_pixelpipe_flow_t pixelpipe_flow = (PIXELPIPE_FLOW_NONE | PIXELPIPE_FLOW_HISTOGRAM_NONE);
 
-  // special case: user requests to see channel data in the parametric mask of a module, or the blending
-  // mask. In that case we skip all modules manipulating pixel content and only process image distorting
-  // modules. Finally "gamma" is responsible for displaying channel/mask data accordingly.
-  if(strcmp(module->op, "gamma") != 0
-     && (pipe->mask_display != DT_DEV_PIXELPIPE_DISPLAY_NONE)
-     && !(module->operation_tags() & IOP_TAG_DISTORT)
-     && (in_bpp == out_bpp) && !memcmp(&roi_in, roi_out, sizeof(struct dt_iop_roi_t)))
-  {
-    // since we're not actually running the module, the output format is the same as the input format
-    **out_format = pipe->dsc = piece->dsc_out = piece->dsc_in;
-
-#ifdef HAVE_OPENCL
-    if(dt_opencl_is_inited() && pipe->opencl_enabled && pipe->devid >= 0 && (cl_mem_input != NULL))
-      *cl_mem_output = cl_mem_input;
-    else
-      *output = input;
-#else
-    *output = input;
-#endif
-    /* Previously: used full buffer copy on CPU:
-    _copy_buffer((const char *const)input, (char *const)*output, roi_out->height, roi_out->width, roi_in.width,
-                   0, 0, in_bpp * roi_in.width, in_bpp); */
-
+  // Bypass pixel filtering and return early if we only want the pipe to display mask previews
+  if(!_process_masks_preview(pipe, dev, piece, input, output, cl_mem_input, cl_mem_output, out_format, &roi_in, roi_out,
+                         in_bpp, out_bpp, module))
     return 0;
-  }
 
   /* get tiling requirement of module */
   dt_develop_tiling_t tiling = { 0 };
