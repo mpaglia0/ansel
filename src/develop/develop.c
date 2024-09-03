@@ -148,9 +148,9 @@ void dt_dev_cleanup(dt_develop_t *dev)
   // image_cache does not have to be unref'd, this is done outside develop module.
   dt_pthread_mutex_destroy(&dev->pipe_mutex);
 
-  dt_free_align(dev->raw_histogram.buffer);
-  dt_free_align(dev->output_histogram.buffer);
-  dt_free_align(dev->display_histogram.buffer);
+  if(dev->raw_histogram.buffer) dt_free_align(dev->raw_histogram.buffer);
+  if(dev->output_histogram.buffer) dt_free_align(dev->output_histogram.buffer);
+  if(dev->display_histogram.buffer) dt_free_align(dev->display_histogram.buffer);
 
   dev->proxy.chroma_adaptation = NULL;
   dev->proxy.wb_coeffs[0] = 0.f;

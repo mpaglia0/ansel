@@ -264,10 +264,17 @@ static inline void _bin_pixels_waveform(const float *const restrict image, uint3
 
   // Process
 #ifdef _OPENMP
+#ifndef _WIN32
 #pragma omp parallel for default(none) \
         dt_omp_firstprivate(image, height, width, binning_size, vertical) \
         reduction(+: bins[0: binning_size]) \
         schedule(static) collapse(3)
+#else
+#pragma omp parallel for default(none) \
+        dt_omp_firstprivate(image, height, width, binning_size, vertical) \
+        shared(bins) \
+        schedule(static) collapse(3)
+#endif
 #endif
   for(size_t i = 0; i < height; i++)
     for(size_t j = 0; j < width; j++)
@@ -444,10 +451,17 @@ static void _bin_pixels_vectorscope(const float *const restrict image, uint32_t 
   for(size_t k = 0; k < HISTOGRAM_BINS * HISTOGRAM_BINS; k++) vectorscope[k] = 0;
 
 #ifdef _OPENMP
+#ifndef _WIN32
 #pragma omp parallel for default(none) \
         dt_omp_firstprivate(image, n_pixels, profile, zoom) \
         reduction(+: vectorscope[0: HISTOGRAM_BINS * HISTOGRAM_BINS]) \
         schedule(static)
+#else
+#pragma omp parallel for default(none) \
+        dt_omp_firstprivate(image, n_pixels, profile, zoom) \
+        shared(vectorscope) \
+        schedule(static)
+#endif
 #endif
   for(size_t k = 0; k < n_pixels * 4; k += 4)
   {
@@ -835,7 +849,6 @@ void _display_callback(GtkWidget *widget, dt_lib_histogram_t *d)
 
 static void _resize_callback(GtkWidget *widget, GdkRectangle *allocation, dt_lib_histogram_t *d)
 {
-  fprintf(stdout, "resize called \n");
   _reset_cache(d);
   _trigger_recompute(d);
   // Don't start a redraw from here, Gtk does it automatically on resize event

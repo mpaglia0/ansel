@@ -687,7 +687,6 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   dt_develop_t dev;
   dt_dev_init(&dev, 0);
   dt_dev_load_image(&dev, imgid);
-  // TODO: reuse the darkroom opened pipe if any and imgid matches
 
   dt_mipmap_buffer_t buf;
   if(thumbnail_export)
@@ -704,17 +703,15 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     goto error_early;
   }
 
-  const int wd = img->width;
-  const int ht = img->height;
-
-
   int res = 0;
-
   dt_times_t start;
   dt_get_times(&start);
   dt_dev_pixelpipe_t pipe;
-  res = thumbnail_export ? dt_dev_pixelpipe_init_thumbnail(&pipe, wd, ht)
-                         : dt_dev_pixelpipe_init_export(&pipe, wd, ht, format->levels(format_params), export_masks);
+  if(thumbnail_export)
+    res = dt_dev_pixelpipe_init_thumbnail(&pipe, buf.width, buf.height);
+  else
+    res = dt_dev_pixelpipe_init_export(&pipe, buf.width, buf.height, format->levels(format_params), export_masks);
+
   if(!res)
   {
     dt_control_log(
@@ -787,141 +784,123 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     if(!strncmp(filter, "post:", 5)) dt_dev_pixelpipe_disable_before(&pipe, filter + 5);
   }
 
+  // Get theoritical final size of image, taking distortions and croppings into account, considering full-size original input
   dt_dev_pixelpipe_get_roi_out(&pipe, &dev, pipe.iwidth, pipe.iheight, &pipe.processed_width,
                                   &pipe.processed_height);
+  const double image_ratio = (double)pipe.processed_width / (double)pipe.processed_height;
 
   dt_show_times(&start, "[export] creating pixelpipe");
 
   // find output color profile for this image:
   int sRGB = (icc_type == DT_COLORSPACE_SRGB);
 
-  // if is_scaling is used don't override high_quality
-  // get only once at the beginning, in case the user changes it on the way:
-  const gboolean high_quality_processing
-      = ((format_params->max_width == 0 || format_params->max_width >= pipe.processed_width)
-         && (format_params->max_height == 0 || format_params->max_height >= pipe.processed_height)
-         && !is_scaling)
-            ? FALSE
-            : high_quality;
-
-  /* The pipeline might have out-of-bounds problems at the right and lower borders leading to
-     artifacts or mem access errors if ignored. (#3646)
-     It's very difficult to prepare the pipeline avoiding this **and** not introducing artifacts.
-     But we can test for that situation and if there is an out-of-bounds problem we
-     have basically two options:
-     a) reduce the output image size by one for width & height.
-     b) increase the scale while keeping the output size. In theory this marginally reduces quality.
-
-     These are the rules for export:
-     1. If we have the **full image** (defined by dt_image_t width, height and crops) we look for upscale.
-        If this is off use a), if on use b)
-     2. If we have defined format_params->max_width or/and height we use b)
-     3. Thumbnails are defined as in 2 so use b)
-     4. Cropped images are detected and use b)
-     5. Upscaled images use b)
-     6. Rotating by +-90° does not change the output size.
-     7. Never generate images larger than requested.
-  */
-
-  const gboolean iscropped =
-    (   (pipe.processed_width < (wd - img->crop_x - img->crop_width))
-     || (pipe.processed_height < (ht - img->crop_y - img->crop_height)));
-
-  const gboolean exact_size =
-         iscropped
-      || upscale
-      || (format_params->max_width != 0)
-      || (format_params->max_height != 0)
-      || thumbnail_export;
-
-  int width = format_params->max_width > 0 ? format_params->max_width : 0;
-  int height = format_params->max_height > 0 ? format_params->max_height : 0;
-
-  if(iscropped && !thumbnail_export && width == 0 && height == 0)
-  {
-    width = pipe.processed_width;
-    height = pipe.processed_height;
-  }
-
-  const double max_scale = (upscale && (width > 0 || height > 0)) ? 100.0 : 1.0;
-
-  const double scalex = width > 0 ? fmin((double)width / (double)pipe.processed_width, max_scale) : max_scale;
-  const double scaley = height > 0 ? fmin((double)height / (double)pipe.processed_height, max_scale) : max_scale;
-  double scale = fmin(scalex, scaley);
-  double corrscale = 1.0f;
+  int width = MAX(format_params->max_width, 0);
+  int height = MAX(format_params->max_height, 0);
+  double scale = 1.;
 
   int processed_width = 0;
   int processed_height = 0;
-
-  gboolean corrected = FALSE;
   float origin[] = { 0.0f, 0.0f };
+
+  // Set to TRUE if width size is explicitly set by user
+  gboolean force_width;
+  // Set to TRUE if height size is explicitly set by user
+  gboolean force_height;
 
   if(dt_dev_distort_backtransform_plus(&dev, &pipe, 0.f, DT_DEV_TRANSFORM_DIR_ALL, origin, 1))
   {
-    if((width == 0) && exact_size)
-      width = pipe.processed_width;
-    if((height == 0) && exact_size)
-      height = pipe.processed_height;
-
-    scale = fmin(width >  0 ? fmin((double)width / (double)pipe.processed_width, max_scale) : max_scale,
-                 height > 0 ? fmin((double)height / (double)pipe.processed_height, max_scale) : max_scale);
-
     if(is_scaling)
     {
-      // scaling
       double _num, _denum;
       dt_imageio_resizing_factor_get_and_parsing(&_num, &_denum);
-
       const double scale_factor = _num / _denum;
-
-      if(!thumbnail_export)
-      {
-        scale = fmin(scale_factor, max_scale);
-      }
+      scale = fmin(scale_factor, 1.);
+      force_width = TRUE;
+      force_height = TRUE;
     }
-
-    processed_width = scale * pipe.processed_width + 0.8f;
-    processed_height = scale * pipe.processed_height + 0.8f;
-
-    if((ceil((double)processed_width / scale) + origin[0] > pipe.iwidth) ||
-       (ceil((double)processed_height / scale) + origin[1] > pipe.iheight))
+    else
     {
-      corrected = TRUE;
-     /* Here the scale is too **small** so while reading data from the right or low borders we are out-of-bounds.
-        We can either just decrease output width & height or
-        have to find a scale that takes data from within the origin data, so we have to increase scale to a size
-        that fits both width & height.
-     */
-      if(exact_size)
+      double scalex = 1.;
+      double scaley = 1.;
+
+      if(width == 0)
       {
-        corrscale = fmax( ((double)(pipe.processed_width + 1) / (double)(pipe.processed_width)),
-                           ((double)(pipe.processed_height +1) / (double)(pipe.processed_height)) );
-        scale = scale * corrscale;
+        force_width = FALSE;
+        width = pipe.processed_width;
       }
       else
       {
-        processed_width--;
-        processed_height--;
+        force_width = TRUE;
+        scalex = fmin((double)width / (double)pipe.processed_width, 1.);
       }
-    }
 
-    dt_print(DT_DEBUG_IMAGEIO,"[dt_imageio_export] imgid %d, pipe %ix%i, range %ix%i --> exact %i, upscale %i, hq %i, corrected %i, scale %.7f, corr %.6f, size %ix%i\n",
-             imgid, pipe.processed_width, pipe.processed_height, format_params->max_width, format_params->max_height,
-             exact_size, upscale, high_quality_processing, corrected, scale, corrscale, processed_width, processed_height);
+      if(height == 0)
+      {
+        force_height = FALSE;
+        height = pipe.processed_height;
+      }
+      else
+      {
+        force_height = TRUE;
+        scaley = fmin((double)height / (double)pipe.processed_height, 1.);
+      }
+
+      scale = fmin(scalex, scaley);
+    }
   }
   else
   {
-    processed_width = floor(scale * pipe.processed_width);
-    processed_height = floor(scale * pipe.processed_height);
-    dt_print(DT_DEBUG_IMAGEIO,"[dt_imageio_export] (direct) imgid %d, hq %i, pipe %ix%i, range %ix%i --> size %ix%i / %ix%i\n",
-             imgid, high_quality_processing, pipe.processed_width, pipe.processed_height, format_params->max_width, format_params->max_height,
-             processed_width, processed_height, width, height);
+    // error reading pipeline pieces for distort transforms
+    goto error;
   }
+
+  if(force_height && force_width)
+  {
+    // width and height both specified by user in pixels
+    if(pipe.processed_width > pipe.processed_height)
+    {
+      processed_width = MIN(round(scale * pipe.processed_width), width);
+      processed_height = round(processed_width / image_ratio);
+    }
+    else if(pipe.processed_width < pipe.processed_height)
+    {
+      processed_height = MIN(round(scale * pipe.processed_height), height);
+      processed_width = round(processed_height * image_ratio);
+    }
+    else
+    {
+      processed_width = MIN(round(scale * pipe.processed_width), width);
+      processed_height = MIN(round(scale * pipe.processed_height), height);
+    }
+  }
+  else if(force_width)
+  {
+    // width only specified by user in pixels, fluid height
+    processed_width = MIN(round(scale * pipe.processed_width), width);
+    processed_height = round(processed_width / image_ratio);
+  }
+  else if(force_height)
+  {
+    // height only specified by user in pixels, fluid width
+    processed_height = MIN(round(scale * pipe.processed_height), height);
+    processed_width = round(processed_height * image_ratio);
+  }
+  else
+  {
+    // nothing specified by user aka full resolution given cropping, lens and perspective distortions
+    processed_width = pipe.processed_width;
+    processed_height = pipe.processed_height;
+  }
+
+  dt_print(DT_DEBUG_IMAGEIO,"[dt_imageio_export] (direct) imgid %d, hq %i, pipe %ix%i, range %ix%i --> size %ix%i / %ix%i - ratio %.5f\n",
+            imgid, high_quality, pipe.processed_width, pipe.processed_height, format_params->max_width, format_params->max_height,
+            processed_width, processed_height, width, height, image_ratio);
+
 
   const int bpp = format->bpp(format_params);
 
   dt_get_times(&start);
-  if(high_quality_processing)
+  if(high_quality)
   {
     /*
      * if high quality processing was requested, downsampling will be done
@@ -974,7 +953,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   {
     if(display_byteorder)
     {
-      if(high_quality_processing)
+      if(high_quality)
       {
         const float *const inbuf = (float *)outbuf;
         for(size_t k = 0; k < (size_t)processed_width * processed_height; k++)
@@ -993,7 +972,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     else // need to flip
     {
       // ldr output: char
-      if(high_quality_processing)
+      if(high_quality)
       {
         const float *const inbuf = (float *)outbuf;
         for(size_t k = 0; k < (size_t)processed_width * processed_height; k++)
@@ -1033,7 +1012,6 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     for(int y = 0; y < processed_height; y++)
       for(int x = 0; x < processed_width; x++)
       {
-        // convert in place
         const size_t k = (size_t)processed_width * y + x;
         for(int i = 0; i < 3; i++) buf16[4 * k + i] = roundf(CLAMP(buff[4 * k + i] * 0xffff, 0, 0xffff));
       }
@@ -1078,7 +1056,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   if(copy_metadata && (format->flags(format_params) & FORMAT_FLAGS_SUPPORT_XMP))
   {
     dt_exif_xmp_attach_export(imgid, filename, metadata);
-    // no need to cancel the export if this fail
+    // no need to cancel the export if this fails
   }
 
   if(!thumbnail_export && strcmp(format->mime(format_params), "memory")
