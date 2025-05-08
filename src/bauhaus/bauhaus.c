@@ -963,6 +963,53 @@ dt_bauhaus_t * dt_bauhaus_init()
   g_signal_connect(area, "key-press-event", G_CALLBACK(dt_bauhaus_popup_key_press), NULL);
   g_signal_connect(area, "scroll-event", G_CALLBACK(dt_bauhaus_popup_scroll), NULL);
 
+  // Keys used by key-pressed event handler when the Bauhaus widget has the focus
+  gchar *path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (normal step)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Right, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (normal step)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Left, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (fine step)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Right, GDK_CONTROL_MASK);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (fine step)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Left, GDK_CONTROL_MASK);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (coarse step)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Right, GDK_SHIFT_MASK);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (coarse step)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Left, GDK_SHIFT_MASK);
+  g_free(path);
+
+  path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Open editing mode"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Return, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Exit editing mode"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Escape, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Select previous (in editing mode)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Up, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Select next (in editing mode)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Down, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Validate result (in editing mode)"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
+                                  path, GDK_KEY_Return, 0);
+  g_free(path);
+
   return bauhaus;
 }
 
@@ -1163,10 +1210,15 @@ void dt_bauhaus_widget_set_label(GtkWidget *widget, const char *label)
     // No need to wire all possible events/interactions.
     if(m && !w->no_accels && !w->module->deprecated && label)
     {
-      gchar *plugin_name = g_strdup_printf("%s/%s/%s", m->name, (w->type == DT_BAUHAUS_SLIDER) ? _("Slider") : _("Combobox"), label);
-      gchar *scope = g_strdup_printf("%s/Plugins", m->view);
-      dt_accels_new_darkroom_action(_action_request_focus, w, scope, plugin_name, 0, 0);
-      g_object_set_data(G_OBJECT(widget), "accel-path", dt_accels_build_path("Darkroom/Plugins", plugin_name));
+      // slash is not allowed in control names because that makes accel pathes fail
+      assert(g_strrstr(label, "/") == NULL);
+
+      gchar *plugin_name = g_strdup_printf("%s/%s", m->name, w->label);
+      dt_capitalize_label(plugin_name);
+
+      gchar *scope = g_strdup_printf("%s/Modules", m->view);
+      dt_accels_new_darkroom_action(_action_request_focus, w, scope, plugin_name, 0, 0, _("Focuses the control"));
+      g_object_set_data(G_OBJECT(widget), "accel-path", dt_accels_build_path("Darkroom/Modules", plugin_name));
       g_free(scope);
       g_free(plugin_name);
     }

@@ -1241,9 +1241,9 @@ void gui_init(dt_view_t *self)
   dt_develop_t *dev = (dt_develop_t *)self->data;
 
   dt_accels_new_darkroom_action(_switch_to_next_picture, self, N_("Darkroom/Actions"),
-                                N_("switch to the next picture"), GDK_KEY_Right, GDK_MOD1_MASK);
+                                N_("switch to the next picture"), GDK_KEY_Right, GDK_MOD1_MASK, _("Triggers the action"));
   dt_accels_new_darkroom_action(_switch_to_prev_picture, self, N_("Darkroom/Actions"),
-                                N_("switch to the previous picture"), GDK_KEY_Left, GDK_MOD1_MASK);
+                                N_("switch to the previous picture"), GDK_KEY_Left, GDK_MOD1_MASK, _("Triggers the action"));
   /*
    * Add view specific tool buttons
    */

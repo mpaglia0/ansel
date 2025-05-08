@@ -106,7 +106,6 @@ void dt_control_log_redraw();
  */
 void dt_control_toast_redraw();
 
-void dt_ctl_switch_mode();
 void dt_ctl_switch_mode_to(const char *mode);
 void dt_ctl_switch_mode_to_by_view(const dt_view_t *view);
 void dt_ctl_reload_view(const char *mode);

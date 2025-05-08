@@ -20,8 +20,38 @@
  * with their pathes, and only after fetching user-defined accels, we can connect actual actions.
  * So it's not straight-forward.
  *
- * Some keys appear reserved, like Tab or Enter, depending on OS. So we have to use our own, custom,
- * shortcut handler, which is mostly a thin wrapper over Gtk native features.asm
+ * That is:
+ *
+ * ```C
+ * // 1. Init accels handlers
+ * dt_accels_init(char *config_file, GtkAccelFlags flags);
+ *
+ * // 2. Init GUI widgets where each acceleratable declares its slot using either:
+ * dt_accels_new_widget_shortcut(dt_accels_t *accels, GtkWidget *widget, const gchar *signal,
+ *                               GtkAccelGroup *accel_group, const gchar *accel_path, guint key_val,
+ *                               GdkModifierType accel_mods, const gboolean lock);
+ * // or:
+ * const dt_shortcut_t *dt_accels_new_action_shortcut(dt_accels_t *accels, void(*action_callback), gpointer data,
+ *                                                    GtkAccelGroup *accel_group, const gchar *action_scope, const gchar *action_name,
+ *                                                    guint key_val, GdkModifierType accel_mods, const gboolean lock);
+ *
+ * // 3. Read shortcutsrc.lang file to assign user-defined shortcuts to those slots:
+ * void dt_accels_load_user_config(dt_accels_t *accels);
+ *
+ * // 4. Actually enable those shortcuts:
+ * void dt_accels_connect_accels(dt_accels_t *accels);
+ *
+ * // 5. Connect/Disconnect contextual accel groups when entering/exiting some view:
+ * // NOTE: contextual accel groups may redefine/overwrite some global keys combinations temporarily.
+ * void dt_accels_disconnect_active_group(dt_accels_t *accels);
+ * void dt_accels_connect_active_group(dt_accels_t *accels, const gchar *group);
+ *
+ * // 6. Install our own shortcuts listener. This is used within an event handler callback.
+ * gboolean dt_accels_dispatch(GtkWidget *w, GdkEvent *event, gpointer user_data);
+ * ```
+ *
+ * Some keys appear reserved to Gtk/System, like Tab or Enter, depending on OS. So we have to use our own, custom,
+ * shortcut handler, which is mostly a thin wrapper over Gtk native features.
  *
  * This allows us to decide in which order we process the several sets of shortcuts we maintain
  * (global, lighttable, darkroom). Global shortcuts are processed last, for all views.
@@ -85,7 +115,10 @@ typedef struct dt_shortcut_t
   guint key;                  // default key
   GdkModifierType mods;       // default modifier
   dt_shortcut_type_t type;
-  gboolean locked; // this will not listen to user config
+  gboolean locked;            // if shortcut can't be changed by user
+  gboolean virtual_shortcut;  // if shortcut is mapped to a key-pressed event handler instead of a global action callback
+  const char *description;    // user-legible description of the action
+  dt_accels_t *accels;        // back-reference for convenience
 } dt_shortcut_t;
 
 
@@ -129,6 +162,22 @@ void dt_accels_connect_active_group(dt_accels_t *accels, const gchar *group);
  */
 void dt_accels_disconnect_active_group(dt_accels_t *accels);
 
+
+/**
+ * @brief Add a new virtual shortcut. Virtual shortcuts are immutable, read-only
+ * and don't trigger any action. They are meant to serve as placeholders, in a purely
+ * declarative way, for key combinations hardcoded in the key-pressed events handlers
+ * of widgets able to capture focus. Once declared here, they will prevent users from declaring
+ * their own shortcuts using hardcoded combinations for the corresponding accel_group.
+ *
+ * @param accel_group
+ * @param accel_path
+ * @param key_val
+ * @param accel_mods
+ */
+void dt_accels_new_virtual_shortcut(dt_accels_t *accels, GtkAccelGroup *accel_group, const gchar *accel_path,
+                                    guint key_val, GdkModifierType accel_mods);
+
 /**
  * @brief Register a new shortcut for a widget, setting up its path, default keys and accel group.
  * This does everything but connecting it, so exists only as a defined slot to be connected later.
@@ -141,7 +190,6 @@ void dt_accels_disconnect_active_group(dt_accels_t *accels);
  * @param key_val
  * @param accel_mods
  * @param lock prevent user edition
-
  */
 void dt_accels_new_widget_shortcut(dt_accels_t *accels, GtkWidget *widget, const gchar *signal,
                                    GtkAccelGroup *accel_group, const gchar *accel_path, guint key_val,
@@ -171,12 +219,10 @@ void dt_accels_new_widget_shortcut(dt_accels_t *accels, GtkWidget *widget, const
  * @param key_val
  * @param accel_mods
  * @param lock prevent user edition
- *
- * @return A reference to the newly-allocated or updated shortcut object
  */
-const dt_shortcut_t *dt_accels_new_action_shortcut(dt_accels_t *accels, void(*action_callback), gpointer data,
+void dt_accels_new_action_shortcut(dt_accels_t *accels, void(*action_callback), gpointer data,
                                    GtkAccelGroup *accel_group, const gchar *action_scope, const gchar *action_name,
-                                   guint key_val, GdkModifierType accel_mods, const gboolean lock);
+                                   guint key_val, GdkModifierType accel_mods, const gboolean lock, const char *description);
 
 
 /**
@@ -190,7 +236,9 @@ const dt_shortcut_t *dt_accels_new_action_shortcut(dt_accels_t *accels, void(*ac
 gboolean dt_accels_dispatch(GtkWidget *w, GdkEvent *event, gpointer user_data);
 
 /**
- * @brief Attach a new global scroll event callback
+ * @brief Attach a new global scroll event callback. So far this is used in darkroom
+ * to redirect scroll events to a Bauhaus widget when the focusing shortcut of that widget
+ * is held down on keyboard.
  *
  * @param callback
  * @param data
@@ -207,3 +255,11 @@ static inline void dt_accels_disable(dt_accels_t *accels, gboolean state)
 {
   accels->disable_accels = state;
 }
+
+/**
+ * @brief Show the modal dialog listing all available keyboard shortcuts and letting user to set them.
+ *
+ * @param accels
+ * @param main_window The main Ansel application window (for modal/transient)
+ */
+void dt_accels_window(dt_accels_t *accels, GtkWindow *main_window);

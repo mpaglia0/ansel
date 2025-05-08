@@ -534,23 +534,23 @@ void gui_init(dt_lib_module_t *self)
   darktable.develop->proxy.modulegroups.search_text_focus = _lib_modulegroups_search_text_focus;
 
   dt_accels_new_darkroom_action(_modulegroups_switch_tab_next, darktable.develop, N_("Darkroom/Actions"),
-                                N_("move to the next modules tab"), GDK_KEY_Tab, GDK_CONTROL_MASK);
+                                N_("move to the next modules tab"), GDK_KEY_Tab, GDK_CONTROL_MASK, _("Triggers the action"));
   dt_accels_new_darkroom_action(_modulegroups_switch_tab_previous, darktable.develop, N_("Darkroom/Actions"),
                                 N_("move to the previous modules tab"), GDK_KEY_Tab,
-                                GDK_CONTROL_MASK | GDK_SHIFT_MASK);
+                                GDK_CONTROL_MASK | GDK_SHIFT_MASK, _("Triggers the action"));
 
   dt_accels_new_darkroom_locked_action(_focus_next_module, NULL, N_("Darkroom/Actions"),
-                                       N_("Focus on the next module"), GDK_KEY_Page_Down, 0);
+                                       N_("Focus on the next module"), GDK_KEY_Page_Down, 0, _("Triggers the action"));
   dt_accels_new_darkroom_locked_action(_focus_previous_module, NULL, N_("Darkroom/Actions"),
-                                       N_("Focus on the previous module"), GDK_KEY_Page_Up, 0);
+                                       N_("Focus on the previous module"), GDK_KEY_Page_Up, 0, _("Triggers the action"));
 
   dt_accels_new_darkroom_locked_action(_focus_next_control, NULL, N_("Darkroom/Actions"),
-                                       N_("Focus on the next module control"), GDK_KEY_Down, GDK_CONTROL_MASK);
+                                       N_("Focus on the next module control"), GDK_KEY_Down, GDK_CONTROL_MASK, _("Triggers the action"));
   dt_accels_new_darkroom_locked_action(_focus_previous_control, NULL, N_("Darkroom/Actions"),
-                                       N_("Focus on the previous module control"), GDK_KEY_Up, GDK_CONTROL_MASK);
+                                       N_("Focus on the previous module control"), GDK_KEY_Up, GDK_CONTROL_MASK, _("Triggers the action"));
 
   dt_accels_new_darkroom_action(_focus_search_action, self, N_("Darkroom/Actions"), N_("Search a module"),
-                                GDK_KEY_f, GDK_CONTROL_MASK);
+                                GDK_KEY_f, GDK_CONTROL_MASK, _("Triggers the action"));
 
   /* let's connect to view changed signal to set default group */
   dt_control_signal_connect(darktable.signals, DT_SIGNAL_VIEWMANAGER_VIEW_CHANGED,

@@ -1922,7 +1922,7 @@ static void lens_set(dt_iop_module_t *self, const lfLens *lens)
   }
 
   w = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(self));
-  dt_bauhaus_widget_set_label(w, N_("f/"));
+  dt_bauhaus_widget_set_label(w, N_("f"));
   gtk_widget_set_tooltip_text(w, _("f-number (aperture)"));
   snprintf(txt, sizeof(txt), "%.*f", precision(p->aperture, 10.0), p->aperture);
   dt_bauhaus_combobox_add(w, txt);

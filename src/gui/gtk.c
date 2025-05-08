@@ -1764,7 +1764,15 @@ void dt_gui_new_collapsible_section(dt_gui_collapsible_section_t *cs,
 void dt_capitalize_label(gchar *text)
 {
   if(text)
-    text[0] = g_unichar_toupper(text[0]);
+  {
+    const char *underscore = "_";
+
+    // Deal with strings beginning with Mnemonics
+    if(text[0] == underscore[0])
+      text[1] = g_unichar_toupper(text[1]);
+    else
+      text[0] = g_unichar_toupper(text[0]);
+  }
 }
 
 GtkBox * attach_popover(GtkWidget *widget, const char *icon, GtkWidget *content)

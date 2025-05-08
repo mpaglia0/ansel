@@ -228,7 +228,7 @@ jobs:
       REPO: "https://github.com/aurelienpierreeng/ansel"
       ROOM: "!SgRYbzspwqwwUgSQHC:matrix.org"
       TAG: "v0.0.0"
-    needs: Win64
+    needs: Linux
     steps:
       - name: Checkout ansel source
         uses: actions/checkout@v4

@@ -269,9 +269,9 @@ void gui_init(dt_lib_module_t *self)
   g_signal_connect(G_OBJECT(d->columns), "value-changed", G_CALLBACK(_lib_lighttable_columns_slider_changed), self);
 
   dt_accels_new_lighttable_action(_columns_in_action, self, N_("Lighttable/Actions"), N_("Zoom in the thumbtable grid"),
-                                  GDK_KEY_plus, GDK_CONTROL_MASK);
+                                  GDK_KEY_plus, GDK_CONTROL_MASK, _("Triggers the action"));
   dt_accels_new_lighttable_action(_columns_out_action, self, N_("Lighttable/Actions"), N_("Zoom out the thumbtable grid"),
-                                  GDK_KEY_minus, GDK_CONTROL_MASK);
+                                  GDK_KEY_minus, GDK_CONTROL_MASK, _("Triggers the action"));
 
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,
                                   G_CALLBACK(_dt_collection_changed_callback), self);

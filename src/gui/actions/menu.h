@@ -55,11 +55,12 @@ typedef struct dt_menu_entry_t
  *  will be updated automatically everytime a top-level menu is opened.
  **/
 
-dt_menu_entry_t *
-set_menu_entry(GtkWidget **menus, GList **items_list, const gchar *label, dt_menus_t menu_index, void *data,
-               void (*action_callback)(GtkWidget *widget), gboolean (*checked_callback)(GtkWidget *widget),
-               gboolean (*active_callback)(GtkWidget *widget), gboolean (*sensitive_callback)(GtkWidget *widget),
-               guint key_val, GdkModifierType mods, GtkAccelGroup *accel_group);
+dt_menu_entry_t *set_menu_entry(GtkWidget **menus, GList **items_list, const gchar *label, dt_menus_t menu_index,
+                                GtkMenu *parent, void *data, void (*action_callback)(GtkWidget *widget),
+                                gboolean (*checked_callback)(GtkWidget *widget),
+                                gboolean (*active_callback)(GtkWidget *widget),
+                                gboolean (*sensitive_callback)(GtkWidget *widget), guint key_val,
+                                GdkModifierType mods, GtkAccelGroup *accel_group);
 
 void update_entry(dt_menu_entry_t *entry);
 void update_menu_entries(GtkWidget *widget, gpointer user_data);

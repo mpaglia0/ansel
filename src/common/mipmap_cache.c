@@ -1198,7 +1198,7 @@ static void _init_8(uint8_t *buf, uint32_t *width, uint32_t *height, float *isca
   const uint32_t wd = *width, ht = *height;
 
   char filename[PATH_MAX] = { 0 };
-  char ext[5] = { 0 };
+  char ext[6] = { 0 };
   gboolean input_exists, is_jpg_input, use_embedded_jpg;
   _write_mipmap_to_disk(imgid, filename, ext, &input_exists, &is_jpg_input, &use_embedded_jpg, NULL);
 

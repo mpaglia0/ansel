@@ -352,13 +352,6 @@ void dt_ctl_switch_mode_to_by_view(const dt_view_t *view)
   g_main_context_invoke(NULL, _dt_ctl_switch_mode_to_by_view, (gpointer)view);
 }
 
-void dt_ctl_switch_mode()
-{
-  const dt_view_t *view = dt_view_manager_get_current_view(darktable.view_manager);
-  const char *mode = (view && !strcmp(view->module_name, "lighttable")) ? "darkroom" : "lighttable";
-  dt_ctl_switch_mode_to(mode);
-}
-
 void dt_ctl_reload_view(const char *mode)
 {
   const dt_view_t *current_view = dt_view_manager_get_current_view(darktable.view_manager);
@@ -434,8 +427,7 @@ void dt_control_button_pressed(double x, double y, double pressure, int which, i
     }
   dt_pthread_mutex_unlock(&darktable.control->toast_mutex);
 
-  if(!dt_view_manager_button_pressed(darktable.view_manager, x, y, pressure, which, type, state))
-    if(type == GDK_2BUTTON_PRESS && which == 1) dt_ctl_switch_mode();
+  dt_view_manager_button_pressed(darktable.view_manager, x, y, pressure, which, type, state);
 }
 
 static gboolean _redraw_center(gpointer user_data)

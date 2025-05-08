@@ -718,7 +718,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_widget_set_name(d->text, "quickfilter-search-box");
 
   dt_accels_new_lighttable_action(_focus_search_action, self, N_("Lighttable/Actions"), N_("Search a picture"),
-                                  GDK_KEY_f, GDK_CONTROL_MASK);
+                                  GDK_KEY_f, GDK_CONTROL_MASK, _("Focuses the control"));
 
   // dumb empty flexible spacer at the end
   spacer = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
