@@ -1146,7 +1146,7 @@ static void gui_init(dt_lib_import_t *d)
   dt_accels_disconnect_on_text_input(project_dir);
   gtk_entry_set_text(GTK_ENTRY(project_dir), dt_conf_get_string("session/sub_directory_pattern"));
   gtk_widget_set_hexpand(project_dir, TRUE);
-  dt_gtkentry_setup_completion(GTK_ENTRY(project_dir), dt_gtkentry_get_default_path_compl_list());
+  dt_gtkentry_setup_completion(GTK_ENTRY(project_dir), dt_gtkentry_get_default_path_compl_list(), "$(");
   gtk_widget_set_tooltip_text(project_dir, _("Start typing `$(` to see available variables through auto-completion"));
   g_signal_connect(G_OBJECT(project_dir), "changed", G_CALLBACK(_project_dir_changed), d);
 
@@ -1154,7 +1154,7 @@ static void gui_init(dt_lib_import_t *d)
   dt_accels_disconnect_on_text_input(file);
   gtk_entry_set_text(GTK_ENTRY(file), dt_conf_get_string("session/filename_pattern"));
   gtk_widget_set_hexpand(file, TRUE);
-  dt_gtkentry_setup_completion(GTK_ENTRY(file), dt_gtkentry_get_default_path_compl_list());
+  dt_gtkentry_setup_completion(GTK_ENTRY(file), dt_gtkentry_get_default_path_compl_list(), "$(");
   g_signal_connect(G_OBJECT(file), "changed", G_CALLBACK(_filename_changed), d);
 
   /* Create the grid of import params when using duplication */

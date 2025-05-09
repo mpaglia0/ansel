@@ -176,6 +176,7 @@ void dt_accels_disconnect_active_group(dt_accels_t *accels);
  * @param accel_mods
  */
 void dt_accels_new_virtual_shortcut(dt_accels_t *accels, GtkAccelGroup *accel_group, const gchar *accel_path,
+                                    GtkWidget *widget,
                                     guint key_val, GdkModifierType accel_mods);
 
 /**

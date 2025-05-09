@@ -354,6 +354,13 @@ static void new_history_callback()
     dt_control_log(_("Creating new historys needs selected images to work"));
 }
 
+
+static void shortcuts_callback(GtkWidget *widget)
+{
+  dt_accels_window(darktable.gui->accels, GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)));
+}
+
+
 void append_edit(GtkWidget **menus, GList **lists, const dt_menus_t index)
 {
   add_sub_menu_entry(menus, lists, _("Undo"), index, NULL, undo_callback, NULL, NULL, undo_sensitive_callback, GDK_KEY_z, GDK_CONTROL_MASK);
@@ -391,5 +398,6 @@ void append_edit(GtkWidget **menus, GList **lists, const dt_menus_t index)
 
   add_menu_separator(menus[index]);
 
-  add_sub_menu_entry(menus, lists, _("Preferences"), index, NULL, preferences_callback, NULL, NULL, NULL, 0, 0);
+  add_sub_menu_entry(menus, lists, _("Preferences..."), index, NULL, preferences_callback, NULL, NULL, NULL, 0, 0);
+  add_sub_menu_entry(menus, lists, _("Keyboard shortcuts..."), index, NULL, shortcuts_callback, NULL, NULL, NULL, 0, 0);
 }

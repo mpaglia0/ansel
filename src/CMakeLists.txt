@@ -148,6 +148,7 @@ FILE(GLOB SOURCE_FILES
   "dtgtk/expander.c"
   "dtgtk/gradientslider.c"
   "dtgtk/icon.c"
+  "dtgtk/icon_cell_renderer.c"
   "dtgtk/paint.c"
   "dtgtk/preview_window.c"
   "dtgtk/resetlabel.c"

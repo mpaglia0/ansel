@@ -965,49 +965,57 @@ dt_bauhaus_t * dt_bauhaus_init()
 
   // Keys used by key-pressed event handler when the Bauhaus widget has the focus
   gchar *path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (normal step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Right, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Right, 0);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (normal step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Left, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Left, 0);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (fine step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Right, GDK_CONTROL_MASK);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Right, GDK_CONTROL_MASK);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (fine step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Left, GDK_CONTROL_MASK);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Left, GDK_CONTROL_MASK);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (coarse step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Right, GDK_SHIFT_MASK);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Right, GDK_SHIFT_MASK);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (coarse step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Left, GDK_SHIFT_MASK);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Left, GDK_SHIFT_MASK);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Toggle color-picker"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Insert, 0);
   g_free(path);
 
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Open editing mode"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Return, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Return, 0);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Exit editing mode"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Escape, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Escape, 0);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Select previous (in editing mode)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Up, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Up, 0);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Select next (in editing mode)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Down, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Down, 0);
   g_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Validate result (in editing mode)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                  path, GDK_KEY_Return, 0);
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Return, 0);
+  g_free(path);
+  path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Toggle color-picker"));
+  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+                                  path, NULL, GDK_KEY_Insert, 0);
   g_free(path);
 
   return bauhaus;
@@ -1283,7 +1291,7 @@ int dt_bauhaus_widget_get_quad_active(GtkWidget *widget)
 void dt_bauhaus_widget_press_quad(GtkWidget *widget)
 {
   struct dt_bauhaus_widget_t *w = DT_BAUHAUS_WIDGET(widget);
-  if (w->quad_toggle)
+  if(w->quad_toggle)
   {
     w->quad_paint_flags ^= CPF_ACTIVE;
   }
@@ -1296,7 +1304,9 @@ void dt_bauhaus_widget_press_quad(GtkWidget *widget)
 void dt_bauhaus_widget_release_quad(GtkWidget *widget)
 {
   struct dt_bauhaus_widget_t *w = DT_BAUHAUS_WIDGET(widget);
-  if (!w->quad_toggle)
+  gtk_widget_grab_focus(widget);
+
+  if(!w->quad_toggle)
   {
     if (w->quad_paint_flags & CPF_ACTIVE)
       w->quad_paint_flags &= ~CPF_ACTIVE;
@@ -2592,7 +2602,6 @@ static gboolean _widget_scroll(GtkWidget *widget, GdkEventScroll *event)
 static gboolean _widget_key_press(GtkWidget *widget, GdkEventKey *event)
 {
   struct dt_bauhaus_widget_t *w = DT_BAUHAUS_WIDGET(widget);
-  int delta = -1;
 
   if(w->type == DT_BAUHAUS_SLIDER)
   {
@@ -2600,16 +2609,28 @@ static gboolean _widget_key_press(GtkWidget *widget, GdkEventKey *event)
     {
       case GDK_KEY_Right:
       case GDK_KEY_KP_Right:
-        delta = 1;
+        _slider_add_step(widget, 1, event->state);
+        return TRUE;
+
       case GDK_KEY_Left:
       case GDK_KEY_KP_Left:
-        _slider_add_step(widget, delta, event->state);
+        _slider_add_step(widget, -1, event->state);
         return TRUE;
+
+      case GDK_KEY_Insert:
+      case GDK_KEY_KP_Insert:
+        if(w->quad_toggle)
+        {
+          dt_bauhaus_widget_press_quad(widget);
+          dt_bauhaus_widget_release_quad(widget);
+          return TRUE;
+        }
+
       default:
         return FALSE;
     }
   }
-  else
+  else if(w->type == DT_BAUHAUS_COMBOBOX)
   {
     switch(event->keyval)
     {
@@ -2617,6 +2638,16 @@ static gboolean _widget_key_press(GtkWidget *widget, GdkEventKey *event)
       case GDK_KEY_Return:
         dt_bauhaus_show_popup(widget);
         return TRUE;
+
+      case GDK_KEY_Insert:
+      case GDK_KEY_KP_Insert:
+        if(w->quad_toggle)
+        {
+          dt_bauhaus_widget_press_quad(widget);
+          dt_bauhaus_widget_release_quad(widget);
+          return TRUE;
+        }
+
       default:
         return FALSE;
     }
@@ -3047,7 +3078,7 @@ static gboolean dt_bauhaus_slider_button_press(GtkWidget *widget, GdkEventButton
   gtk_widget_grab_focus(widget);
   darktable.gui->has_scroll_focus = widget;
 
-  if(activated == BH_REGION_QUAD)
+  if(activated == BH_REGION_QUAD && w->quad_toggle)
   {
     dt_bauhaus_widget_press_quad(widget);
     return TRUE;

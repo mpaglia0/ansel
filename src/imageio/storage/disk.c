@@ -175,7 +175,7 @@ void gui_init(dt_imageio_module_storage_t *self)
     gtk_editable_set_position(GTK_EDITABLE(widget), strlen(dir));
   }
 
-  dt_gtkentry_setup_completion(GTK_ENTRY(widget), dt_gtkentry_get_default_path_compl_list());
+  dt_gtkentry_setup_completion(GTK_ENTRY(widget), dt_gtkentry_get_default_path_compl_list(), "$(");
 
   d->entry = GTK_ENTRY(widget);
   gtk_entry_set_width_chars(GTK_ENTRY(widget), 0);

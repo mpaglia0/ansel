@@ -197,12 +197,6 @@ static void contextual_help_callback(GtkWidget *widget)
 }
 
 
-static void shortcuts_callback(GtkWidget *widget)
-{
-  dt_accels_window(darktable.gui->accels, GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)));
-}
-
-
 void append_help(GtkWidget **menus, GList **lists, const dt_menus_t index)
 {
   add_sub_menu_entry(menus, lists, _("Online documentation"), index, NULL, open_doc_callback, NULL, NULL, NULL, 0, 0);
@@ -212,7 +206,6 @@ void append_help(GtkWidget **menus, GList **lists, const dt_menus_t index)
   add_sub_menu_entry(menus, lists, _("Join the support forum"), index, NULL, open_forum_callback, NULL, NULL, NULL, 0, 0);
   add_menu_separator(menus[index]);
   add_sub_menu_entry(menus, lists, _("Open contextual help"), index, NULL, contextual_help_callback, NULL, NULL, NULL, 0, 0);
-  add_sub_menu_entry(menus, lists, _("Keyboard shortcuts..."), index, NULL, shortcuts_callback, NULL, NULL, NULL, 0, 0);
   add_menu_separator(menus[index]);
   add_sub_menu_entry(menus, lists, _("Donate"), index, NULL, open_donate_callback, NULL, NULL, NULL, 0, 0);
   add_sub_menu_entry(menus, lists, _("About"), index, NULL, show_about_dialog, NULL, NULL, NULL, 0, 0);

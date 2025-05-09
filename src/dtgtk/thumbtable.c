@@ -1817,51 +1817,51 @@ dt_thumbtable_t *dt_thumbtable_new(dt_thumbtable_mode_t mode)
   // Keys used by key-pressed event handler when the grid has the focus
   gchar *path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Move up"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Up, 0);
+                                 path, table->grid, GDK_KEY_Up, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Move down"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Down, 0);
+                                 path, table->grid, GDK_KEY_Down, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Move left"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Left, 0);
+                                 path, table->grid, GDK_KEY_Left, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Move right"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Right, 0);
+                                 path, table->grid, GDK_KEY_Right, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Go to previous page"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Page_Up, 0);
+                                 path, table->grid, GDK_KEY_Page_Up, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Go to next page"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Page_Down, 0);
+                                 path, table->grid, GDK_KEY_Page_Down, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Go to the start"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Home, 0);
+                                 path, table->grid, GDK_KEY_Home, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Go to the end"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_End, 0);
+                                 path, table->grid, GDK_KEY_End, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Select the current thumbnail"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_space, 0);
+                                 path, table->grid, GDK_KEY_space, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Toogle the current thumbnail from selection"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_space, GDK_SHIFT_MASK);
+                                 path, table->grid, GDK_KEY_space, GDK_SHIFT_MASK);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Open the current thumbnail in darkroom"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Return, 0);
+                                 path, table->grid, GDK_KEY_Return, 0);
   g_free(path);
   path = dt_accels_build_path(_("Lighttable/Thumbtable"), _("Enable thumbnail transient alternative view"));
   dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->lighttable_accels,
-                                 path, GDK_KEY_Alt_L, 0);
+                                 path, table->grid, GDK_KEY_Alt_L, 0);
   g_free(path);
   return table;
 }

@@ -31,6 +31,8 @@
 static gboolean on_match_select(GtkEntryCompletion *widget, GtkTreeModel *model, GtkTreeIter *iter,
                                 gpointer user_data)
 {
+  const char *trigger_char = (const char *)user_data;
+  const size_t trigger_char_len = strnlen(trigger_char, -1);
 
   const gchar *varname;
   GtkEditable *e = (GtkEditable *)gtk_entry_completion_get_entry(widget);
@@ -44,15 +46,15 @@ static gboolean on_match_select(GtkEntryCompletion *widget, GtkTreeModel *model,
   gtk_tree_model_get_value(model, iter, COMPL_VARNAME, &value);
   varname = g_value_get_string(&value);
 
-  for(p = cur_pos; p - 2 > 0; p--)
+  for(p = cur_pos; p - trigger_char_len > 0; p--)
   {
-    if(strncmp(s + p - 2, "$(", 2) == 0)
+    if(strncmp(s + p - trigger_char_len, trigger_char, trigger_char_len) == 0)
     {
       break;
     }
   }
 
-  size_t text_len = strlen(varname) + 2;
+  size_t text_len = strlen(varname) + trigger_char_len;
   gchar *addtext = (gchar *)g_malloc(text_len);
   snprintf(addtext, text_len, "%s)", varname);
 
@@ -76,12 +78,14 @@ static gboolean on_match_select(GtkEntryCompletion *widget, GtkTreeModel *model,
  * @param completion Completion object to apply this function on
  * @param key        Complete string from the GtkEntry.
  * @param iter       Item in list of autocomplete database to compare key against.
- * @param user_data  Unused.
+ * @param user_data  (const char *) The character that will trigger the lookup for best match.
  */
 static gboolean on_match_func(GtkEntryCompletion *completion, const gchar *key, GtkTreeIter *iter,
                               gpointer user_data)
 {
   gboolean ret = FALSE;
+  const char *trigger_char = (const char *)user_data;
+  const size_t trigger_char_len = strnlen(trigger_char, -1);
 
   GtkEditable *e = (GtkEditable *)gtk_entry_completion_get_entry(completion);
   gint cur_pos = gtk_editable_get_position(e); /* returns 1..* */
@@ -91,9 +95,9 @@ static gboolean on_match_func(GtkEntryCompletion *completion, const gchar *key, 
   for(gint p = cur_pos; p >= 0; p--)
   {
     gchar *ss = gtk_editable_get_chars(e, p, cur_pos);
-    if(strncmp(ss, "$(", 2) == 0)
+    if(strncmp(ss, trigger_char, trigger_char_len) == 0)
     {
-      var_start = p + 2;
+      var_start = p + trigger_char_len;
       var_present = TRUE;
       g_free(ss);
       break;
@@ -141,8 +145,9 @@ static gboolean on_match_func(GtkEntryCompletion *completion, const gchar *key, 
  * @param[in] compl_list A {NULL,NULL} terminated array containing
  *                       {variable,description} for each available
  *                       completion text.
+ * @param[in] trigger_char The input character that will start the best-match lookup
  */
-void dt_gtkentry_setup_completion(GtkEntry *entry, const dt_gtkentry_completion_spec *compl_list)
+void dt_gtkentry_setup_completion(GtkEntry *entry, const dt_gtkentry_completion_spec *compl_list, const char *trigger_char)
 {
   GtkEntryCompletion *completion = gtk_entry_completion_new();
   GtkListStore *model = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
@@ -150,7 +155,7 @@ void dt_gtkentry_setup_completion(GtkEntry *entry, const dt_gtkentry_completion_
 
   gtk_entry_completion_set_text_column(completion, COMPL_DESCRIPTION);
   gtk_entry_set_completion(entry, completion);
-  g_signal_connect(G_OBJECT(completion), "match-selected", G_CALLBACK(on_match_select), NULL);
+  g_signal_connect(G_OBJECT(completion), "match-selected", G_CALLBACK(on_match_select), (gpointer)trigger_char);
 
   /* Populate the completion database. */
   for(const dt_gtkentry_completion_spec *l = compl_list; l && l->varname; l++)
@@ -159,7 +164,7 @@ void dt_gtkentry_setup_completion(GtkEntry *entry, const dt_gtkentry_completion_
     gtk_list_store_set(model, &iter, COMPL_VARNAME, l->varname, COMPL_DESCRIPTION, _(l->description), -1);
   }
   gtk_entry_completion_set_model(completion, GTK_TREE_MODEL(model));
-  gtk_entry_completion_set_match_func(completion, on_match_func, NULL, NULL);
+  gtk_entry_completion_set_match_func(completion, on_match_func, (gpointer)trigger_char, NULL);
   g_object_unref(model);
 }
 

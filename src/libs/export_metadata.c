@@ -277,7 +277,7 @@ static void _formula_edited(GtkCellRenderer *renderer, gchar *path, gchar *new_t
 static void _formula_editing_started(GtkCellRenderer *renderer, GtkCellEditable *editable,
                                      char *path, dt_lib_export_metadata_t *d)
 {
-  dt_gtkentry_setup_completion(GTK_ENTRY(editable), dt_gtkentry_get_default_path_compl_list());
+  dt_gtkentry_setup_completion(GTK_ENTRY(editable), dt_gtkentry_get_default_path_compl_list(), "$(");
 }
 
 char *dt_lib_export_metadata_configuration_dialog(char *metadata_presets, const gboolean ondisk)
