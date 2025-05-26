@@ -1972,6 +1972,8 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
   // Note: dt_dev_pixelpipe_cache_get actually init/alloc *output
   if(bypass_cache || dt_dev_pixelpipe_cache_get(darktable.pixelpipe_cache, hash, bufsize, "base buffer", pipe->type, output, out_format))
   {
+    dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE);
+
     // Grab input buffer from mipmap cache.
     // We will have to copy it here and in pixelpipe cache because it can get evicted from mipmap cache
     // anytime after we release the lock, so it would not be thread-safe to just use a reference
@@ -2002,8 +2004,11 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
 
       if(cp_width > 0 && cp_height > 0)
       {
+        dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, TRUE);
         _copy_buffer((const char *const)buf.buf, (char *const)*output, cp_height, roi_out->width,
                       pipe->iwidth, in_x, in_y, bpp * cp_width, bpp);
+        dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE);
+
         dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
         return 0;
       }
@@ -2022,7 +2027,11 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
       roi_in->width = pipe->iwidth;
       roi_in->height = pipe->iheight;
       roi_in->scale = 1.0f;
+
+      dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, TRUE);
       dt_iop_clip_and_zoom(*output, (const float *const)buf.buf, roi_out, roi_in, roi_out->width, pipe->iwidth);
+      dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE);
+
       dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
       return 0;
     }
@@ -2038,6 +2047,7 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
     }
   }
   // else found in cache.
+  dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE);
   return 0;
 }
 
@@ -2116,12 +2126,9 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
   const gboolean bypass_cache = (module) ? piece->bypass_cache : FALSE;
   if(!bypass_cache && !pipe->reentry && dt_dev_pixelpipe_cache_available(darktable.pixelpipe_cache, hash))
   {
-    dt_print(DT_DEBUG_PIPE, "[pipeline] found %s for %s pipeline in cache\n", module->op,
-             _pipe_type_to_str(pipe->type));
+    dt_print(DT_DEBUG_PIPE, "[pipeline] found %lu (%s) for %s pipeline in cache\n", hash, (module) ? module->op : "noop",
+               _pipe_type_to_str(pipe->type));
     dt_dev_pixelpipe_cache_get(darktable.pixelpipe_cache, hash, bufsize, "", pipe->type, output, out_format);
-
-    // This will become the input for the next module, lock it until next module process ends
-    dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE);
 
     // Get the pipe-global histograms. We want float32 buffers, so we take all outputs
     // except for gamma which outputs uint8 so we need to deal with that internally
@@ -2183,9 +2190,6 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
   dt_dev_pixelpipe_cache_get(darktable.pixelpipe_cache, hash, bufsize, name, pipe->type, output, out_format);
   g_free(name);
 
-  // This will become the input for the next module, lock it until next module process ends
-  dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE);
-
   dt_times_t start;
   dt_get_times(&start);
 
@@ -2243,8 +2247,8 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
 #endif
 
   // Unlock read ond write locks, decrease reference count
-  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, input_hash, FALSE);
   dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE);
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, input_hash, FALSE);
   dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, input_hash, FALSE);
 
   if(error) return 1;
@@ -2253,9 +2257,13 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
   // Get the pipe-global histograms. We want float32 buffers, so we take all outputs
   // except for gamma which outputs uint8 so we need to deal with that internally
   // Note that GPU is forced to write its output to RAM cache, so we don't use the cl_mem_output anymore.
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, hash, TRUE);
   pixelpipe_get_histogram_backbuf(pipe, dev, *output, *cl_mem_output, *out_format, roi_out, module, piece, hash, bpp);
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, hash, FALSE);
 
   KILL_SWITCH_AND_FLUSH_CACHE;
+
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, hash, TRUE);
 
   _print_perf_debug(pipe, pixelpipe_flow, piece, module, &start);
 
@@ -2273,6 +2281,8 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
     if(darktable.lib->proxy.colorpicker.picker_proxy || darktable.lib->proxy.colorpicker.live_samples)
       _pixelpipe_pick_samples(dev, module, (const float *const )input, &roi_in);
   }
+
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, hash, FALSE);
 
   KILL_SWITCH_AND_FLUSH_CACHE;
   return 0;

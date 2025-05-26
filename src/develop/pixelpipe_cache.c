@@ -47,8 +47,8 @@ size_t dt_pixel_cache_get_size(dt_pixel_cache_entry_t *cache_entry)
 void dt_pixel_cache_message(dt_pixel_cache_entry_t *cache_entry, const char *message)
 {
   if(!((darktable.unmuted & DT_DEBUG_PIPE) && (darktable.unmuted & DT_DEBUG_VERBOSE))) return;
-  dt_print(DT_DEBUG_PIPE, "[pixelpipe] cache entry %lu: %s (%lu MiB) %s\n", cache_entry->hash, cache_entry->name,
-           dt_pixel_cache_get_size(cache_entry), message);
+  dt_print(DT_DEBUG_PIPE, "[pixelpipe] cache entry %lu: %s (%lu MiB - age %i) %s\n", cache_entry->hash, cache_entry->name,
+           dt_pixel_cache_get_size(cache_entry), cache_entry->age, message);
 }
 
 // remove the cache entry with the given hash and update the cache memory usage
@@ -56,12 +56,23 @@ void dt_pixel_cache_message(dt_pixel_cache_entry_t *cache_entry, const char *mes
 void dt_dev_pixel_pipe_cache_remove(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash)
 {
   dt_pixel_cache_entry_t *cache_entry = (dt_pixel_cache_entry_t *)g_hash_table_lookup(cache->entries, GINT_TO_POINTER(hash));
-  if(cache_entry &&
-     dt_atomic_get_int(&cache_entry->refcount) <= 0 &&
-     !dt_pthread_rwlock_tryrdlock(&cache_entry->lock))
+  if(cache_entry)
   {
-    cache->current_memory -= cache_entry->size;
-    g_hash_table_remove(cache->entries, GINT_TO_POINTER(hash));
+    // Returns 1 if the lock is captured by another thread
+    // 0 if WE capture the lock, and then need to release it
+    gboolean locked = dt_pthread_rwlock_trywrlock(&cache_entry->lock);
+    if(!locked) dt_pthread_rwlock_unlock(&cache_entry->lock);
+    gboolean used = dt_atomic_get_int(&cache_entry->refcount) > 0;
+
+    if(!used && !locked)
+    {
+      cache->current_memory -= cache_entry->size;
+      g_hash_table_remove(cache->entries, GINT_TO_POINTER(hash));
+    }
+    else if(used)
+      dt_pixel_cache_message(cache_entry, "cannot remove: used");
+    else if(locked)
+      dt_pixel_cache_message(cache_entry, "cannot remove: locked");
   }
   else
   {
@@ -87,12 +98,24 @@ void _cache_get_oldest(gpointer key, gpointer value, gpointer user_data)
   // we might have more things decreasing refcount than increasing it.
   // It's no big deal though, as long as the (final output) backbuf
   // is checked for NULL and not reused if pipeline is DIRTY.
-  if(cache_entry->age > lru->max_age &&
-     dt_atomic_get_int(&cache_entry->refcount) <= 0 &&
-     !dt_pthread_rwlock_tryrdlock(&cache_entry->lock))
+  if(cache_entry->age > lru->max_age)
   {
-    lru->max_age = cache_entry->age;
-    lru->hash = cache_entry->hash;
+    // Returns 1 if the lock is captured by another thread
+    // 0 if WE capture the lock, and then need to release it
+    gboolean locked = dt_pthread_rwlock_trywrlock(&cache_entry->lock);
+    if(!locked) dt_pthread_rwlock_unlock(&cache_entry->lock);
+    gboolean used = dt_atomic_get_int(&cache_entry->refcount) > 0;
+
+    if(!locked && !used)
+    {
+      lru->max_age = cache_entry->age;
+      lru->hash = cache_entry->hash;
+      dt_pixel_cache_message(cache_entry, "candidate for deletion");
+    }
+    else if(used)
+      dt_pixel_cache_message(cache_entry, "cannot be deleted: used");
+    else if(locked)
+      dt_pixel_cache_message(cache_entry, "cannot be deleted: locked");
   }
 }
 
@@ -104,13 +127,7 @@ static void _non_thread_safe_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_
   lru->max_age = -1;
   lru->hash = 0;
   g_hash_table_foreach(cache->entries, _cache_get_oldest, lru);
-
-  // age = 0 means this is the most recently used entry, typically our output
-  // age = 1 means this is the second most recently used entry, typically our input
-  // we can't remove those without risk of segfaulting
-  if(lru->max_age > 1)
-    dt_dev_pixel_pipe_cache_remove(cache, lru->hash);
-
+  dt_dev_pixel_pipe_cache_remove(cache, lru->hash);
   free(lru);
 }
 
@@ -243,6 +260,9 @@ int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t h
     *data = cache_entry->data;
     *dsc = &cache_entry->dsc;
     dt_pixel_cache_message(cache_entry, (cache_entry_found) ? "found" : "created");
+
+    // This will become the input for the next module, lock it until next module process ends
+    dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE);
     return !cache_entry_found;
   }
   else
@@ -258,9 +278,14 @@ gboolean _for_each_remove(gpointer key, gpointer value, gpointer user_data)
 {
   dt_pixel_cache_entry_t *cache_entry = (dt_pixel_cache_entry_t *)value;
   const int id = GPOINTER_TO_INT(user_data);
-  return (cache_entry->id == id || id == -1) &&
-    dt_atomic_get_int(&cache_entry->refcount) <= 0 &&
-    !dt_pthread_rwlock_tryrdlock(&cache_entry->lock);
+
+  // Returns 1 if the lock is captured by another thread
+  // 0 if WE capture the lock, and then need to release it
+  gboolean locked = dt_pthread_rwlock_trywrlock(&cache_entry->lock);
+  if(!locked) dt_pthread_rwlock_unlock(&cache_entry->lock);
+  gboolean used = dt_atomic_get_int(&cache_entry->refcount) > 0;
+
+  return (cache_entry->id == id || id == -1) && !used && !locked;
 }
 
 void dt_dev_pixelpipe_cache_flush(dt_dev_pixelpipe_cache_t *cache, const int id)
@@ -283,7 +308,7 @@ gboolean _cache_invalidate(gpointer key, gpointer value, gpointer user_data)
   dt_pixel_cache_entry_t *cache_entry = (dt_pixel_cache_entry_t *)value;
   _cache_invalidate_t *cache_invalidate = (_cache_invalidate_t *)user_data;
 
-  if(cache_entry->data == cache_invalidate->data && !dt_pthread_rwlock_tryrdlock(&cache_entry->lock))
+  if(cache_entry->data == cache_invalidate->data)
   {
     cache_invalidate->size = cache_entry->size;
     return TRUE; // remove this entry
@@ -349,9 +374,15 @@ void dt_dev_pixelpipe_cache_lock_entry_hash(dt_dev_pixelpipe_cache_t *cache, con
   if(cache_entry)
   {
     if(lock)
+    {
       dt_atomic_add_int(&cache_entry->refcount, 1);
+      dt_pixel_cache_message(cache_entry, "ref count ++");
+    }
     else
+    {
       dt_atomic_sub_int(&cache_entry->refcount, 1);
+      dt_pixel_cache_message(cache_entry, "ref count --");
+    }
   }
   dt_pthread_mutex_unlock(&cache->lock);
 }
@@ -364,9 +395,15 @@ void dt_dev_pixelpipe_cache_wrlock_entry(dt_dev_pixelpipe_cache_t *cache, const 
   if(cache_entry)
   {
     if(lock)
+    {
       dt_pthread_rwlock_wrlock(&cache_entry->lock);
+      dt_pixel_cache_message(cache_entry, "write lock");
+    }
     else
+    {
       dt_pthread_rwlock_unlock(&cache_entry->lock);
+      dt_pixel_cache_message(cache_entry, "write unlock");
+    }
   }
   dt_pthread_mutex_unlock(&cache->lock);
 }
@@ -378,9 +415,15 @@ void dt_dev_pixelpipe_cache_rdlock_entry(dt_dev_pixelpipe_cache_t *cache, const 
   if(cache_entry)
   {
     if(lock)
+    {
       dt_pthread_rwlock_rdlock(&cache_entry->lock);
+      dt_pixel_cache_message(cache_entry, "read lock");
+    }
     else
+    {
       dt_pthread_rwlock_unlock(&cache_entry->lock);
+      dt_pixel_cache_message(cache_entry, "read unlock");
+    }
   }
   dt_pthread_mutex_unlock(&cache->lock);
 }
@@ -389,7 +432,7 @@ void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache)
 {
   if(!(darktable.unmuted & DT_DEBUG_PIPE)) return;
 
-  dt_print(DT_DEBUG_PIPE, "[pixelpipe] cache hit rate so far: %.3f%% - size: %lu MiB\n", 100. * (cache->hits) / (float)cache->queries, cache->current_memory / (1024 * 1024));
+  dt_print(DT_DEBUG_PIPE, "[pixelpipe] cache hit rate so far: %.3f%% - size: %lu MiB over %lu MiB\n", 100. * (cache->hits) / (float)cache->queries, cache->current_memory / (1024 * 1024), cache->max_memory / (1024 * 1024));
 }
 
 // clang-format off

@@ -1513,52 +1513,35 @@ void dt_configure_runtime_performance(dt_sys_resources_t *resources, gboolean in
 
   // Export pipeline at full resolution memory allocs
   gchar *resolution_str = dt_conf_get_string("raw_resolution");
-  size_t resolution = 2 * 1000 * 1000;
-  if(g_strcmp0(resolution_str, "12 Mpx") == 0) resolution = 12 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "16 Mpx") == 0) resolution = 16 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "24 Mpx") == 0) resolution = 24 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "36 Mpx") == 0) resolution = 36 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "46 Mpx") == 0) resolution = 46 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "52 Mpx") == 0) resolution = 52 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "72 Mpx") == 0) resolution = 72 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "100 Mpx") == 0) resolution = 100 * 1000 * 1000;
-  else if(g_strcmp0(resolution_str, "150 Mpx") == 0) resolution = 150 * 1000 * 1000;
+  size_t resolution = 2;
+  if(g_strcmp0(resolution_str, "12 Mpx") == 0) resolution = 12;
+  else if(g_strcmp0(resolution_str, "16 Mpx") == 0) resolution = 16;
+  else if(g_strcmp0(resolution_str, "24 Mpx") == 0) resolution = 24;
+  else if(g_strcmp0(resolution_str, "36 Mpx") == 0) resolution = 36;
+  else if(g_strcmp0(resolution_str, "46 Mpx") == 0) resolution = 46;
+  else if(g_strcmp0(resolution_str, "52 Mpx") == 0) resolution = 52;
+  else if(g_strcmp0(resolution_str, "72 Mpx") == 0) resolution = 72;
+  else if(g_strcmp0(resolution_str, "100 Mpx") == 0) resolution = 100;
+  else if(g_strcmp0(resolution_str, "150 Mpx") == 0) resolution = 150;
 
   // RGBA float32 image:
-  size_t export_pipe_size = resolution * 4 * sizeof(float);
+  resources->buffer_memory = resolution * 1000 * 1000 * 4 * sizeof(float);
 
-  // Darkroom preview pipeline at 720x450 px (fixed)
-  // only in GUI mode
-  size_t preview_pipe_size = 0;
-
-  // Darkroom main image pipeline at screen resolution-ish
-  size_t darkroom_pipe_size = 0;
-
-  if(init_gui)
-  {
-    gint width = 1920;
-    gint height = 1080;
-    gtk_window_get_size(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), &width, &height);
-
-    // High-DPI scalings
-    width *= darktable.gui->ppd;
-    height *= darktable.gui->ppd;
-
-    // The main darkroom image fits within window, meaning it's almost never fully covering it.
-    // RGBA float32 images:
-    darkroom_pipe_size = width * height * 4 * sizeof(float);
-
-    // Preview pipe is 1440x900px for raster inputs
-    preview_pipe_size = 1440 * 900 * 4 * sizeof(float);
-  }
-
-  // Get the minimal memory size needed at ANY time for ANY running pipeline
-  // to be guaranteed workable, that is 4 temporary buffers of the largest pipeline
-  resources->buffer_memory = MAX(MAX(darkroom_pipe_size, preview_pipe_size), export_pipe_size);
+  // 4 temp copies of RGBA float32 at full res
   const size_t min_pipeline_memory = 4 * resources->buffer_memory;
 
-  // Pipeline cache gets the rest
-  resources->pixelpipe_memory = resources->total_memory - resources->mipmap_memory - resources->headroom_memory - min_pipeline_memory;
+  // Pipeline cache gets the rest. Need to cast as int otherwise, negative values saturate the uint64 to MAX_UINT or something
+  resources->pixelpipe_memory = MAX((int64_t)resources->total_memory - (int64_t)resources->mipmap_memory - (int64_t)resources->headroom_memory - (int64_t)min_pipeline_memory, (int64_t)min_pipeline_memory);
+
+  if(resources->pixelpipe_memory == min_pipeline_memory)
+  {
+    fprintf(stderr,
+            "MEMORY WARNING: your pixelpipe cache allocated RAM is too small for your typical raw size.\n"
+            "MEMORY WARNING: reduce your OS/apps headroom, or your thumbnail cache size.\n"
+            "MEMORY WARNING: you may also simply need more RAM or need to reset the config key host_memory.\n"
+            "MEMORY WARNING: we shrank the thumbnails cache to the bare minimum to leave enough space for pixelpipe cache.\n");
+    resources->mipmap_memory = MAX((int64_t)resources->total_memory - (int64_t)resources->headroom_memory - 2 * (int64_t)min_pipeline_memory, (int64_t)128 * 1024 * 1024);
+  }
 
   // Print
   dt_print(DT_DEBUG_MEMORY | DT_DEBUG_CACHE, _("[MEMORY CONFIGURATION] Total system RAM: %lu MiB\n"),
@@ -1577,6 +1560,10 @@ void dt_configure_runtime_performance(dt_sys_resources_t *resources, gboolean in
            resources->buffer_memory / (1024 * 1024), resolution_str);
 
   dt_print(DT_DEBUG_MEMORY | DT_DEBUG_CACHE, _("[MEMORY CONFIGURATION] Worker threads: %i\n"), dt_worker_threads());
+
+  if(resources->total_memory < resources->headroom_memory + resources->mipmap_memory + resources->pixelpipe_memory + resources->buffer_memory)
+    dt_control_log(_("CRITICAL WARNING: Ansel will not be able to use the RAM you allocated it.\n"
+                     "Review your memory settings or add more RAM to your system."));
 
   g_free(resolution_str);
 }

@@ -593,10 +593,6 @@ void dt_view_manager_configure(dt_view_manager_t *vm, int width, int height)
     v->height = height;
     if(v->configure) v->configure(v, width, height);
   }
-
-  // We need to resize the darkroom cache lines size too.
-  // Note that it will not affect running pipelines though.
-  dt_configure_runtime_performance(&darktable.dtresources, TRUE);
 }
 
 int dt_view_manager_scrolled(dt_view_manager_t *vm, double x, double y, int up, int state)
