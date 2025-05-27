@@ -422,6 +422,7 @@ void modify_roi_out(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t 
 
 // which roi input is needed to process to this output?
 // roi_out is unchanged, full buffer in is full buffer out.
+// see ../../doc/resizing-scaling.md for details
 void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,
                    const dt_iop_roi_t *roi_out, dt_iop_roi_t *roi_in)
 {
@@ -431,8 +432,8 @@ void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *
   // need 1:1, demosaic and then sub-sample. or directly sample half-size
   roi_in->x /= roi_out->scale;
   roi_in->y /= roi_out->scale;
-  roi_in->width /= roi_out->scale;
-  roi_in->height /= roi_out->scale;
+  roi_in->width = (int)ceil((double)roi_in->width / roi_out->scale + 1. / roi_out->scale);
+  roi_in->height = (int)ceil((double)roi_in->height / roi_out->scale + 1. / roi_out->scale);
   roi_in->scale = 1.0f;
 
   dt_iop_demosaic_data_t *data = (dt_iop_demosaic_data_t *)piece->data;

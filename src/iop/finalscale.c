@@ -56,6 +56,8 @@ int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_p
   return IOP_CS_RGB;
 }
 
+
+// see ../../doc/resizing-scaling.md for details
 void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *const roi_out,
                    dt_iop_roi_t *roi_in)
 {
@@ -63,9 +65,8 @@ void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const d
 
   roi_in->x /= roi_out->scale;
   roi_in->y /= roi_out->scale;
-  // out = in * scale + .5f to more precisely round to user input in export module:
-  roi_in->width  = (roi_out->width  - .5f)/roi_out->scale;
-  roi_in->height = (roi_out->height - .5f)/roi_out->scale;
+  roi_in->width  = (int)ceil(roi_out->width / roi_out->scale);
+  roi_in->height = (int)ceil(roi_out->height / roi_out->scale);
   roi_in->scale = 1.0f;
 }
 

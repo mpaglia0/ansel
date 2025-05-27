@@ -177,8 +177,8 @@ void init_presets(dt_iop_module_so_t *self)
 
 static int compute_proper_crop(dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *const roi_in, int value)
 {
-  const float scale = roi_in->scale / piece->iscale;
-  return (int)roundf((float)value * scale);
+  const double scale = roi_in->scale / piece->iscale;
+  return (int)roundf((double)value * scale);
 }
 
 int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, float *const restrict points, size_t points_count)
@@ -188,9 +188,9 @@ int distort_transform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, floa
   // nothing to be done if parameters are set to neutral values (no top/left crop)
   if (d->x == 0 && d->y == 0) return 1;
 
-  const float scale = piece->buf_in.scale / piece->iscale;
-
-  const float x = (float)d->x * scale, y = (float)d->y * scale;
+  const double scale = piece->buf_in.scale / piece->iscale;
+  const double x = (double)d->x * scale;
+  const double y = (double)d->y * scale;
 
 #ifdef _OPENMP
 #pragma omp parallel for simd default(none) \
@@ -215,9 +215,9 @@ int distort_backtransform(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, 
   // nothing to be done if parameters are set to neutral values (no top/left crop)
   if (d->x == 0 && d->y == 0) return 1;
 
-  const float scale = piece->buf_in.scale / piece->iscale;
-
-  const float x = (float)d->x * scale, y = (float)d->y * scale;
+  const double scale = piece->buf_in.scale / piece->iscale;
+  const double x = (double)d->x * scale;
+  const double y = (double)d->y * scale;
 
 #ifdef _OPENMP
 #pragma omp parallel for simd default(none) \
@@ -241,6 +241,7 @@ void distort_mask(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *p
 }
 
 // we're not scaling here (bayer input), so just crop borders
+// see ../../doc/resizing-scaling.md for details
 void modify_roi_out(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out,
                     const dt_iop_roi_t *const roi_in)
 {
@@ -249,24 +250,25 @@ void modify_roi_out(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, dt_iop
 
   roi_out->x = roi_out->y = 0;
 
-  const int32_t x = d->x + d->width, y = d->y + d->height;
-
-  const float scale = roi_in->scale / piece->iscale;
-  roi_out->width -= (int)roundf((float)x * scale);
-  roi_out->height -= (int)roundf((float)y * scale);
+  const double x = d->x + d->width;
+  const double y = d->y + d->height;
+  const double scale = roi_in->scale / piece->iscale;
+  roi_out->width = (int)round((double)roi_out->width - x * scale - 0.5);
+  roi_out->height = (int)round((double)roi_out->height - y * scale - 0.5);
 }
 
+// see ../../doc/resizing-scaling.md for details
 void modify_roi_in(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *const roi_out,
                    dt_iop_roi_t *roi_in)
 {
   *roi_in = *roi_out;
   dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece->data;
 
-  const int32_t x = d->x + d->width, y = d->y + d->height;
-
-  const float scale = roi_in->scale / piece->iscale;
-  roi_in->width += (int)roundf((float)x * scale);
-  roi_in->height += (int)roundf((float)y * scale);
+  const double x = d->x + d->width;
+  const double y = d->y + d->height;
+  const double scale = roi_in->scale / piece->iscale;
+  roi_in->width = (int)round((double)roi_in->width + x * scale + 0.5);
+  roi_in->height = (int)round((double)roi_in->height + y * scale + 0.5);
 }
 
 void output_format(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece,
@@ -310,7 +312,8 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   // fprintf(stderr, "roi in %d %d %d %d\n", roi_in->x, roi_in->y, roi_in->width, roi_in->height);
   // fprintf(stderr, "roi out %d %d %d %d\n", roi_out->x, roi_out->y, roi_out->width, roi_out->height);
 
-  const int csx = compute_proper_crop(piece, roi_in, d->x), csy = compute_proper_crop(piece, roi_in, d->y);
+  const int csx = compute_proper_crop(piece, roi_in, d->x);
+  const int csy = compute_proper_crop(piece, roi_in, d->y);
 
   if(piece->pipe->dsc.filters && piece->dsc_in.channels == 1
      && piece->dsc_in.datatype == TYPE_UINT16)

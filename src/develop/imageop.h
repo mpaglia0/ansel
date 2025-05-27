@@ -31,7 +31,7 @@ extern "C" {
 typedef struct dt_iop_roi_t
 {
   int x, y, width, height;
-  float scale;
+  double scale;
 } dt_iop_roi_t;
 
 #ifdef __cplusplus

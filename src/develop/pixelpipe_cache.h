@@ -68,6 +68,19 @@ int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t h
                                const size_t size, const char *name, const int id,
                                void **data, struct dt_iop_buffer_dsc_t **dsc);
 
+/**
+* @brief Get an existing cache line from the cache. This is similar to `dt_dev_pixelpipe_cache_get`,
+* but it does not create a new cache line if it is not found.
+*
+* @param cache
+* @param hash
+* @param data
+* @param dsc
+* @return int TRUE if found, FALSE if not found.
+*/
+int dt_dev_pixelpipe_cache_get_existing(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash,
+                                        void **data, struct dt_iop_buffer_dsc_t **dsc);
+
 /** test availability of a cache line without destroying another, if it is not found. */
 int dt_dev_pixelpipe_cache_available(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash);
 
@@ -91,8 +104,10 @@ void dt_dev_pixelpipe_cache_invalidate(dt_dev_pixelpipe_cache_t *cache, void *da
 /** print out cache lines/hashes (debug). */
 void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache);
 
-/** remove the least used cache entry */
-void dt_dev_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache);
+/** remove the least used cache entry
+ * @return 0 on success, 1 on error
+ */
+int dt_dev_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache);
 
 /**
  * @brief Increase/Decrease the reference count on the cache line as to prevent

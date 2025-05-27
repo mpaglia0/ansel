@@ -377,9 +377,10 @@ static inline size_t _get_total_memory()
 void *dt_alloc_align(size_t size)
 {
   void *buf = dt_alloc_align_internal(size);
-  while(buf == NULL && size > 0)
+  int error = 0;
+  while(buf == NULL && size > 0 && !error)
   {
-    dt_dev_pixel_pipe_cache_remove_lru(darktable.pixelpipe_cache);
+    error = dt_dev_pixel_pipe_cache_remove_lru(darktable.pixelpipe_cache);
     buf = dt_alloc_align_internal(size);
   }
   return buf;
@@ -1527,13 +1528,14 @@ void dt_configure_runtime_performance(dt_sys_resources_t *resources, gboolean in
   // RGBA float32 image:
   resources->buffer_memory = resolution * 1000 * 1000 * 4 * sizeof(float);
 
-  // 4 temp copies of RGBA float32 at full res
-  const size_t min_pipeline_memory = 4 * resources->buffer_memory;
+  // 6 temp copies of RGBA float32 at full res
+  const size_t min_pipeline_memory = 6 * resources->buffer_memory;    // wavelets decompositions
+  const size_t min_pipecache_memory = 2.5 * resources->buffer_memory; // in, out, mask
 
   // Pipeline cache gets the rest. Need to cast as int otherwise, negative values saturate the uint64 to MAX_UINT or something
-  resources->pixelpipe_memory = MAX((int64_t)resources->total_memory - (int64_t)resources->mipmap_memory - (int64_t)resources->headroom_memory - (int64_t)min_pipeline_memory, (int64_t)min_pipeline_memory);
+  resources->pixelpipe_memory = MAX((int64_t)resources->total_memory - (int64_t)resources->mipmap_memory - (int64_t)resources->headroom_memory - (int64_t)min_pipeline_memory, (int64_t)min_pipecache_memory);
 
-  if(resources->pixelpipe_memory == min_pipeline_memory)
+  if(resources->pixelpipe_memory == min_pipecache_memory)
   {
     fprintf(stderr,
             "MEMORY WARNING: your pixelpipe cache allocated RAM is too small for your typical raw size.\n"

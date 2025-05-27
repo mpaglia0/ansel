@@ -67,7 +67,7 @@ typedef struct dt_dev_pixelpipe_iop_t
   dt_dev_histogram_stats_t histogram_stats; // stats of captured histogram
   uint32_t histogram_max[4];                // maximum levels in histogram, one per channel
 
-  float iscale;        // input actually just downscaled buffer? iscale*iwidth = actual width
+  double iscale;        // input actually just downscaled buffer? iscale*iwidth = actual width
   int iwidth, iheight; // width and height of input buffer
 
   // Hash representing the current state of the params, blend params and enabled state of this individual module
@@ -292,10 +292,10 @@ void dt_dev_pixelpipe_synch_top(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *d
 
 // process region of interest of pixels. returns 1 if pipe was altered during processing.
 int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev, int x, int y, int width,
-                             int height, float scale);
+                             int height, double scale);
 // convenience method that does not gamma-compress the image.
 int dt_dev_pixelpipe_process_no_gamma(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev, int x, int y,
-                                      int width, int height, float scale);
+                                      int width, int height, double scale);
 
 // disable given op and all that comes after it in the pipe:
 void dt_dev_pixelpipe_disable_after(dt_dev_pixelpipe_t *pipe, const char *op);
