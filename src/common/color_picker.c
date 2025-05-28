@@ -207,6 +207,9 @@ static void color_picker_helper_4ch_parallel(const dt_iop_buffer_dsc_t *const ds
   float *const restrict mmin = dt_alloc_perthread_float(4, &allocsize);
   float *const restrict mmax = dt_alloc_perthread_float(4, &allocsize);
 
+  if(mean == NULL || mmax == NULL || mmin == NULL)
+    goto error;
+
   for(int n = 0; n < allocsize * numthreads; n++)
   {
     mean[n] = 0.0f;
@@ -309,9 +312,10 @@ static void color_picker_helper_4ch_parallel(const dt_iop_buffer_dsc_t *const ds
     }
   }
 
-  dt_free_align(mmax);
-  dt_free_align(mmin);
-  dt_free_align(mean);
+error:;
+  if(mmax) dt_free_align(mmax);
+  if(mmin) dt_free_align(mmin);
+  if(mean) dt_free_align(mean);
 }
 
 static void color_picker_helper_4ch(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,
@@ -382,6 +386,9 @@ static void color_picker_helper_bayer_parallel(const dt_iop_buffer_dsc_t *const 
   float *const mmax = malloc(sizeof(float) * numthreads * 4);
   uint32_t *const cnt = malloc(sizeof(uint32_t) * numthreads * 4);
 
+  if(msum == NULL || mmin == NULL || mmax == NULL || cnt == NULL)
+    goto error;
+
   for(int n = 0; n < 4 * numthreads; n++)
   {
     msum[n] = 0.0f;
@@ -433,16 +440,17 @@ static void color_picker_helper_bayer_parallel(const dt_iop_buffer_dsc_t *const 
     }
   }
 
-  free(cnt);
-  free(mmax);
-  free(mmin);
-  free(msum);
-
   // and finally normalize data. For bayer, there is twice as much green.
   for(int c = 0; c < 4; c++)
   {
     picked_color[c] = weights[c] ? (picked_color[c] / (float)weights[c]) : 0.0f;
   }
+
+error:;
+  if(cnt) free(cnt);
+  if(mmax) free(mmax);
+  if(mmin) free(mmin);
+  if(msum) free(msum);
 }
 
 static void color_picker_helper_bayer(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,
@@ -511,6 +519,10 @@ static void color_picker_helper_xtrans_parallel(const dt_iop_buffer_dsc_t *const
   float *const mmax = malloc(sizeof(float) * numthreads * 3);
   uint32_t *const cnt = malloc(sizeof(uint32_t) * numthreads * 3);
 
+  if(mmin == NULL || msum == NULL || mmax == NULL || cnt == NULL)
+    goto error;
+
+
   for(int n = 0; n < 3 * numthreads; n++)
   {
     msum[n] = 0.0f;
@@ -562,17 +574,18 @@ static void color_picker_helper_xtrans_parallel(const dt_iop_buffer_dsc_t *const
     }
   }
 
-  free(cnt);
-  free(mmax);
-  free(mmin);
-  free(msum);
-
   // and finally normalize data.
   // X-Trans RGB weighting averages to 2:5:2 for each 3x3 cell
   for(int c = 0; c < 3; c++)
   {
     picked_color[c] /= (float)weights[c];
   }
+
+error:;
+  if(cnt) free(cnt);
+  if(mmax) free(mmax);
+  if(mmin) free(mmin);
+  if(msum) free(msum);
 }
 
 static void color_picker_helper_xtrans(const dt_iop_buffer_dsc_t *dsc, const float *const pixel,
@@ -603,7 +616,9 @@ void dt_color_picker_helper(const dt_iop_buffer_dsc_t *dsc, const float *const p
     // Denoise the image
     size_t padded_size;
     float *const restrict denoised = dt_alloc_align_float(4 * roi->width * roi->height);
-    float *const DT_ALIGNED_ARRAY tempbuf = dt_alloc_perthread_float(4 * roi->width, &padded_size); //TODO: alloc in caller
+    float *const DT_ALIGNED_ARRAY tempbuf = dt_alloc_perthread_float(4 * roi->width, &padded_size); // TODO: alloc in caller
+    if(tempbuf == NULL || denoised == NULL)
+      goto error;
 
     // blur without clipping negatives because Lab a and b channels can be legitimately negative
     blur_2D_Bspline(pixel, denoised, tempbuf, roi->width, roi->height, 1, FALSE);
@@ -617,8 +632,9 @@ void dt_color_picker_helper(const dt_iop_buffer_dsc_t *dsc, const float *const p
     else // This is a fallback, better than crashing as happens with monochromes
       color_picker_helper_4ch(dsc, denoised, roi, box, picked_color, picked_color_min, picked_color_max, picker_cst, profile);
 
-    dt_free_align(denoised);
-    dt_free_align(tempbuf);
+  error:;
+    if(denoised) dt_free_align(denoised);
+    if(tempbuf) dt_free_align(tempbuf);
   }
   else if(dsc->channels == 1u && dsc->filters != 0u && dsc->filters != 9u)
     color_picker_helper_bayer(dsc, pixel, roi, box, picked_color, picked_color_min, picked_color_max);

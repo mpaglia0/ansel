@@ -910,6 +910,8 @@ static inline gint wavelets_process(const float *const restrict in, float *const
   // allocate a one-row temporary buffer for the decomposition
   size_t padded_size;
   float *const DT_ALIGNED_ARRAY tempbuf = dt_alloc_perthread_float(4 * width, &padded_size); //TODO: alloc in caller
+  if(tempbuf == NULL) return FALSE;
+  
   for(int s = 0; s < scales; ++s)
   {
     /* fprintf(stdout, "Wavelet decompose : scale %i\n", s); */
@@ -1099,7 +1101,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   // PAUSE !
   // check that all buffers exist before processing,
   // because we use a lot of memory here.
-  if(!temp1 || !temp2 || !LF_odd || !LF_even || out_of_memory)
+  if(!mask || !temp1 || !temp2 || !LF_odd || !LF_even || out_of_memory)
   {
     dt_control_log(_("diffuse/sharpen failed to allocate memory, check your RAM settings"));
     goto error;
@@ -1362,7 +1364,7 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   // PAUSE !
   // check that all buffers exist before processing,
   // because we use a lot of memory here.
-  if(!temp1 || !temp2 || !LF_odd || !LF_even || out_of_memory)
+  if(!mask || !temp1 || !temp2 || !LF_odd || !LF_even || out_of_memory)
   {
     dt_control_log(_("diffuse/sharpen failed to allocate memory, check your RAM settings"));
     err = CL_MEM_OBJECT_ALLOCATION_FAILURE;

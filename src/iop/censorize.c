@@ -147,6 +147,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const int ch = 4;
 
   float *const restrict temp = dt_alloc_align_float((size_t)width * height * ch);
+  if(temp == NULL) return;
 
   const float sigma_1 = data->radius_1 * roi_in->scale / piece->iscale;
   const float sigma_2 = data->radius_2 * roi_in->scale / piece->iscale;

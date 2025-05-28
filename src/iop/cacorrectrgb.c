@@ -260,6 +260,10 @@ static void get_manifolds(const float* const restrict in, const size_t width, co
   float *const restrict blurred_manifold_higher = dt_alloc_align_float(width * height * 4);
   float *const restrict blurred_manifold_lower = dt_alloc_align_float(width * height * 4);
 
+  if(blurred_in == NULL || manifold_higher == NULL || manifold_lower == NULL ||
+     blurred_manifold_higher == NULL || blurred_manifold_lower == NULL)
+    goto error;
+
   dt_aligned_pixel_t max = {INFINITY, INFINITY, INFINITY, INFINITY};
   dt_aligned_pixel_t min = {-INFINITY, -INFINITY, -INFINITY, 0.0f};
   // start with a larger blur to estimate the manifolds if we refine them
@@ -484,9 +488,6 @@ dt_omp_firstprivate(in, blurred_in, manifold_lower, manifold_higher, width, heig
     dt_gaussian_free(g);
   }
 
-  dt_free_align(manifold_lower);
-  dt_free_align(manifold_higher);
-
   // store all manifolds in the same structure to make upscaling faster
 #ifdef _OPENMP
 #pragma omp parallel for simd default(none) \
@@ -501,9 +502,13 @@ dt_omp_firstprivate(manifolds, blurred_manifold_lower, blurred_manifold_higher, 
       manifolds[k * 6 + 3 + c] = blurred_manifold_lower[k * 4 + c];
     }
   }
-  dt_free_align(blurred_in);
-  dt_free_align(blurred_manifold_lower);
-  dt_free_align(blurred_manifold_higher);
+
+error:;
+  if(manifold_lower) dt_free_align(manifold_lower);
+  if(manifold_higher) dt_free_align(manifold_higher);
+  if(blurred_in) dt_free_align(blurred_in);
+  if(blurred_manifold_lower) dt_free_align(blurred_manifold_lower);
+  if(blurred_manifold_higher) dt_free_align(blurred_manifold_higher);
 }
 #undef DT_CACORRECTRGB_MAX_EV_DIFF
 
@@ -590,6 +595,8 @@ static void reduce_artifacts(const float* const restrict in,
   // in_out contains the 2 guided channels of in, and the 2 guided channels of out
   // it allows to blur all channels in one 4-channel gaussian blur instead of 2
   float *const restrict DT_ALIGNED_PIXEL in_out = dt_alloc_align_float(width * height * 4);
+  if(in_out == NULL) return;
+
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
   dt_omp_firstprivate(in, out, in_out, width, height, guide)        \
@@ -606,7 +613,9 @@ static void reduce_artifacts(const float* const restrict in,
   }
 
   float *const restrict blurred_in_out = dt_alloc_align_float(width * height * 4);
-  dt_aligned_pixel_t max = {INFINITY, INFINITY, INFINITY, INFINITY};
+  if(blurred_in_out == NULL) return;
+
+  dt_aligned_pixel_t max = { INFINITY, INFINITY, INFINITY, INFINITY };
   dt_aligned_pixel_t min = {0.0f, 0.0f, 0.0f, 0.0f};
   dt_gaussian_t *g = dt_gaussian_init(width, height, 4, max, min, sigma, 0);
   if(!g) return;
@@ -660,25 +669,29 @@ static void reduce_chromatic_aberrations(const float* const restrict in,
   const size_t ds_width = width / downsize;
   const size_t ds_height = height / downsize;
   float *const restrict ds_in = dt_alloc_align_float(ds_width * ds_height * 4);
+  float *const restrict manifolds = dt_alloc_align_float(width * height * 6);
+
   // we use only one variable for both higher and lower manifolds in order
   // to save time by doing only one bilinear interpolation instead of 2.
   float *const restrict ds_manifolds = dt_alloc_align_float(ds_width * ds_height * 6);
+  if(ds_manifolds == NULL || ds_in == NULL || manifolds == NULL)
+    goto error;
+
   // Downsample the image for speed-up
   interpolate_bilinear(in, width, height, ds_in, ds_width, ds_height, 4);
 
   // Compute manifolds
   get_manifolds(ds_in, ds_width, ds_height, sigma / downsize, sigma2 / downsize, guide, ds_manifolds, refine_manifolds);
-  dt_free_align(ds_in);
 
   // upscale manifolds
-  float *const restrict manifolds = dt_alloc_align_float(width * height * 6);
   interpolate_bilinear(ds_manifolds, ds_width, ds_height, manifolds, width, height, 6);
-  dt_free_align(ds_manifolds);
-
   apply_correction(in, manifolds, width, height, sigma, guide, mode, out);
-  dt_free_align(manifolds);
-
   reduce_artifacts(in, width, height, sigma, guide, safety, out);
+
+error:;
+  if(ds_in) dt_free_align(ds_in);
+  if(manifolds) dt_free_align(manifolds);
+  if(ds_manifolds) dt_free_align(ds_manifolds);
 }
 
 void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid, void *const ovoid,

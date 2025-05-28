@@ -527,6 +527,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
 
     size_t allocsize;
     float *const weight_buf = dt_alloc_perthread(data->n, sizeof(float), &allocsize);
+    if(weight_buf == NULL) return;
 
 #ifdef _OPENMP
 #pragma omp parallel default(none) \

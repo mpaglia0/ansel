@@ -145,9 +145,9 @@ dt_gaussian_t *dt_gaussian_init(const int width,    // width of input image
   return g;
 
 error:
-  dt_free_align(g->buf);
-  free(g->max);
-  free(g->min);
+  if(g->buf) dt_free_align(g->buf);
+  if(g->max) free(g->max);
+  if(g->min) free(g->min);
   free(g);
   return NULL;
 }
@@ -758,4 +758,3 @@ void dt_gaussian_free_cl_global(dt_gaussian_cl_global_t *g)
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

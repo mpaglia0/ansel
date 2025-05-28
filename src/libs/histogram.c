@@ -369,14 +369,17 @@ static void _paint_parade(cairo_t *cr, uint8_t *const restrict image, const int 
   for(int c = 0; c < 3; c++)
   {
     uint8_t *const restrict channel = dt_alloc_align(img_width * img_height * 4 * sizeof(uint8_t));
-    _mask_waveform(image, channel, img_width, img_height, c);
-    cairo_surface_t *background = cairo_image_surface_create_for_data(channel, CAIRO_FORMAT_ARGB32, img_width, img_height, stride);
-    const double x = (vertical) ? 0. : (double)c * img_width;
-    const double y = (vertical) ? (double)c * img_height : 0.;
-    cairo_set_source_surface(cr, background, x, y);
-    cairo_paint(cr);
-    cairo_surface_destroy(background);
-    dt_free_align(channel);
+    if(channel)
+    {
+      _mask_waveform(image, channel, img_width, img_height, c);
+      cairo_surface_t *background = cairo_image_surface_create_for_data(channel, CAIRO_FORMAT_ARGB32, img_width, img_height, stride);
+      const double x = (vertical) ? 0. : (double)c * img_width;
+      const double y = (vertical) ? (double)c * img_height : 0.;
+      cairo_set_source_surface(cr, background, x, y);
+      cairo_paint(cr);
+      cairo_surface_destroy(background);
+      dt_free_align(channel);
+    }
   }
 }
 
@@ -384,21 +387,21 @@ static void _paint_parade(cairo_t *cr, uint8_t *const restrict image, const int 
 static void _process_waveform(dt_backbuf_t *backbuf, cairo_t *cr, const int width, const int height, const gboolean vertical, const gboolean parade)
 {
   const size_t binning_size = (vertical) ? 4 * TONES * backbuf->height : 4 * TONES * backbuf->width;
-
-  // 1. Pixel binning along columns/rows, aka compute a column/row-wise histogram
   uint32_t *const restrict bins = dt_alloc_align(binning_size * sizeof(uint32_t));
+  uint8_t *const restrict image = dt_alloc_align(binning_size * sizeof(uint8_t));
+  if(image == NULL || bins == NULL) goto error;
+  
+  // 1. Pixel binning along columns/rows, aka compute a column/row-wise histogram
   _bin_pixels_waveform(backbuf->buffer, bins, backbuf->width, backbuf->height, binning_size, vertical);
 
   // 2. Paint image.
   // In a 1D histogram, pixel frequencies are shown as height (y axis) for each RGB quantum (x axis).
   // Here, we do a sort of 2D histogram : pixel frequencies are shown as opacity ("z" axis),
   // for each image column (x axis), for each RGB quantum (y axis)
-  uint8_t *const restrict image = dt_alloc_align(binning_size * sizeof(uint8_t));
   const size_t img_width = (vertical) ? TONES : backbuf->width;
   const size_t img_height = (vertical) ? backbuf->height : TONES;
   const uint32_t overall_max_hist = _find_max_histogram(bins, binning_size);
   _create_waveform_image(bins, image, overall_max_hist, img_width, img_height);
-  dt_free_align(bins);
 
   // 3. Send everything to GUI buffer.
   if(overall_max_hist > 0)
@@ -421,7 +424,9 @@ static void _process_waveform(dt_backbuf_t *backbuf, cairo_t *cr, const int widt
     cairo_restore(cr);
   }
 
-  dt_free_align(image);
+error:;
+  if(bins) dt_free_align(bins);
+  if(image) dt_free_align(image);
 }
 
 static float _Luv_to_vectorscope_coord_zoom(const float value, const float zoom)
@@ -526,12 +531,14 @@ static void _process_vectorscope(dt_backbuf_t *backbuf, cairo_t *cr, const int w
   dt_iop_order_iccprofile_info_t *profile = darktable.develop->preview_pipe->output_profile_info;
   if(profile == NULL) return;
 
-  // 1. Process data
   uint32_t *const restrict vectorscope = dt_alloc_align(HISTOGRAM_BINS * HISTOGRAM_BINS * sizeof(uint32_t));
+  uint8_t *const restrict image = dt_alloc_align(4 * HISTOGRAM_BINS * HISTOGRAM_BINS * sizeof(uint8_t));
+  if(vectorscope == NULL || image == NULL) goto error;
+
+  // 1. Process data
   _bin_pixels_vectorscope(backbuf->buffer, vectorscope, profile, backbuf->width * backbuf->height, zoom);
 
   const uint32_t max_hist = _find_max_histogram(vectorscope, HISTOGRAM_BINS * HISTOGRAM_BINS);
-  uint8_t *const restrict image = dt_alloc_align(4 * HISTOGRAM_BINS * HISTOGRAM_BINS * sizeof(uint8_t));
   _create_vectorscope_image(vectorscope, image, profile, max_hist, zoom);
 
   // 2. Draw
@@ -675,8 +682,9 @@ static void _process_vectorscope(dt_backbuf_t *backbuf, cairo_t *cr, const int w
     cairo_stroke(cr);
   }
 
-  dt_free_align(image);
-  dt_free_align(vectorscope);
+error:;
+  if(image) dt_free_align(image);
+  if(vectorscope) dt_free_align(vectorscope);
 }
 
 

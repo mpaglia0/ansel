@@ -2067,7 +2067,7 @@ static int process_nlmeans_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop
       err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_denoiseprofile_accu, sizes);
       if(err != CL_SUCCESS) goto error;
 
-      dt_opencl_finish_sync_pipe(devid, piece->pipe->type);
+      dt_opencl_finish(devid);
 
       // indirectly give gpu some air to breathe (and to do display related stuff)
       dt_iop_nap(dt_opencl_micro_nap(devid));
@@ -2579,7 +2579,7 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_io
     }
   }
 
-  dt_opencl_finish_sync_pipe(devid, piece->pipe->type);
+  dt_opencl_finish(devid);
 
   dt_opencl_release_mem_object(dev_r);
   dt_opencl_release_mem_object(dev_m);

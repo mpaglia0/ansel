@@ -1499,6 +1499,8 @@ static inline gint wavelets_process(const float *const restrict in, float
   // allocate a one-row temporary buffer for the decomposition
   size_t padded_size;
   float *const DT_ALIGNED_ARRAY tempbuf = dt_alloc_perthread_float(4 * width, &padded_size); //TODO: alloc in caller
+  if(tempbuf == NULL) return FALSE;
+
   for(int s = 0; s < scales; ++s)
   {
     //fprintf(stderr, "CPU Wavelet decompose : scale %i\n", s);
@@ -1591,6 +1593,12 @@ static void process_laplacian_bayer(struct dt_iop_module_t *self, dt_dev_pixelpi
   float *restrict ds_interpolated = dt_alloc_align_float(ds_size * 4);
   float *restrict ds_clipping_mask = dt_alloc_align_float(ds_size * 4);
 
+  if(!interpolated || !clipping_mask || !LF_odd || !LF_even || !temp || !HF || !ds_interpolated || !ds_clipping_mask)
+  {
+    fprintf(stderr, "[highlights] guided laplician : failed to allocate memory\n");
+    goto error;
+  }
+
   const float *const restrict input = (const float *const restrict)ivoid;
   float *const restrict output = (float *const restrict)ovoid;
 
@@ -1619,14 +1627,15 @@ static void process_laplacian_bayer(struct dt_iop_module_t *self, dt_dev_pixelpi
   dump_PFM("/tmp/clipping_mask.pfm", clipping_mask, width, height);
 #endif
 
-  dt_free_align(interpolated);
-  dt_free_align(clipping_mask);
-  dt_free_align(temp);
-  dt_free_align(LF_even);
-  dt_free_align(LF_odd);
-  dt_free_align(HF);
-  dt_free_align(ds_interpolated);
-  dt_free_align(ds_clipping_mask);
+error:;
+  if(interpolated) dt_free_align(interpolated);
+  if(clipping_mask) dt_free_align(clipping_mask);
+  if(temp) dt_free_align(temp);
+  if(LF_even) dt_free_align(LF_even);
+  if(LF_odd) dt_free_align(LF_odd);
+  if(HF) dt_free_align(HF);
+  if(ds_interpolated) dt_free_align(ds_interpolated);
+  if(ds_clipping_mask) dt_free_align(ds_clipping_mask);
 }
 
 #ifdef HAVE_OPENCL
@@ -1795,6 +1804,13 @@ static cl_int process_laplacian_bayer_cl(struct dt_iop_module_t *self, dt_dev_pi
   cl_mem clips_cl = dt_opencl_copy_host_to_device_constant(devid, 4 * sizeof(float), (float*)clips);
   cl_mem wb_cl = dt_opencl_copy_host_to_device_constant(devid, 4 * sizeof(float), (float*)wb);
 
+  if(!interpolated || !clipping_mask || !LF_odd || !LF_even || !temp || !HF || !ds_interpolated
+     || !ds_clipping_mask || !clips_cl || !wb_cl)
+  {
+    fprintf(stderr, "[highlights] guided laplician : failed to allocate memory\n");
+    goto error;
+  }
+
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 0, sizeof(cl_mem), (void *)&dev_in);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 1, sizeof(cl_mem), (void *)&interpolated);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 2, sizeof(cl_mem), (void *)&temp);
@@ -1879,8 +1895,8 @@ static cl_int process_laplacian_bayer_cl(struct dt_iop_module_t *self, dt_dev_pi
   if(LF_even) dt_opencl_release_mem_object(LF_even);
   if(LF_odd) dt_opencl_release_mem_object(LF_odd);
   if(HF) dt_opencl_release_mem_object(HF);
-  dt_opencl_release_mem_object(ds_clipping_mask);
-  dt_opencl_release_mem_object(ds_interpolated);
+  if(ds_clipping_mask) dt_opencl_release_mem_object(ds_clipping_mask);
+  if(ds_interpolated) dt_opencl_release_mem_object(ds_interpolated);
   return err;
 
 error:
@@ -1891,6 +1907,8 @@ error:
   if(LF_even) dt_opencl_release_mem_object(LF_even);
   if(LF_odd) dt_opencl_release_mem_object(LF_odd);
   if(HF) dt_opencl_release_mem_object(HF);
+  if(ds_clipping_mask) dt_opencl_release_mem_object(ds_clipping_mask);
+  if(ds_interpolated) dt_opencl_release_mem_object(ds_interpolated);
 
   dt_print(DT_DEBUG_OPENCL, "[opencl_highlights] couldn't enqueue kernel! %i\n", err);
   return err;

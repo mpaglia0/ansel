@@ -1525,6 +1525,9 @@ void dt_configure_runtime_performance(dt_sys_resources_t *resources, gboolean in
   else if(g_strcmp0(resolution_str, "100 Mpx") == 0) resolution = 100;
   else if(g_strcmp0(resolution_str, "150 Mpx") == 0) resolution = 150;
 
+  // RAW and half-RAW buffers sizes
+  const size_t raws = darktable.num_openmp_threads * (1440 * 900 + resolution * 1000 * 1000) * sizeof(float);
+
   // RGBA float32 image:
   resources->buffer_memory = resolution * 1000 * 1000 * 4 * sizeof(float);
 
@@ -1533,7 +1536,7 @@ void dt_configure_runtime_performance(dt_sys_resources_t *resources, gboolean in
   const size_t min_pipecache_memory = 2.5 * resources->buffer_memory; // in, out, mask
 
   // Pipeline cache gets the rest. Need to cast as int otherwise, negative values saturate the uint64 to MAX_UINT or something
-  resources->pixelpipe_memory = MAX((int64_t)resources->total_memory - (int64_t)resources->mipmap_memory - (int64_t)resources->headroom_memory - (int64_t)min_pipeline_memory, (int64_t)min_pipecache_memory);
+  resources->pixelpipe_memory = MAX((int64_t)resources->total_memory - (int64_t)resources->mipmap_memory - (int64_t)resources->headroom_memory - (int64_t)min_pipeline_memory - (int64_t)raws, (int64_t)min_pipecache_memory);
 
   if(resources->pixelpipe_memory == min_pipecache_memory)
   {

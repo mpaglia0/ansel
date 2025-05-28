@@ -887,6 +887,7 @@ static inline void auto_detect_WB(const float *const restrict in, dt_illuminant_
   */
 
    float *const restrict temp = dt_alloc_sse_ps(width * height * ch);
+   if(!temp) return;
 
    // Convert RGB to xy
 #ifdef _OPENMP
@@ -1506,7 +1507,8 @@ void extract_color_checker(const float *const restrict in, float *const restrict
                            const dt_adaptation_t kind)
 {
   float *const restrict patches = dt_alloc_sse_ps(g->checker->patches * 4);
-
+  if(patches == NULL) return;
+  
   dt_simd_memcpy(in, out, (size_t)roi_in->width * roi_in->height * 4);
 
   extraction_result_t extraction_result = _extract_patches(out, roi_in, g, RGB_to_XYZ, XYZ_to_CAM,
@@ -1787,6 +1789,7 @@ void validate_color_checker(const float *const restrict in,
                             const dt_colormatrix_t RGB_to_XYZ, const dt_colormatrix_t XYZ_to_RGB, const dt_colormatrix_t XYZ_to_CAM)
 {
   float *const restrict patches = dt_alloc_sse_ps(4 * g->checker->patches);
+  if(patches == NULL) return;
   extraction_result_t extraction_result = _extract_patches(in, roi_in, g, RGB_to_XYZ, XYZ_to_CAM, patches, FALSE);
 
   // Compute the delta E

@@ -120,7 +120,10 @@ static inline int solve(double *As, double *w, double *v, const double *b, doubl
   dsvd(As, wd, s + 1, S, w, v); // As is wd x s+1 but row stride S.
   if(w[s] < 1e-3)               // if the smallest singular value becomes too small, we're done
     return 1;
+    
   double *tmp = malloc(sizeof(double) * S);
+  if(tmp == NULL) return 1;
+
   for(int i = 0; i <= s; i++) // compute tmp = u^t * b
   {
     tmp[i] = 0.0;
@@ -446,4 +449,3 @@ float thinplate_color_pos(float L, float a, float b)
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

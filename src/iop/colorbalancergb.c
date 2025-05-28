@@ -1173,6 +1173,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   if(!d->lut_inited)
   {
     float *const restrict LUT_saturation = dt_alloc_align_float(LUT_ELEM);
+    if(LUT_saturation == NULL) return;
 
     // init the LUT between -pi and pi by increments of 1°
     for(size_t k = 0; k < LUT_ELEM; k++) LUT_saturation[k] = 0.f;
@@ -1453,21 +1454,17 @@ static void mask_callback(GtkWidget *togglebutton, dt_iop_module_t *self)
   dt_iop_colorbalancergb_gui_data_t *g = (dt_iop_colorbalancergb_gui_data_t *)self->gui_data;
 
   // if blend module is displaying mask do not display it here
-  if(self->request_mask_display)
-  {
-    dt_control_log(_("cannot display masks when the blending mask is displayed"));
-    g->mask_display = 0;
-  }
-  else
-  {
-    g->mask_display = dt_bauhaus_widget_get_quad_active(GTK_WIDGET(togglebutton));
-  }
+  if(self->request_mask_display != DT_DEV_PIXELPIPE_DISPLAY_NONE)
+    self->request_mask_display = DT_DEV_PIXELPIPE_DISPLAY_NONE;
+
+  g->mask_display = !g->mask_display;
 
   if(g->mask_display)
   {
     if(togglebutton == g->shadows_weight) g->mask_type = MASK_SHADOWS;
     if(togglebutton == g->mask_grey_fulcrum) g->mask_type = MASK_MIDTONES;
     if(togglebutton == g->highlights_weight) g->mask_type = MASK_HIGHLIGHTS;
+    self->request_mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
   }
   else
   {

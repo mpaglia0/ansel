@@ -320,24 +320,28 @@ static GdkPixbuf *_import_get_thumbnail(const gchar *filename, const int width, 
 
     // Convert RGBa to RGB because GdkPixbuf doesn't do RGBa
     uint8_t *rgb = dt_alloc_align(th_width * th_height * 3 * sizeof(uint8_t));
-    for(size_t k = 0; k < th_width * th_height; k++)
+    if(rgb)
     {
-      rgb[k * 3] = buffer[k * 4];
-      rgb[k * 3 + 1] = buffer[k * 4 + 1];
-      rgb[k * 3 + 2] = buffer[k * 4 + 2];
+      for(size_t k = 0; k < th_width * th_height; k++)
+      {
+        rgb[k * 3] = buffer[k * 4];
+        rgb[k * 3 + 1] = buffer[k * 4 + 1];
+        rgb[k * 3 + 2] = buffer[k * 4 + 2];
+      }
+
+      // Build the actual pixbuf object
+      GdkPixbuf *tmp = gdk_pixbuf_new_from_data(rgb, 0, FALSE, 8, th_width, th_height,
+                                                th_width * 3 * sizeof(uint8_t), NULL, NULL);
+      if(tmp)
+      {
+        pixbuf = gdk_pixbuf_scale_simple(tmp, roundf((float)width / ratio), height, GDK_INTERP_HYPER);
+        g_object_unref(tmp);
+      }
     }
-    dt_free_align(buffer);
 
-    // Build the actual pixbuf object
-    GdkPixbuf *tmp = gdk_pixbuf_new_from_data(rgb, 0, FALSE, 8, th_width, th_height,
-                                              th_width * 3 * sizeof(uint8_t), NULL, NULL);
-
-    if(tmp)
-      pixbuf = gdk_pixbuf_scale_simple(tmp, roundf((float)width / ratio), height, GDK_INTERP_HYPER);
-
-    dt_free_align(rgb);
+    if(buffer) dt_free_align(buffer);
+    if(rgb) dt_free_align(rgb);
     g_free(mime_type);
-    g_object_unref(tmp);
   }
 
   // Fallback to whatever Gtk found in the file

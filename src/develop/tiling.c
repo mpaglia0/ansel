@@ -1499,7 +1499,7 @@ static int _default_process_tiling_cl_ptp(struct dt_iop_module_t *self, struct d
       output = NULL;
 
       /* block until opencl queue has finished to free all used event handlers */
-      dt_opencl_finish_sync_pipe(devid, piece->pipe->type);
+      dt_opencl_finish(devid);
     }
 
   /* copy back final processed_maximum */
@@ -1939,7 +1939,7 @@ static int _default_process_tiling_cl_roi(struct dt_iop_module_t *self, struct d
       output = NULL;
 
       /* block until opencl queue has finished to free all used event handlers */
-      dt_opencl_finish_sync_pipe(devid, piece->pipe->type);
+      dt_opencl_finish(devid);
     }
 
   /* copy back final processed_maximum */

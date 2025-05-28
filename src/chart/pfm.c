@@ -133,6 +133,8 @@ void write_pfm(const char *filename, int width, int height, float *data)
     // INFO: per-line fwrite call seems to perform best. LebedevRI, 18.04.2014
     (void)fprintf(f, "PF\n%d %d\n-1.0\n", width, height);
     void *buf_line = dt_alloc_align_float((size_t)3 * width);
+    if(buf_line == NULL) goto error;
+    
     for(int j = 0; j < height; j++)
     {
       // NOTE: pfm has rows in reverse order
@@ -146,7 +148,9 @@ void write_pfm(const char *filename, int width, int height, float *data)
       int cnt = fwrite(buf_line, sizeof(float) * 3, width, f);
       if(cnt != width) break;
     }
-    dt_free_align(buf_line);
+
+  error:;
+    if(buf_line) dt_free_align(buf_line);
     buf_line = NULL;
     fclose(f);
   }
@@ -157,4 +161,3 @@ void write_pfm(const char *filename, int width, int height, float *data)
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

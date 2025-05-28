@@ -296,7 +296,7 @@ static inline void build_gui_kernel(unsigned char *const buffer, const size_t wi
 {
   float *const restrict kernel_1 = dt_alloc_align_float(width * height);
   float *const restrict kernel_2 = dt_alloc_align_float(width * height);
-
+  if(kernel_1 == NULL || kernel_2 == NULL) goto error;
 
   if(p->type == DT_BLUR_LENS)
   {
@@ -328,8 +328,9 @@ static inline void build_gui_kernel(unsigned char *const buffer, const size_t wi
     buffer[k * 4] = buffer[k * 4 + 1] = buffer[k * 4 + 2] = buffer[k * 4 + 3] = roundf(255.f * kernel_2[k]);
   }
 
-  dt_free_align(kernel_1);
-  dt_free_align(kernel_2);
+error:;
+  if(kernel_1) dt_free_align(kernel_1);
+  if(kernel_2) dt_free_align(kernel_2);
 }
 
 
@@ -367,6 +368,7 @@ static inline void build_pixel_kernel(float *const buffer, const size_t width, c
                                       dt_iop_blurs_params_t *p)
 {
   float *const restrict kernel_1 = dt_alloc_align_float(width * height);
+  if(kernel_1 == NULL) return;
 
   if(p->type == DT_BLUR_LENS)
   {
@@ -565,6 +567,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
   const size_t kernel_width = 2 * radius + 1;
 
   float *const restrict kernel = dt_alloc_align_float(kernel_width * kernel_width);
+  if(kernel == NULL) return;
   build_pixel_kernel(kernel, kernel_width, kernel_width, p);
 
 #ifdef _OPENMP
@@ -646,6 +649,7 @@ int process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_m
   const size_t kernel_width = 2 * radius + 1;
 
   float *const restrict kernel = dt_alloc_align_float(kernel_width * kernel_width);
+  if(kernel == NULL) return FALSE;
   build_pixel_kernel(kernel, kernel_width, kernel_width, p);
 
   cl_mem kernel_cl = dt_opencl_copy_host_to_device(devid, kernel, kernel_width, kernel_width, sizeof(float));

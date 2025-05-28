@@ -32,6 +32,14 @@
 #include <gtk/gtk.h>
 #include <stdlib.h>
 
+/**
+ * @brief WARNING: mem allocs are not protected against out-of-memory (NULL buffers)
+ * because the code is a mess, this module is deprecated and fuck life.
+ * If your system runs out of memory, this module will crash.
+ * Your eyes are made for crying, use them.
+ * With love, Aurélien, 2025.
+ */
+
 // this is the version of the modules parameters,
 // and includes version information about compile-time dt
 DT_MODULE_INTROSPECTION(2, dt_iop_cacorrect_params_t)

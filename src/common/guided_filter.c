@@ -71,6 +71,7 @@ typedef struct color_image
 } color_image;
 
 // allocate space for n-component image of size width x height
+// FIXME: the code consuming color_image doesn't check if we actually allocated the buffer
 static inline color_image new_color_image(int width, int height, int ch)
 {
   return (color_image){ dt_alloc_align_float((size_t)width * height * ch), width, height, ch };

@@ -419,6 +419,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
 
       size_t padded_bufsize;
       float *const buf = dt_alloc_perthread_float(bufsize, &padded_bufsize);
+      if(buf == NULL) return;
 
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
@@ -500,6 +501,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     // acquire temp memory for image buffer
     const size_t bufsize = (size_t)roi_in->width * roi_in->height * ch * sizeof(float);
     void *buf = dt_alloc_align(bufsize);
+    if(buf == NULL) return;
     memcpy(buf, ivoid, bufsize);
 
     if(modflags & LF_MODIFY_VIGNETTING)
@@ -974,6 +976,7 @@ void distort_mask(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *p
   const size_t bufsize = (size_t)roi_out->width * 2 * 3;
   size_t padded_bufsize;
   float *const buf = dt_alloc_perthread_float(bufsize, &padded_bufsize);
+  if(buf == NULL) return;
 
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
@@ -1042,6 +1045,7 @@ void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *
     const size_t nbpoints = 2 * awidth + 2 * aheight;
 
     float *const buf = (float *)dt_alloc_align(sizeof(float) * nbpoints * 2 * 3);
+    if(buf == NULL) return;
 
 #ifdef _OPENMP
 #pragma omp parallel default(none) \

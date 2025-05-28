@@ -174,6 +174,7 @@ static inline void variance_analyse(const float *const restrict guide, // I
   * input is array of struct : { { guide , mask, guide * guide, guide * mask } }
   */
   float *const restrict input = dt_alloc_align_float(Ndimch);
+  if(input == NULL) goto error;
 
   // Pre-multiply guide and mask and pack all inputs into an array of 4x1 SIMD struct
 #ifdef _OPENMP
@@ -208,7 +209,8 @@ static inline void variance_analyse(const float *const restrict guide, // I
     ab[2*idx+1] = b;
   }
 
-  if(input != NULL) dt_free_align(input);
+error:;
+  if(input) dt_free_align(input);
 }
 
 

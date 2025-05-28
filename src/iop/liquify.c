@@ -833,6 +833,7 @@ static float complex point_at_arc_length(const float complex points[], const int
 static float *build_lookup_table(const int distance, const float control1, const float control2)
 {
   float complex *clookup = dt_alloc_align(sizeof(float complex) * (distance + 2));
+  if(clookup == NULL) return NULL;
 
   interpolate_cubic_bezier(I, control1 + I, control2, 1.0, clookup, distance + 2);
 

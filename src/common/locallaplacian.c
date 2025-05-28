@@ -284,6 +284,7 @@ static inline float *ll_pad_input(
   *wd2 = 2*max_supp + wd;
   *ht2 = 2*max_supp + ht;
   float *const out = dt_alloc_align_float((size_t) *wd2 * *ht2);
+  if(out == NULL) return NULL;
 
   if(b && b->mode == 2)
   { // pad by preview buffer
@@ -589,12 +590,18 @@ void local_laplacian_internal(
 
   // allocate pyramid pointers for padded input
   for(int l=1;l<=last_level;l++)
+  {
     padded[l] = dt_alloc_align_float((size_t)dl(w,l) * dl(h,l));
+    if(padded[l] == NULL) goto error;
+  }
 
   // allocate pyramid pointers for output
   float *output[max_levels] = {0};
   for(int l=0;l<=last_level;l++)
+  {
     output[l] = dt_alloc_align_float((size_t)dl(w,l) * dl(h,l));
+    if(output[l] == NULL) goto error;
+  }
 
   // create gauss pyramid of padded input, write coarse directly to output
 #if defined(__SSE2__)
@@ -756,12 +763,17 @@ void local_laplacian_internal(
     b->num_levels = num_levels;
     for(int l=0;l<num_levels;l++) b->output[l] = output[l];
   }
+
+error:;
   // free all buffers except the ones passed out for preview rendering
   for(int l=0;l<max_levels;l++)
   {
-    if(!b || b->mode != 1 || l)   dt_free_align(padded[l]);
-    if(!b || b->mode != 1)        dt_free_align(output[l]);
-    for(int k=0; k<num_gamma;k++) dt_free_align(buf[k][l]);
+    if(!b || b->mode != 1 || l)
+      if(padded[l]) dt_free_align(padded[l]);
+    if(!b || b->mode != 1)
+      if(output[l]) dt_free_align(output[l]);
+    for(int k=0; k<num_gamma;k++)
+      if(buf[k][l]) dt_free_align(buf[k][l]);
   }
 }
 
@@ -797,4 +809,3 @@ size_t local_laplacian_singlebuffer_size(const int width,     // width of input 
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

@@ -522,6 +522,7 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
       roo.height = roi_in->height;
       roo.scale = 1.0f;
       tmp = (float *)dt_alloc_align_float((size_t)4 * roo.width * roo.height);
+      if(tmp == NULL) return;
     }
     if(info) dt_get_times(&start_time);
 
@@ -552,25 +553,31 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
 
       if(!(img->flags & DT_IMAGE_4BAYER) && data->green_eq != DT_IOP_GREEN_EQ_NO)
       {
-        in = (float *)dt_alloc_align_float((size_t)roi_in->height * roi_in->width);
-        switch(data->green_eq)
+        in = dt_alloc_align_float((size_t)roi_in->height * roi_in->width);
+        if(in)
         {
-          case DT_IOP_GREEN_EQ_FULL:
-            green_equilibration_favg(in, pixels, roi_in->width, roi_in->height, piece->pipe->dsc.filters,
-                                     roi_in->x, roi_in->y);
-            break;
-          case DT_IOP_GREEN_EQ_LOCAL:
-            green_equilibration_lavg(in, pixels, roi_in->width, roi_in->height, piece->pipe->dsc.filters,
-                                     roi_in->x, roi_in->y, threshold);
-            break;
-          case DT_IOP_GREEN_EQ_BOTH:
-            aux = dt_alloc_align_float((size_t)roi_in->height * roi_in->width);
-            green_equilibration_favg(aux, pixels, roi_in->width, roi_in->height, piece->pipe->dsc.filters,
-                                     roi_in->x, roi_in->y);
-            green_equilibration_lavg(in, aux, roi_in->width, roi_in->height, piece->pipe->dsc.filters, roi_in->x,
-                                     roi_in->y, threshold);
-            dt_free_align(aux);
-            break;
+          switch(data->green_eq)
+          {
+            case DT_IOP_GREEN_EQ_FULL:
+              green_equilibration_favg(in, pixels, roi_in->width, roi_in->height, piece->pipe->dsc.filters,
+                                      roi_in->x, roi_in->y);
+              break;
+            case DT_IOP_GREEN_EQ_LOCAL:
+              green_equilibration_lavg(in, pixels, roi_in->width, roi_in->height, piece->pipe->dsc.filters,
+                                      roi_in->x, roi_in->y, threshold);
+              break;
+            case DT_IOP_GREEN_EQ_BOTH:
+              aux = dt_alloc_align_float((size_t)roi_in->height * roi_in->width);
+              if(aux)
+              {
+                green_equilibration_favg(aux, pixels, roi_in->width, roi_in->height, piece->pipe->dsc.filters,
+                                        roi_in->x, roi_in->y);
+                green_equilibration_lavg(in, aux, roi_in->width, roi_in->height, piece->pipe->dsc.filters, roi_in->x,
+                                        roi_in->y, threshold);
+                dt_free_align(aux);
+              }
+              break;
+          }
         }
       }
 

@@ -75,6 +75,8 @@ static inline void eigf_variance_analysis(const float *const restrict guide, // 
   // We also use gaussian blurs instead of the square blurs of the guided filter
   const size_t Ndim = width * height;
   float *const restrict in = dt_alloc_sse_ps(Ndim * 4);
+  dt_gaussian_t *g = NULL;
+  if(in == NULL) goto error;
 
   float ming = 10000000.0f;
   float maxg = 0.0f;
@@ -113,10 +115,9 @@ dt_omp_firstprivate(guide, mask, in, Ndim) \
 
   dt_aligned_pixel_t max = {maxg, maxg2, maxm, maxmg};
   dt_aligned_pixel_t min = {ming, ming2, minm, minmg};
-  dt_gaussian_t *g = dt_gaussian_init(width, height, 4, max, min, sigma, 0);
-  if(!g) return;
+  g = dt_gaussian_init(width, height, 4, max, min, sigma, 0);
+  if(g == NULL) goto error;
   dt_gaussian_blur_4c(g, in, out);
-  dt_gaussian_free(g);
 
 #ifdef _OPENMP
 #pragma omp parallel for simd default(none) \
@@ -129,7 +130,9 @@ dt_omp_firstprivate(out, Ndim) \
     out[4 * k + 3] -= out[4 * k] * out[4 * k + 2];
   }
 
-  dt_free_align(in);
+error:;
+  if(g) dt_gaussian_free(g);
+  if(in) dt_free_align(in);
 }
 
 // same function as above, but specialized for the case where guide == mask
@@ -142,6 +145,8 @@ static inline void eigf_variance_analysis_no_mask(const float *const restrict gu
   // We also use gaussian blurs instead of the square blurs of the guided filter
   const size_t Ndim = width * height;
   float *const restrict in = dt_alloc_sse_ps(Ndim * 2);
+  dt_gaussian_t *g = NULL;
+  if(in == NULL) goto error;
 
   float ming = 10000000.0f;
   float maxg = 0.0f;
@@ -168,10 +173,9 @@ dt_omp_firstprivate(guide, in, Ndim) \
 
   float max[2] = {maxg, maxg2};
   float min[2] = {ming, ming2};
-  dt_gaussian_t *g = dt_gaussian_init(width, height, 2, max, min, sigma, 0);
-  if(!g) return;
+  g = dt_gaussian_init(width, height, 2, max, min, sigma, 0);
+  if(!g) goto error;
   dt_gaussian_blur(g, in, out);
-  dt_gaussian_free(g);
 
 #ifdef _OPENMP
 #pragma omp parallel for simd default(none) \
@@ -184,7 +188,9 @@ dt_omp_firstprivate(out, Ndim) \
     out[2 * k + 1] -= avg * avg;
   }
 
-  dt_free_align(in);
+error:;
+  if(g) dt_gaussian_free(g);
+  if(in) dt_free_align(in);
 }
 
 static inline void eigf_blending(float *const restrict image, const float *const restrict mask,
@@ -281,7 +287,7 @@ static inline void fast_eigf_surface_blur(float *const restrict image,
   float *const restrict ds_av = dt_alloc_sse_ps(dt_round_size_sse(num_elem_ds * 4));
   float *const restrict av = dt_alloc_sse_ps(dt_round_size_sse(num_elem * 4));
 
-  if(!ds_image || !ds_mask || !ds_av || !av)
+  if(!ds_image || !ds_mask || !ds_av || !av || !mask)
   {
     dt_control_log(_("fast exposure independent guided filter failed to allocate memory, check your RAM settings"));
     goto clean;

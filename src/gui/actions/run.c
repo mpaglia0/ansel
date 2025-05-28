@@ -43,6 +43,10 @@ static int32_t preload_image_cache(dt_job_t *job)
   {
     const int32_t imgid = GPOINTER_TO_INT(img->data);
 
+    // Note : we generate from large scale to small,
+    // because the mipmap code has a mechanism that downscales
+    // higher resolution thumbnails if present, rather
+    // than recomputing a pipe from scratch.
     for(int k = DT_MIPMAP_F - 1; k >= DT_MIPMAP_0 && dt_control_job_get_state(job) != DT_JOB_STATE_CANCELLED; k--)
     {
       char filename[PATH_MAX] = { 0 };
@@ -59,6 +63,9 @@ static int32_t preload_image_cache(dt_job_t *job)
       i++;
       dt_control_job_set_progress(job, (float)i / imgs);
     }
+
+    // and immediately write thumbs to disc and remove from mipmap cache.
+    dt_mimap_cache_evict(darktable.mipmap_cache, imgid);
 
     dt_history_hash_set_mipmap(imgid);
     img = g_list_next(img);

@@ -358,10 +358,7 @@ void dt_mipmap_cache_update_buffer_addresses(dt_cache_entry_t *entry, struct dt_
 void *dt_mipmap_cache_alloc(dt_mipmap_buffer_t *buf, const dt_image_t *img)
 {
   assert(buf);
-  if(!buf)
-  {
-    return NULL;
-  }
+  if(!buf) return NULL;
 
   assert(buf->size == DT_MIPMAP_FULL);
 
@@ -391,6 +388,7 @@ void *dt_mipmap_cache_alloc(dt_mipmap_buffer_t *buf, const dt_image_t *img)
   const size_t buffer_size = wd * ht * bpp;
   const size_t min_buffer_size = 64 * 4 * sizeof(float);
   entry->data = dt_alloc_align(_get_entry_size(MAX(buffer_size, min_buffer_size)));
+  if(entry->data == NULL) return NULL;
 
   // Update the references
   struct dt_mipmap_buffer_dsc *dsc = NULL;
@@ -430,6 +428,7 @@ void dt_mipmap_cache_allocate_dynamic(void *data, dt_cache_entry_t *entry)
   // Get a new allocation
   const size_t buffer_size = (mip <= DT_MIPMAP_F) ? cache->buffer_size[mip] : _get_entry_size(sizeof(float) * 4 * 64);
   entry->data = dt_alloc_align(buffer_size);
+  if(entry->data == NULL) return;
 
   // Update the references
   struct dt_mipmap_buffer_dsc *dsc = NULL;
@@ -624,13 +623,6 @@ write_error:
   dt_free_align(entry->data);
 }
 
-static uint32_t nearest_power_of_two(const uint32_t value)
-{
-  uint32_t rc = 1;
-  while(rc < value) rc <<= 1;
-  return rc;
-}
-
 void dt_mipmap_cache_init(dt_mipmap_cache_t *cache)
 {
   dt_mipmap_cache_get_filename(cache->cachedir, sizeof(cache->cachedir));
@@ -682,18 +674,12 @@ void dt_mipmap_cache_init(dt_mipmap_cache_t *cache)
   dt_cache_set_allocate_callback(&cache->mip_thumbs.cache, dt_mipmap_cache_allocate_dynamic, cache);
   dt_cache_set_cleanup_callback(&cache->mip_thumbs.cache, dt_mipmap_cache_deallocate_dynamic, cache);
 
-  // 2 buffers (in/out) per thread.
-  // We don't allow more than 2 pixel pipelines concurrent renderings, because
-  // more than 1 already increases memory contention and degrades performance.
-  // That's 4 buffers total.
-  const int32_t max_mem_bufs = nearest_power_of_two(4);
-
-  dt_cache_init(&cache->mip_full.cache, 0, max_mem_bufs);
+  dt_cache_init(&cache->mip_full.cache, 0, darktable.num_openmp_threads);
   dt_cache_set_allocate_callback(&cache->mip_full.cache, dt_mipmap_cache_allocate_dynamic, cache);
   dt_cache_set_cleanup_callback(&cache->mip_full.cache, dt_mipmap_cache_deallocate_dynamic, cache);
   cache->buffer_size[DT_MIPMAP_FULL] = 0;
 
-  dt_cache_init(&cache->mip_f.cache, 0, max_mem_bufs);
+  dt_cache_init(&cache->mip_f.cache, 0, darktable.num_openmp_threads);
   dt_cache_set_allocate_callback(&cache->mip_f.cache, dt_mipmap_cache_allocate_dynamic, cache);
   dt_cache_set_cleanup_callback(&cache->mip_f.cache, dt_mipmap_cache_deallocate_dynamic, cache);
   cache->buffer_size[DT_MIPMAP_F]
@@ -1001,6 +987,11 @@ void dt_mipmap_cache_remove_at_size(dt_mipmap_cache_t *cache, const int32_t imgi
     dt_cache_release(&_get_cache(cache, mip)->cache, entry);
     dt_cache_remove(&_get_cache(cache, mip)->cache, key);
   }
+  else
+  {
+    // directly remove the file on disk cache even if we don't have a memory entry
+    dt_mipmap_cache_unlink_ondisk_thumbnail(cache, imgid, mip);
+  }
 }
 
 // get rid of all ldr thumbnails:
@@ -1143,16 +1134,16 @@ static int _load_jpg(const char *filename, const int32_t imgid, const uint32_t w
   dt_imageio_jpeg_t jpg;
   if(!dt_imageio_jpeg_read_header(filename, &jpg))
   {
-    uint8_t *tmp = (uint8_t *)dt_alloc_align(sizeof(uint8_t) * jpg.width * jpg.height * 4);
     *color_space = dt_imageio_jpeg_read_color_space(&jpg);
-    if(!dt_imageio_jpeg_read(&jpg, tmp))
+    uint8_t *tmp = (uint8_t *)dt_alloc_align(sizeof(uint8_t) * jpg.width * jpg.height * 4);
+    if(tmp && !dt_imageio_jpeg_read(&jpg, tmp))
     {
       // scale to fit
       dt_print(DT_DEBUG_CACHE, "[mipmap_cache] generate mip %d for image %d from jpeg\n", size, imgid);
       dt_iop_flip_and_zoom_8(tmp, jpg.width, jpg.height, buf, wd, ht, orientation, width, height);
       res = 0;
     }
-    dt_free_align(tmp);
+    if(tmp) dt_free_align(tmp);
   }
   return res;
 }

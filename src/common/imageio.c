@@ -919,6 +919,11 @@ void _export_final_buffer_to_uint8(const float *const restrict inbuf, uint8_t **
 {
 
   *outbuf = dt_alloc_align(sizeof(uint8_t) * 4 * processed_width * processed_height);
+  if(*outbuf == NULL)
+  {
+    dt_print(DT_DEBUG_IMAGEIO, "[dt_imageio_export] failed to allocate output buffer for uint8_t");
+    return;
+  }
 
   if(display_byteorder && high_quality)
   {
@@ -939,6 +944,11 @@ void _export_final_buffer_to_uint16(const float *const restrict inbuf, uint16_t 
                                     const size_t processed_width, const size_t processed_height)
 {
   *outbuf = dt_alloc_align(sizeof(uint16_t) * 4 * processed_width * processed_height);
+  if(*outbuf == NULL)
+  {
+    dt_print(DT_DEBUG_IMAGEIO, "[dt_imageio_export] failed to allocate output buffer for uint16_t");
+    return;
+  }
 
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
@@ -1001,6 +1011,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   dt_mipmap_buffer_t buf;
   dt_mipmap_cache_t *cache = darktable.mipmap_cache;
   dt_mipmap_size_t size = DT_MIPMAP_FULL;
+  uint8_t *outbuf = NULL;
 
   if(thumbnail_export && width <= 1440 && height <= 900)
   {
@@ -1103,6 +1114,13 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
 
   dt_get_times(&start);
 
+  // Because it's possible here that we export at full resolution,
+  // and our memory planning doesn't account for several concurrent pipelines
+  // at full size, we allow only one pipeline at a time to run.
+  // This is because wavelets decompositions and such use 6 copies,
+  // so the RAM usage can go out of control here.
+  dt_pthread_mutex_lock(&darktable.pipeline_threadsafe);
+
   /*
     if high-quality processing was requested, downsampling will be done
     at the very end of the pipe (just before border and watermark)
@@ -1128,6 +1146,8 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     // before destroying it. Mind that if you extend the code.
   }
 
+  dt_pthread_mutex_unlock(&darktable.pipeline_threadsafe);
+
   dt_show_times(&start, thumbnail_export ? "[dev_process_thumbnail] pixel pipeline processing"
                                          : "[dev_process_export] pixel pipeline processing");
 
@@ -1138,19 +1158,20 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   }
 
   // Inplace downconversion to low-precision formats:
-  uint8_t *outbuf = NULL;
   if(bpp == 8)
     _export_final_buffer_to_uint8((const float *const restrict)pipe.backbuf, &outbuf, display_byteorder,
-                                  high_quality, processed_width, processed_height);
+                                  high_quality, pipe.backbuf_width, pipe.backbuf_height);
   else if(bpp == 16)
     _export_final_buffer_to_uint16((const float *const restrict)pipe.backbuf, (uint16_t **)&outbuf,
-                                   processed_width, processed_height);
+                                   pipe.backbuf_width, pipe.backbuf_height);
   // else output float, no further harm done to the pixels :)
 
   dt_dev_pixelpipe_cache_lock_entry_data(darktable.pixelpipe_cache, pipe.backbuf, FALSE);
 
-  format_params->width = processed_width;
-  format_params->height = processed_height;
+  if(outbuf == NULL) goto error;
+
+  format_params->width = pipe.backbuf_width;
+  format_params->height = pipe.backbuf_height;
 
   // Exif data should be 65536 bytes max, but if original size is close to that,
   // adding new tags could make it go over that... so let it be and see what
@@ -1166,7 +1187,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     // find output color profile for this image:
     int sRGB = (icc_type == DT_COLORSPACE_SRGB);
     // last param is dng mode, it's false here
-    length = dt_exif_read_blob(&exif_profile, pathname, imgid, sRGB, processed_width, processed_height, 0);
+    length = dt_exif_read_blob(&exif_profile, pathname, imgid, sRGB, pipe.backbuf_width, pipe.backbuf_height, 0);
   }
 
   // Finally: write image buffer to target container

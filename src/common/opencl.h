@@ -172,12 +172,6 @@ typedef struct dt_opencl_device_t
   // opencl_events enabled for the device, set internally via event_handles
   int use_events;
 
-  // async pixelpipe mode for device
-  // if set to TRUE OpenCL pixelpipe will not be synchronized on a per-module basis. this can improve pixelpipe latency.
-  // however, potential OpenCL errors would be detected late; in such a case the complete pixelpipe needs to be reprocessed
-  // instead of only a single module. export pixelpipe will always be run synchronously.
-  int asyncmode;
-
   // a device might be turned off by force by setting this value to 1
   // also used for blacklisted drivers
   int disabled;
@@ -288,8 +282,6 @@ void dt_opencl_cleanup_device(dt_opencl_t *cl, int i);
 /** both finish functions return TRUE in case of success */
 /** cleans up command queue. */
 int dt_opencl_finish(const int devid);
-/** cleans up command queue if in synchron mode or while exporting */
-int dt_opencl_finish_sync_pipe(const int devid, const int pipetype);
 
 /** enqueues a synchronization point. */
 int dt_opencl_enqueue_barrier(const int devid);
@@ -516,10 +508,6 @@ static inline void dt_opencl_cleanup(dt_opencl_t *cl)
 {
 }
 static inline gboolean dt_opencl_finish(const int devid)
-{
-  return -1;
-}
-static inline gboolean dt_opencl_finish_sync_pipe(const int devid, const int pipetype)
 {
   return -1;
 }

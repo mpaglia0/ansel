@@ -321,7 +321,7 @@ if(LibSoup2_FOUND)
 endif(LibSoup2_FOUND)
 
 if(USE_OPENEXR)
-  find_package(OpenEXR 2.5 CONFIG)
+  find_package(OpenEXR CONFIG)
   if(TARGET OpenEXR::OpenEXR)
     set(OpenEXR_LIBRARIES OpenEXR::OpenEXR)
   else()

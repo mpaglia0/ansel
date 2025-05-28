@@ -507,6 +507,7 @@ static void dwt_denoise_horiz_1ch(float *const restrict out, float *const restri
 void dwt_denoise(float *const img, const int width, const int height, const int bands, const float *const noise)
 {
   float *const details = dt_alloc_align_float((size_t)2 * width * height);
+  if(details == NULL) return;
   float *const interm = details + width * height;	// temporary storage for use during each pass
 
   // zero the accumulator

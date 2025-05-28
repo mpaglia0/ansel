@@ -206,8 +206,6 @@ restart:
 
   // here dies your 32-bit system:
   dt_cache_entry_t *entry = (dt_cache_entry_t *)g_slice_alloc(sizeof(dt_cache_entry_t));
-  int ret = dt_pthread_rwlock_init(&entry->lock, 0);
-  if(ret) fprintf(stderr, "rwlock init: %d\n", ret);
   entry->data = 0;
   entry->data_size = cache->entry_size;
   entry->cost = 1;
@@ -215,14 +213,23 @@ restart:
   entry->key = key;
   entry->_lock_demoting = 0;
 
-  g_hash_table_insert(cache->hashtable, GINT_TO_POINTER(key), entry);
-
-  assert(cache->allocate || entry->data_size);
-
   if(cache->allocate)
     cache->allocate(cache->allocate_data, entry);
   else
     entry->data = dt_alloc_align(entry->data_size);
+
+  if(!entry->data)
+  {
+    g_free(entry);
+    dt_pthread_mutex_unlock(&cache->lock);
+    return NULL;
+  }
+
+  int ret = dt_pthread_rwlock_init(&entry->lock, 0);
+  if(ret) fprintf(stderr, "rwlock init: %d\n", ret);
+
+  g_hash_table_insert(cache->hashtable, GINT_TO_POINTER(key), entry);
+  assert(cache->allocate || entry->data_size);
 
   assert(entry->data_size);
   ASAN_POISON_MEMORY_REGION(entry->data, entry->data_size);

@@ -304,6 +304,9 @@ static void rcd_demosaic(dt_dev_pixelpipe_iop_t *piece, float *const restrict ou
   dt_omp_firstprivate(width, height, filters, out, in, scaler, revscaler)
 #endif
   {
+    // FIXME: CRITICAL: need to handle the case where we couldn't alloc the memory,
+    // but in a parallel section, that's not going to be trivial.
+
     float *const VH_Dir = dt_alloc_align_float((size_t) RCD_TILESIZE * RCD_TILESIZE);
     // ensure that border elements which are read but never actually set below are zeroed out
     memset(VH_Dir, 0, sizeof(*VH_Dir) * RCD_TILESIZE * RCD_TILESIZE);

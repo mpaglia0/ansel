@@ -176,6 +176,7 @@ static int decompress_plain(dt_imageio_jpeg_t *jpg, uint8_t *out)
 {
   JSAMPROW row_pointer[1];
   row_pointer[0] = (uint8_t *)dt_alloc_align((size_t)jpg->dinfo.output_width * jpg->dinfo.num_components);
+  if(row_pointer[0] == NULL) return 1;
   uint8_t *tmp = out;
   while(jpg->dinfo.output_scanline < jpg->dinfo.image_height)
   {
@@ -190,7 +191,8 @@ static int decompress_plain(dt_imageio_jpeg_t *jpg, uint8_t *out)
     }
     tmp += 4 * jpg->width;
   }
-  dt_free_align(row_pointer[0]);
+
+  if(row_pointer[0]) dt_free_align(row_pointer[0]);
   return 0;
 }
 

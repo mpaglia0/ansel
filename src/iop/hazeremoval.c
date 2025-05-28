@@ -544,15 +544,17 @@ static float ambient_light_cl(struct dt_iop_module_t *self, int devid, cl_mem im
   const int height = dt_opencl_get_image_height(img);
   const int element_size = dt_opencl_get_image_element_size(img);
   float *in = dt_alloc_align((size_t)width * height * element_size);
+  if(in == NULL) goto error;
+
   int err = dt_opencl_read_host_from_device(devid, in, img, width, height, element_size);
   if(err != CL_SUCCESS) goto error;
   const const_rgb_image img_in = (const_rgb_image){ in, width, height, element_size / sizeof(float) };
   const float max_depth = ambient_light(img_in, w1, pA0);
   dt_free_align(in);
   return max_depth;
+
 error:
-  dt_print(DT_DEBUG_OPENCL, "[hazeremoval, ambient_light_cl] unknown error: %d\n", err);
-  dt_free_align(in);
+  if(in) dt_free_align(in);
   return 0.f;
 }
 

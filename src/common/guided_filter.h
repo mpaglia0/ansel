@@ -46,6 +46,7 @@ typedef struct gray_image
 
 
 // allocate space for 1-component image of size width x height
+// FIXME: the code consuming gray_image doesn't check if we actually allocated the buffer
 static inline gray_image new_gray_image(int width, int height)
 {
   return (gray_image){ dt_alloc_align(sizeof(float) * width * height), width, height };
@@ -111,4 +112,3 @@ void guided_filter_cl(int devid, cl_mem guide, cl_mem in, cl_mem out, int width,
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

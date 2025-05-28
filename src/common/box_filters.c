@@ -1105,6 +1105,7 @@ static void dt_box_mean_1ch(float *const buf, const size_t height, const size_t 
   const size_t size = MAX(width,16*eff_height);
   size_t padded_size;
   float *const restrict scanlines = dt_alloc_perthread_float(size, &padded_size);
+  if(scanlines == NULL) return;
 
   for(unsigned iteration = 0; iteration < iterations; iteration++)
   {
@@ -1125,6 +1126,7 @@ static void dt_box_mean_4ch(float *const buf, const int height, const int width,
   const size_t size = MAX(4*width,16*eff_height);
   size_t padded_size;
   float *const restrict scanlines = dt_alloc_perthread_float(size, &padded_size);
+  if(scanlines == NULL) return;
 
   for(unsigned iteration = 0; iteration < iterations; iteration++)
   {
@@ -1141,6 +1143,7 @@ static void box_mean_vert_1ch_Kahan(float *const buf, const int height, const si
   const size_t eff_height = _compute_effective_height(height,radius);
   size_t padded_size;
   float *const restrict scratch_buf = dt_alloc_perthread_float(16*eff_height,&padded_size);
+  if(scratch_buf == NULL) return;
 
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
@@ -1177,6 +1180,8 @@ static void dt_box_mean_4ch_Kahan(float *const buf, const size_t height, const s
   {
     size_t padded_size;
     float *const restrict scanlines = dt_alloc_perthread_float(4*width,&padded_size);
+    if(scanlines == NULL) return;
+
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
   dt_omp_firstprivate(width, height, radius, padded_size) \
@@ -1246,6 +1251,8 @@ void dt_box_mean_horizontal(float *const restrict buf, const size_t width, const
   if (ch == (4|BOXFILTER_KAHAN_SUM))
   {
     float *const restrict scratch = user_scratch ? user_scratch : dt_alloc_align_float(4*width);
+    if(scratch == NULL) return;
+
     blur_horizontal_4ch_Kahan(buf, width, radius, scratch);
     if (!user_scratch)
       dt_free_align(scratch);
@@ -1253,6 +1260,8 @@ void dt_box_mean_horizontal(float *const restrict buf, const size_t width, const
   else if (ch == (9|BOXFILTER_KAHAN_SUM))
   {
     float *const restrict scratch = user_scratch ? user_scratch : dt_alloc_align_float(9*width);
+    if(scratch == NULL) return;
+
     blur_horizontal_Nch_Kahan(9, buf, width, radius, scratch);
     if (!user_scratch)
       dt_free_align(scratch);
@@ -1385,6 +1394,8 @@ static void box_max_1ch(float *const buf, const size_t height, const size_t widt
   const size_t scratch_size = MAX(width,MAX(height,16*eff_height));
   size_t allocsize;
   float *const restrict scratch_buffers = dt_alloc_perthread_float(scratch_size,&allocsize);
+  if(scratch_buffers == NULL) return;
+
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
   dt_omp_firstprivate(w, width, height, buf, allocsize) \
@@ -1532,6 +1543,8 @@ static void box_min_1ch(float *const buf, const size_t height, const size_t widt
   const size_t scratch_size = MAX(width,MAX(height,16*eff_height));
   size_t allocsize;
   float *const restrict scratch_buffers = dt_alloc_perthread_float(scratch_size,&allocsize);
+  if(scratch_buffers == NULL) return;
+  
 #ifdef _OPENMP
 #pragma omp parallel for default(none) \
   dt_omp_firstprivate(w, width, height, buf, allocsize) \

@@ -147,14 +147,13 @@ void dt_opencl_write_device_config(const int devid)
   gchar key[256] = { 0 };
   gchar dat[512] = { 0 };
   g_snprintf(key, 254, "%s%s", DT_CLDEVICE_HEAD, cl->dev[devid].cname);
-  g_snprintf(dat, 510, "%i %i %i %i %i %i %i %i %f",
+  g_snprintf(dat, 510, "%i %i %i %i %i %i %i %f",
     cl->dev[devid].avoid_atomics,
     cl->dev[devid].micro_nap,
     cl->dev[devid].pinned_memory & (DT_OPENCL_PINNING_ON | DT_OPENCL_PINNING_DISABLED),
     cl->dev[devid].clroundup_wd,
     cl->dev[devid].clroundup_ht,
     cl->dev[devid].event_handles,
-    cl->dev[devid].asyncmode & 1,
     cl->dev[devid].disabled & 1,
     cl->dev[devid].benchmark);
   dt_vprint(DT_DEBUG_OPENCL, "[dt_opencl_write_device_config] writing data '%s' for '%s'\n", dat, key);
@@ -203,7 +202,6 @@ gboolean dt_opencl_read_device_config(const int devid)
       cl->dev[devid].clroundup_wd = wd;
       cl->dev[devid].clroundup_ht = ht;
       cl->dev[devid].event_handles = event_handles;
-      cl->dev[devid].asyncmode = asyncmode;
       cl->dev[devid].disabled = disabled;
       cl->dev[devid].benchmark = benchmark;
     }
@@ -225,7 +223,6 @@ gboolean dt_opencl_read_device_config(const int devid)
   cl->dev[devid].benchmark = fminf(1e6, fmaxf(0.0f, cl->dev[devid].benchmark));
 
   cl->dev[devid].use_events = (cl->dev[devid].event_handles != 0) ? 1 : 0;
-  cl->dev[devid].asyncmode &= 1;
   cl->dev[devid].disabled &= 1;
 
   // Also take care of extended device data, these are not only device specific but also depend on the devid
@@ -292,7 +289,6 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
   cl->dev[dev].benchmark = 0.0f;
   cl->dev[dev].use_events = 1;
   cl->dev[dev].event_handles = 128;
-  cl->dev[dev].asyncmode = 0;
   cl->dev[dev].disabled = 0;
   cl->dev[dev].forced_headroom = 0;
   cl->dev[dev].runtime_error = 0;
@@ -535,7 +531,6 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
   }
 
   const gboolean pinning = (cl->dev[dev].pinned_memory & DT_OPENCL_PINNING_ON);
-  dt_print_nts(DT_DEBUG_OPENCL, "   ASYNC PIXELPIPE:          %s\n", (cl->dev[dev].asyncmode) ? "YES" : "NO");
   dt_print_nts(DT_DEBUG_OPENCL, "   PINNED MEMORY TRANSFER:   %s\n", pinning ? "WANTED" : "NO");
   dt_print_nts(DT_DEBUG_OPENCL, "   FORCED HEADROOM:          %lu\n", cl->dev[dev].forced_headroom);
   dt_print_nts(DT_DEBUG_OPENCL, "   AVOID ATOMICS:            %s\n", (cl->dev[dev].avoid_atomics) ? "YES" : "NO");
@@ -1521,20 +1516,6 @@ gboolean dt_opencl_finish(const int devid)
   cl_int success = dt_opencl_events_flush(devid, 0);
 
   return (err == CL_SUCCESS && success == CL_COMPLETE);
-}
-
-gboolean dt_opencl_finish_sync_pipe(const int devid, const int pipetype)
-{
-  dt_opencl_t *cl = darktable.opencl;
-  if(!cl->inited || devid < 0) return FALSE;
-
-  const gboolean exporting = (pipetype & DT_DEV_PIXELPIPE_EXPORT) == DT_DEV_PIXELPIPE_EXPORT;
-  const gboolean asyncmode = cl->dev[devid].asyncmode;
-
-  if(!asyncmode || exporting)
-    return dt_opencl_finish(devid);
-  else
-    return TRUE;
 }
 
 int dt_opencl_enqueue_barrier(const int devid)

@@ -161,6 +161,8 @@ static inline int pseudo_solve_gaussian(double *const restrict A,
 
   double *const restrict A_square = dt_alloc_align(n * n * sizeof(double));
   double *const restrict y_square = dt_alloc_align(n * sizeof(double));
+  
+  if(y_square == NULL || A_square == NULL) goto error;
 
   #ifdef _OPENMP
   #pragma omp parallel sections
@@ -187,8 +189,9 @@ static inline int pseudo_solve_gaussian(double *const restrict A,
   valid = gauss_solve(A_square, y_square, n);
   for(size_t k = 0; k < n; k++) y[k] = y_square[k];
 
-  dt_free_align(y_square);
-  dt_free_align(A_square);
+error:;
+  if(y_square) dt_free_align(y_square);
+  if(A_square) dt_free_align(A_square);
 
   return valid;
 }
