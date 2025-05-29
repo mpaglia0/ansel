@@ -526,7 +526,7 @@ finish:
 
   // cost is just flat one for the buffer, as the buffers might have different sizes,
   // to make sure quota is meaningful.
-  if(mip > DT_MIPMAP_F)
+  if(mip >= DT_MIPMAP_F)
     entry->cost = 1;
   else
     entry->cost = cache->buffer_size[mip];

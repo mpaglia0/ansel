@@ -134,10 +134,6 @@ void dt_iop_image_div_const(float *const buf, const float div_value, const size_
 void dt_iop_image_linear_blend(float *const __restrict__ buf, const float lambda, const float *const __restrict__ other_buf,
                                const size_t width, const size_t height, const size_t ch);
 
-// perform timings to determine the optimal threshold for switching to parallel operations, as well as the
-// maximal number of threads before saturating the memory bus
-void dt_iop_image_copy_benchmark();
-
 #ifdef __cplusplus
 }
 #endif

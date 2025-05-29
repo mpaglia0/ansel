@@ -68,7 +68,9 @@ struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry(dt_dev_pixelpipe
 
 
 /**
- * @brief Get a cache line from the cache.
+ * @brief Get a cache line from the cache. This internally increases the reference count,
+ * so you have to manually decrease it using `dt_dev_pixelpipe_ref_count_entry()` once
+ * the cache line content has been consumed or it will never be freed.
  *
  * @param cache
  * @param hash State checksum of the cache line.
@@ -89,6 +91,10 @@ int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t h
  * @brief Get an existing cache line from the cache. This is similar to `dt_dev_pixelpipe_cache_get`,
  * but it does not create a new cache line if it is not found.
  *
+ * This internally increases the reference count,
+ * so you have to manually decrease it using `dt_dev_pixelpipe_ref_count_entry()` once
+ * the cache line content has been consumed or it will never be freed.
+ *
  * @param cache
  * @param hash
  * @param data
@@ -99,7 +105,8 @@ int dt_dev_pixelpipe_cache_get_existing(dt_dev_pixelpipe_cache_t *cache, const u
                                         struct dt_iop_buffer_dsc_t **dsc, struct dt_pixel_cache_entry_t **entry);
 
 /**
- * @brief Remove cache lines matching id
+ * @brief Remove cache lines matching id. Entries locked in read/write or having reference
+ * count greater than 0 are not removed.
  *
  * @param cache
  * @param id ID of the pipeline owning the cache line, or -1 to remove all lines.
@@ -109,7 +116,7 @@ void dt_dev_pixelpipe_cache_flush(dt_dev_pixelpipe_cache_t *cache, const int id)
 /**
  * @brief Arbitrarily remove the cache entry matching hash. Entries
  * having a reference count > 0 (inter-thread locked) or being having their read/write lock
- * locked will be ignored, unless `force` is TRUE.
+ * locked will be ignored. If force is TRUE, we ignore reference count, but not locks.
  *
  * @param cache
  * @param hash
@@ -129,13 +136,16 @@ int dt_dev_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache);
 
 /**
  * @brief Increase/Decrease the reference count on the cache line as to prevent
- * LRU item removal.
+ * LRU item removal. This function should be called within a read/write lock-protected
+ * section to avoid changing an entry while or after it is deleted in parallel.
+ *
+ * WARNING: cache entries whose reference count is greater than 0 will never be deleted from cache.
  *
  * @param cache
  * @param hash
  * @param lock TRUE to lock, FALSE to unlock
  */
-void dt_dev_pixelpipe_cache_lock_entry_hash(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
+void dt_dev_pixelpipe_cache_ref_count_entry(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
                                             struct dt_pixel_cache_entry_t *entry);
 
 /**
@@ -150,15 +160,19 @@ void dt_dev_pixelpipe_cache_lock_entry_hash(dt_dev_pixelpipe_cache_t *cache, con
 uint64_t dt_dev_pixelpipe_cache_get_hash_data(dt_dev_pixelpipe_cache_t *cache, void *data,
                                               struct dt_pixel_cache_entry_t **entry);
 
+
 /**
- * @brief Chains `dt_dev_pixelpipe_cache_lock_entry_hash` with
- * `dt_dev_pixelpipe_cache_get_hash_data`
+ * @brief Return a reference to the cache entry holding the data buffer, or NULL if not found.
+ *
+ * WARNING: this immediately puts a read lock on the entry cache, if found. You will
+ * need to manually release it later with `dt_dev_pixelpipe_cache_rdlock_entry()`
+ * or you will get a deadlock and this entry will never be deleted.
  *
  * @param cache
  * @param data
- * @param lock TRUE to lock, FALSE to unlock
+ * @return dt_pixel_cache_entry_t*
  */
-void dt_dev_pixelpipe_cache_lock_entry_data(dt_dev_pixelpipe_cache_t *cache, void *data, gboolean lock);
+struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry_from_data(dt_dev_pixelpipe_cache_t *cache, void *data);
 
 
 /**

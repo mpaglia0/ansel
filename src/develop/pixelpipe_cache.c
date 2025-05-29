@@ -40,6 +40,9 @@ typedef struct dt_pixel_cache_entry_t
 } dt_pixel_cache_entry_t;
 
 
+void _non_thread_safe_cache_ref_count_entry(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
+                                            dt_pixel_cache_entry_t *cache_entry);
+
 dt_pixel_cache_entry_t *_non_threadsafe_cache_get_entry(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash)
 {
   return (dt_pixel_cache_entry_t *)g_hash_table_lookup(cache->entries, GINT_TO_POINTER(hash));
@@ -87,7 +90,7 @@ int _non_thread_safe_cache_remove(dt_dev_pixelpipe_cache_t *cache, const uint64_
     if(!locked) dt_pthread_rwlock_unlock(&cache_entry->lock);
     gboolean used = dt_atomic_get_int(&cache_entry->refcount) > 0;
 
-    if((!used && !locked) || force)
+    if((!used || force) && !locked)
     {
       cache->current_memory -= cache_entry->size;
       g_hash_table_remove(cache->entries, GINT_TO_POINTER(hash));
@@ -292,26 +295,26 @@ int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t h
   else
     cache_entry = dt_pixel_cache_new_entry(hash, size, **dsc, name, id, cache);
 
-  dt_pthread_mutex_unlock(&cache->lock);
-
   if(cache_entry)
   {
-    if(entry) *entry = cache_entry;
     cache_entry->age = g_get_monotonic_time(); // this is the MRU entry
     *data = cache_entry->data;
     *dsc = &cache_entry->dsc;
     dt_pixel_cache_message(cache_entry, (cache_entry_found) ? "found" : "created", FALSE);
 
     // This will become the input for the next module, lock it until next module process ends
-    dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
-    return !cache_entry_found;
+    _non_thread_safe_cache_ref_count_entry(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
   }
   else
   {
     // Don't write on *dsc and *data here
     dt_print(DT_DEBUG_PIPE, "couldn't allocate new cache entry %lu\n", hash);
-    return 1;
   }
+
+  if(entry) *entry = cache_entry;
+
+  dt_pthread_mutex_unlock(&cache->lock);
+  return !cache_entry_found;
 }
 
 int dt_dev_pixelpipe_cache_get_existing(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash,
@@ -322,25 +325,22 @@ int dt_dev_pixelpipe_cache_get_existing(dt_dev_pixelpipe_cache_t *cache, const u
   cache->queries++;
   dt_pixel_cache_entry_t *cache_entry = _non_threadsafe_cache_get_entry(cache, hash);
   if(cache_entry) cache->hits++;
-  dt_pthread_mutex_unlock(&cache->lock);
 
   if(cache_entry)
   {
-    if(entry) *entry = cache_entry;
     cache_entry->age = g_get_monotonic_time(); // this is the MRU entry
     *data = cache_entry->data;
     *dsc = &cache_entry->dsc;
     dt_pixel_cache_message(cache_entry, "found", FALSE);
 
     // This will become the input for the next module, lock it until next module process ends
-    dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
-    return TRUE;
+    _non_thread_safe_cache_ref_count_entry(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
   }
-  else
-  {
-    // Don't write on *dsc and *data here
-    return FALSE;
-  }
+
+  if(entry) *entry = cache_entry;
+
+  dt_pthread_mutex_unlock(&cache->lock);
+  return cache_entry != NULL;
 }
 
 
@@ -378,6 +378,7 @@ uint64_t _non_thread_safe_cache_get_hash_data(dt_dev_pixelpipe_cache_t *cache, v
   GHashTableIter iter;
   gpointer key, value;
   uint64_t hash = 0;
+  if(entry) *entry = NULL;
 
   g_hash_table_iter_init(&iter, cache->entries);
   while(g_hash_table_iter_next(&iter, &key, &value))
@@ -404,7 +405,24 @@ uint64_t dt_dev_pixelpipe_cache_get_hash_data(dt_dev_pixelpipe_cache_t *cache, v
 }
 
 
-void _non_thread_safe_cache_lock_entry_hash(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
+dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry_from_data(dt_dev_pixelpipe_cache_t *cache, void *data)
+{
+  dt_pixel_cache_entry_t *cache_entry;
+  dt_pthread_mutex_lock(&cache->lock);
+
+  _non_thread_safe_cache_get_hash_data(cache, data, &cache_entry);
+  if(cache_entry)
+  {
+    dt_pthread_rwlock_rdlock(&cache_entry->lock);
+    dt_pixel_cache_message(cache_entry, "read lock", TRUE);
+  }
+  
+  dt_pthread_mutex_unlock(&cache->lock);
+  return cache_entry;
+}
+
+
+void _non_thread_safe_cache_ref_count_entry(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
                                             dt_pixel_cache_entry_t *cache_entry)
 {
   if(cache_entry == NULL)
@@ -426,22 +444,11 @@ void _non_thread_safe_cache_lock_entry_hash(dt_dev_pixelpipe_cache_t *cache, con
 }
 
 
-void dt_dev_pixelpipe_cache_lock_entry_hash(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
+void dt_dev_pixelpipe_cache_ref_count_entry(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, gboolean lock,
                                             dt_pixel_cache_entry_t *cache_entry)
 {
   dt_pthread_mutex_lock(&cache->lock);
-  _non_thread_safe_cache_lock_entry_hash(cache, hash, lock, cache_entry);
-  dt_pthread_mutex_unlock(&cache->lock);
-}
-
-
-void dt_dev_pixelpipe_cache_lock_entry_data(dt_dev_pixelpipe_cache_t *cache, void *data, gboolean lock)
-{
-  dt_pthread_mutex_lock(&cache->lock);
-  dt_pixel_cache_entry_t *cache_entry;
-  uint64_t hash = _non_thread_safe_cache_get_hash_data(cache, data, &cache_entry);
-  if(cache_entry)
-    _non_thread_safe_cache_lock_entry_hash(cache, hash, lock, cache_entry);
+  _non_thread_safe_cache_ref_count_entry(cache, hash, lock, cache_entry);
   dt_pthread_mutex_unlock(&cache->lock);
 }
 

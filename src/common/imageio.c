@@ -1157,6 +1157,13 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
     goto error;
   }
 
+  // pipe.backbuf belongs to the pixelpipe cache, so we have to lock it there while we use it
+  struct dt_pixel_cache_entry_t *cache_entry = dt_dev_pixelpipe_cache_get_entry_from_data(darktable.pixelpipe_cache, pipe.backbuf);
+  if(cache_entry == NULL) goto error;
+
+  // NOTE: dt_dev_pixelpipe_cache_get_entry_from_data internally puts a read lock on the cache_entry
+  // so everything following is guaranteed to be safe:
+
   // Inplace downconversion to low-precision formats:
   if(bpp == 8)
     _export_final_buffer_to_uint8((const float *const restrict)pipe.backbuf, &outbuf, display_byteorder,
@@ -1166,7 +1173,9 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
                                    pipe.backbuf_width, pipe.backbuf_height);
   // else output float, no further harm done to the pixels :)
 
-  dt_dev_pixelpipe_cache_lock_entry_data(darktable.pixelpipe_cache, pipe.backbuf, FALSE);
+  // Decrease ref count on the cache entry and release the read lock
+  dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
 
   if(outbuf == NULL) goto error;
 

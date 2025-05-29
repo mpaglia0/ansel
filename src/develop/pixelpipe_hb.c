@@ -1822,6 +1822,10 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
                                              output, out_format, &cache_entry);
   if(*output == NULL) return 1;
 
+  int err = 0;
+
+  dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
+
   if(bypass_cache || new_entry)
   {
     // Grab input buffer from mipmap cache.
@@ -1834,16 +1838,15 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
 
     // Cache size has changed since we inited pipe input ?
     // Note: we know pipe->iwidth/iheight are non-zero or we would have not launched a pipe.
-     // Note 2: there is no valid reason for a cacheline to change size during runtime.
+    // Note 2: there is no valid reason for a cacheline to change size during runtime.
     if(!buf.buf || buf.height != pipe->iheight || buf.width != pipe->iwidth || !*output)
     {
       // Nothing we can do, we need to recompute roi_in and roi_out from scratch
       // for all modules with new sizes. Exit on error and catch that in develop.
       dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-      return 1;
+      err = 1;
     }
-
-    if(roi_in->scale == 1.0f)
+    else if(roi_in->scale == 1.0f)
     {
       // fast branch for 1:1 pixel copies.
       // last minute clamping to catch potential out-of-bounds in roi_in and roi_out
@@ -1854,19 +1857,16 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
 
       if(cp_width > 0 && cp_height > 0)
       {
-        dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
         _copy_buffer((const char *const)buf.buf, (char *const)*output, cp_height, roi_out->width,
                       pipe->iwidth, in_x, in_y, bpp * cp_width, bpp);
-        dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE, cache_entry);
-
         dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-        return 0;
+        err = 0;
       }
       else
       {
         // Invalid dimensions
         dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-        return 1;
+        err = 1;
       }
     }
     else if(bpp == 16)
@@ -1877,13 +1877,9 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
       roi_in->width = pipe->iwidth;
       roi_in->height = pipe->iheight;
       roi_in->scale = 1.0f;
-
-      dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
       dt_iop_clip_and_zoom(*output, (const float *const)buf.buf, roi_out, roi_in, roi_out->width, pipe->iwidth);
-      dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE, cache_entry);
-
       dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-      return 0;
+      err = 0;
     }
     else
     {
@@ -1893,12 +1889,13 @@ static int _init_base_buffer(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, void *
                 roi_out->scale, bpp);
 
       dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
-      return 1;
+      err = 1;
     }
   }
   // else found in cache.
-  dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, hash, TRUE, cache_entry);
-  return 0;
+  dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE, cache_entry);
+
+  return err;
 }
 
 static int _process_masks_preview(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev, dt_dev_pixelpipe_iop_t *piece,
@@ -2110,8 +2107,8 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe, dt_develop_t *
 
   // Unlock read and write locks, decrease reference count on input
   dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, hash, FALSE, output_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, input_hash, FALSE, input_entry);
   dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, input_hash, FALSE, input_entry);
-  dt_dev_pixelpipe_cache_lock_entry_hash(darktable.pixelpipe_cache, input_hash, FALSE, input_entry);
 
   if(error)
   {

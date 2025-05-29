@@ -40,6 +40,7 @@
 #include "develop/imageop.h"
 #include "develop/lightroom.h"
 #include "develop/masks.h"
+#include "develop/pixelpipe_cache.h"
 #include "gui/gtk.h"
 #include "gui/presets.h"
 
@@ -374,9 +375,23 @@ static void _flag_pipe(dt_dev_pixelpipe_t *pipe, gboolean error)
 
 static void _update_gui_backbuf(dt_dev_pixelpipe_t *pipe)
 {
-  if(pipe->status != DT_DEV_PIXELPIPE_VALID)
+  // The pipeline backbuffer belongs to the pixelpipe cache, so we have to communicate with it
+  struct dt_pixel_cache_entry_t *cache_entry = dt_dev_pixelpipe_cache_get_entry_from_data(darktable.pixelpipe_cache, pipe->backbuf);
+
+  // NOTE: dt_dev_pixelpipe_cache_get_entry_from_data internally puts a read lock on the cache_entry
+  // so everything following is guaranteed to be safe:
+
+  if(pipe->status != DT_DEV_PIXELPIPE_VALID || cache_entry == NULL)
   {
-    dt_dev_pixelpipe_cache_lock_entry_data(darktable.pixelpipe_cache, pipe->backbuf, FALSE);
+    // invalid pipeline either means error during processing or killswitch triggered before completion.
+    // either way, the backbuf is unusable.
+    if(cache_entry)
+    {
+      // Unref and attempt deletion on a useless cache entry
+      dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
+      dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
+      dt_dev_pixelpipe_cache_remove(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
+    }
     return;
   }
 
@@ -400,7 +415,8 @@ static void _update_gui_backbuf(dt_dev_pixelpipe_t *pipe)
   dt_pthread_mutex_unlock(&pipe->backbuf_mutex);
 
   // We are done with pipe->backbuf, the pipe cache can now delete it, unlock it.
-  dt_dev_pixelpipe_cache_lock_entry_data(darktable.pixelpipe_cache, pipe->backbuf, FALSE);
+  dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, 0, FALSE, cache_entry);
 }
 
 

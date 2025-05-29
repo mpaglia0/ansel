@@ -422,12 +422,6 @@ void dt_iop_image_linear_blend(float *const restrict buf, const float lambda, co
     buf[k] = lambda*buf[k] + lambda_1*other[k];
 }
 
-// perform timings to determine the optimal threshold for switching to parallel operations, as well as the
-// maximal number of threads before saturating the memory bus
-void dt_iop_image_copy_benchmark()
-{
-  ///TODO
-}
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
