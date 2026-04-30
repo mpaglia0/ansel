@@ -1458,9 +1458,7 @@ static int _default_process_tiling_cl_ptp(struct dt_iop_module_t *self, const st
       if(use_pinned_memory)
       {
 /* copy "good" part of tile from pinned output buffer to output image */
-#if 0 // def _OPENMP
-#pragma omp parallel for default(firstprivate) 
-#endif
+        __OMP_PARALLEL_FOR__()
         for(size_t j = 0; j < region[1]; j++)
           memcpy((char *)ovoid + ooffs + j * opitch,
                  (char *)output_buffer + ((j + origin[1]) * wd + origin[0]) * out_bpp,
