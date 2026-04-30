@@ -336,11 +336,7 @@ static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t
     {
       void *mapped = dt_opencl_map_image(devid, (cl_mem)source->mem, TRUE, CL_MAP_READ,
                                          width, height, bpp);
-      if(!IS_NULL_PTR(mapped))
-      {
-        ok = (dt_opencl_unmap_mem_object(devid, (cl_mem)source->mem, mapped) == CL_SUCCESS);
-        dt_opencl_finish(devid);
-      }
+      ok = (dt_opencl_unmap_mem_object(devid, (cl_mem)source->mem, mapped) == CL_SUCCESS);
     }
     if(!ok)
     {
@@ -1106,24 +1102,13 @@ int dt_dev_pixelpipe_cache_sync_cl_buffer(const int devid, void *host_ptr, void 
   if(dt_opencl_is_pinned_memory(mem))
   {
     void *mapped = dt_opencl_map_image(devid, mem, TRUE, cl_mode, roi->width, roi->height, (int)bpp);
-    if(mapped)
+    if(dt_opencl_unmap_mem_object(devid, mem, mapped) == CL_SUCCESS)
     {
-      const gboolean ptr_matches = (mapped == host_ptr);
-      const cl_int unmap_err = dt_opencl_unmap_mem_object(devid, mem, mapped);
-      if(unmap_err != CL_SUCCESS) return 1;
-
-      // Ensure unmap (and any implicit sync) completed before we possibly enqueue explicit transfers.
-      // When event tracking is disabled, clFinish is the only reliable barrier.
-      dt_opencl_finish(devid);
-
-      if(ptr_matches)
-      {
-        dt_print(DT_DEBUG_OPENCL,
-                 "[opencl_pixelpipe] successfully synced image %s via map/unmap for module %s (%s)\n",
-                 (cl_mode == CL_MAP_WRITE) ? "host to device" : "device to host",
-                 (module) ? module->op : "base buffer", message);
-        return 0;
-      }
+      dt_print(DT_DEBUG_OPENCL,
+                "[opencl_pixelpipe] successfully synced image %s via map/unmap for module %s (%s)\n",
+                (cl_mode == CL_MAP_WRITE) ? "host to device" : "device to host",
+                (module) ? module->op : "base buffer", message);
+      return 0;
     }
   }
 

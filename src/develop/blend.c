@@ -1188,14 +1188,6 @@ int dt_develop_blend_process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_t
     err = dt_opencl_write_host_to_device(devid, mask, dev_mask_1, owidth, oheight, sizeof(float));
     if(err != CL_SUCCESS) goto error;
 
-    // The following call to clFinish() works around a bug in some OpenCL
-    // drivers (namely AMD).
-    // Without this synchronization point, reads to dev_in would often not
-    // return the correct value.
-    // This depends on the module after which blending is called. One of the
-    // affected ones is sharpen.
-    dt_opencl_finish(devid);
-
     // get parametric mask (if any) and apply global opacity
     const unsigned blendif = d->blendif;
     const unsigned int mask_combine = d->mask_combine;

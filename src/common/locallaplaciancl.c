@@ -55,9 +55,7 @@ dt_local_laplacian_cl_global_t *dt_local_laplacian_init_cl_global()
 void dt_local_laplacian_free_cl(dt_local_laplacian_cl_t *g)
 {
   if(IS_NULL_PTR(g)) return;
-  // be sure we're done with the memory:
-  dt_opencl_finish(g->devid);
-
+  
   // free device mem
   for(int l=0;l<max_levels;l++)
   {

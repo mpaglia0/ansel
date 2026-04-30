@@ -2072,11 +2072,6 @@ static int process_nlmeans_cl(struct dt_iop_module_t *self, const dt_dev_pixelpi
       dt_opencl_set_kernel_arg(devid, gd->kernel_denoiseprofile_accu, 5, 2 * sizeof(int), (void *)&q);
       err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_denoiseprofile_accu, sizes);
       if(err != CL_SUCCESS) goto error;
-
-      dt_opencl_finish(devid);
-
-      // indirectly give gpu some air to breathe (and to do display related stuff)
-      dt_iop_nap(dt_opencl_micro_nap(devid));
     }
   }
 
@@ -2363,9 +2358,6 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, const dt_dev_pixelp
     err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_denoiseprofile_decompose, sizes);
     if(err != CL_SUCCESS) goto error;
 
-    // indirectly give gpu some air to breathe (and to do display related stuff)
-    dt_iop_nap(dt_opencl_micro_nap(devid));
-
     // swap buffers
     cl_mem dev_buf3 = dev_buf2;
     dev_buf2 = dev_buf1;
@@ -2513,9 +2505,6 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, const dt_dev_pixelp
     err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_denoiseprofile_synthesize, sizes);
     if(err != CL_SUCCESS) goto error;
 
-    // indirectly give gpu some air to breathe (and to do display related stuff)
-    dt_iop_nap(dt_opencl_micro_nap(devid));
-
     // swap buffers
     cl_mem dev_buf3 = dev_buf2;
     dev_buf2 = dev_buf1;
@@ -2585,8 +2574,6 @@ static int process_wavelets_cl(struct dt_iop_module_t *self, const dt_dev_pixelp
       goto error;
     }
   }
-
-  dt_opencl_finish(devid);
 
   dt_opencl_release_mem_object(dev_r);
   dt_opencl_release_mem_object(dev_m);

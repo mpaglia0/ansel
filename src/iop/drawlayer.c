@@ -714,14 +714,8 @@ static gboolean _drawlayer_sync_host_image_to_device(const int devid, cl_mem dev
   if(dt_opencl_is_pinned_memory(device_image))
   {
     void *mapped = dt_opencl_map_image(devid, device_image, TRUE, CL_MAP_WRITE, width, height, bpp);
-    if(mapped)
-    {
-      if(dt_opencl_unmap_mem_object(devid, device_image, mapped) == CL_SUCCESS)
-      {
-        dt_opencl_finish(devid);
-        return TRUE;
-      }
-    }
+    if(dt_opencl_unmap_mem_object(devid, device_image, mapped) == CL_SUCCESS)
+      return TRUE;
   }
 
   return dt_opencl_write_host_to_device(devid, host_pixels, device_image, width, height, bpp) == CL_SUCCESS;

@@ -639,8 +639,6 @@ typedef struct dt_iop_colorreconstruct_bilateral_cl_t
 static void dt_iop_colorreconstruct_bilateral_free_cl(dt_iop_colorreconstruct_bilateral_cl_t *b)
 {
   if(IS_NULL_PTR(b)) return;
-  // be sure we're done with the memory:
-  dt_opencl_finish(b->devid);
   // free device mem
   dt_opencl_release_mem_object(b->dev_grid);
   dt_opencl_release_mem_object(b->dev_grid_tmp);
