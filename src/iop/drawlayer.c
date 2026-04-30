@@ -716,11 +716,10 @@ static gboolean _drawlayer_sync_host_image_to_device(const int devid, cl_mem dev
     void *mapped = dt_opencl_map_image(devid, device_image, TRUE, CL_MAP_WRITE, width, height, bpp);
     if(mapped)
     {
-      const gboolean zero_copy = (mapped == host_pixels);
       if(dt_opencl_unmap_mem_object(devid, device_image, mapped) == CL_SUCCESS)
       {
         dt_opencl_finish(devid);
-        if(zero_copy) return TRUE;
+        return TRUE;
       }
     }
   }
@@ -942,7 +941,7 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
     }
     dev_background = dt_dev_pixelpipe_cache_get_pinned_image(
         darktable.pixelpipe_cache, background, NULL, devid, target_roi->width, target_roi->height,
-        4 * sizeof(float), CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, NULL);
+        4 * sizeof(float), CL_MEM_READ_WRITE, NULL);
     if(IS_NULL_PTR(dev_background)) goto cleanup;
   }
   else
