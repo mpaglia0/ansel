@@ -183,6 +183,10 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   message(STATUS "IPO/LTO disabled for Debug configuration")
   set(ANSEL_IPO_SUPPORTED OFF)
+elseif(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "GNU")
+  # On MinGW/Windows, GNU ld does not support LTO at all, so we disable it on that platform.
+  message(STATUS "IPO/LTO disabled for MinGW/Windows with GNU toolchain")
+  set(ANSEL_IPO_SUPPORTED OFF)
 else()
   if(ANSEL_WIN32_CLANG)
     # On MinGW/Windows, Clang's default linker is ld.bfd which requires LLVMgold.dll for LTO,
