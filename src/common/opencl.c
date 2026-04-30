@@ -2320,7 +2320,7 @@ void *dt_opencl_alloc_device_use_host_pointer(const int devid, const int width, 
   return _dt_opencl_alloc_image2d(devid, width, height, flags, fmt, host, "alloc_device_use_host_pointer");
 }
 
-void *dt_opencl_alloc_device_buffer_with_flags(const int devid, const size_t size, const int flags)
+void *dt_opencl_alloc_device_buffer_with_flags(const int devid, const size_t size, const int flags, void *host_ptr)
 {
   if(!darktable.opencl->inited) return NULL;
   cl_int err;
@@ -2328,7 +2328,7 @@ void *dt_opencl_alloc_device_buffer_with_flags(const int devid, const size_t siz
   for(int attempt = 0; attempt < 2; attempt++)
   {
     buf = (darktable.opencl->dlocl->symbols->dt_clCreateBuffer)(darktable.opencl->dev[devid].context,
-                                                               flags, size, NULL, &err);
+                                                               flags, size, host_ptr, &err);
     if(err == CL_SUCCESS) break;
     if(attempt == 0 && (err == CL_MEM_OBJECT_ALLOCATION_FAILURE || err == CL_OUT_OF_RESOURCES))
     {
@@ -2352,7 +2352,7 @@ void *dt_opencl_alloc_device_buffer_with_flags(const int devid, const size_t siz
 
 void *dt_opencl_alloc_device_buffer(const int devid, const size_t size)
 {
-  return dt_opencl_alloc_device_buffer_with_flags(devid, size,  CL_MEM_READ_WRITE);
+  return dt_opencl_alloc_device_buffer_with_flags(devid, size, CL_MEM_READ_WRITE, NULL);
 }
 
 

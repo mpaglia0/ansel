@@ -1314,7 +1314,7 @@ static int _default_process_tiling_cl_ptp(struct dt_iop_module_t *self, const st
   if(use_pinned_memory)
   {
     pinned_input = dt_opencl_alloc_device_buffer_with_flags(devid, (size_t)width * height * in_bpp,
-                                                            CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR);
+                                                            CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, NULL);
     if(IS_NULL_PTR(pinned_input))
     {
       dt_print(DT_DEBUG_OPENCL | DT_DEBUG_TILING,
@@ -1340,7 +1340,7 @@ static int _default_process_tiling_cl_ptp(struct dt_iop_module_t *self, const st
   {
 
     pinned_output = dt_opencl_alloc_device_buffer_with_flags(devid, (size_t)width * height * out_bpp,
-                                                             CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR);
+                                                             CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, NULL);
     if(IS_NULL_PTR(pinned_output))
     {
       dt_print(DT_DEBUG_OPENCL | DT_DEBUG_TILING,
@@ -1676,7 +1676,7 @@ static int _default_process_tiling_cl_roi(struct dt_iop_module_t *self, const st
   if(use_pinned_memory)
   {
     pinned_input = dt_opencl_alloc_device_buffer_with_flags(devid, (size_t)width * height * in_bpp,
-                                                            CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR);
+                                                            CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, NULL);
     if(IS_NULL_PTR(pinned_input))
     {
       dt_print(DT_DEBUG_OPENCL | DT_DEBUG_TILING,
@@ -1702,7 +1702,7 @@ static int _default_process_tiling_cl_roi(struct dt_iop_module_t *self, const st
   {
 
     pinned_output = dt_opencl_alloc_device_buffer_with_flags(devid, (size_t)width * height * out_bpp,
-                                                             CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR);
+                                                             CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, NULL);
     if(IS_NULL_PTR(pinned_output))
     {
       dt_print(DT_DEBUG_OPENCL | DT_DEBUG_TILING,
