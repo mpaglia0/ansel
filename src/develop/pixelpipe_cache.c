@@ -636,26 +636,32 @@ static void *_pixel_cache_clmem_get(dt_pixel_cache_entry_t *entry, void *host_pt
 }
 #endif
 
-void *dt_dev_pixelpipe_cache_borrow_cl_payload(dt_pixel_cache_entry_t *entry, void *host_ptr, int devid,
-                                               int width, int height, int bpp, int flags)
+void *dt_dev_pixelpipe_cache_borrow_cl_payload(dt_pixel_cache_entry_t *entry, int devid,
+                                               int width, int height, int bpp)
 {
 #ifdef HAVE_OPENCL
 
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
-  for(GList *l = entry->cl_mem_list; l; l = g_list_next(l))
+
+  dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, 
+    "[dt_dev_pixelpipe_cache_borrow_cl_payload] %u entries in %p\n", 
+    g_list_length(entry->cl_mem_list), entry);
+
+  for(GList *l = g_list_first(entry->cl_mem_list); l; l = g_list_next(l))
   {
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    if(c && c->host_ptr == host_ptr && c->width == width && c->height == height
-       && c->bpp == bpp && c->flags == flags)
+    if(c && c->width == width && c->height == height && c->bpp == bpp && c->devid == devid)
     {
-      const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-      if(c->devid != devid || mem_devid != devid)
-        continue;
-
       c->refs++;
       void *mem = c->mem;
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
       return mem;
+    }
+    else
+    {
+      dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, 
+        "[dt_dev_pixelpipe_cache_borrow_cl_payload] entry w=%i h=%i bpp=%i devid=%i flags=%i discarded\n", 
+        c->width, c->height, c->bpp, c->devid, c->flags);
     }
   }
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);

@@ -201,38 +201,30 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   dt_iop_buffer_dsc_t blend_input_dsc = actual_input_dsc;
   dt_iop_buffer_dsc_t blend_output_dsc = piece->dsc_out;
 
-  if(input_entry == NULL)
+  // Special case for basebuffer module : first module of the pipe, so there is no input entry.
+  // It will grab its input from pipeline directly
+  if(IS_NULL_PTR(input_entry) && (piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT))
+  {
     return pixelpipe_process_on_CPU(pipe, piece, previous_piece, tiling, pixelpipe_flow,
                                     cache_output, NULL, output_entry);
-
-  /* The recursion already owns `input_entry`, so GPU payload recovery must happen from that entry
-   * directly instead of going back through the hash lookup path. Hash lookup is for published
-   * cache hits; here we are consuming the current upstream stage inside the same pipeline run.
-   * When the cacheline already carries a host-backed pinned image, reopen that payload first so
-   * GPU-to-GPU stages can keep flowing through the cached OpenCL image instead of rebuilding it
-   * from host RAM. Base-buffer initialization also seeds this path for the first OpenCL stage. */
-  if(!IS_NULL_PTR(input) && pipe->devid >= 0)
-  {
-    /* The cache entry still owns the previous stage payload at this point. Reopen the cached OpenCL image
-     * using the descriptor that was actually published by the upstream stage, not the descriptor this module
-     * wants after any later colorspace conversion. Otherwise GPU-only hand-offs miss reusable payloads as soon
-     * as `piece->dsc_in` diverges from `previous_piece->dsc_out`, and the next module wrongly concludes that
-     * its input vanished from both RAM and vRAM. */
-    cl_mem_input = dt_dev_pixelpipe_cache_borrow_cl_payload(input_entry, input, pipe->devid,
-                                            piece->roi_in.width, piece->roi_in.height,
-                                            actual_input_dsc.bpp,
-                                            CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR);
-    borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
   }
 
-  if(IS_NULL_PTR(cl_mem_input) && IS_NULL_PTR(input) && pipe->devid >= 0)
+  // No input entry otherwise : nothing we can do
+  if(IS_NULL_PTR(input_entry))
   {
-    /* Hostless cachelines only carry the previous stage device payload, so match that published layout here too. */
-    cl_mem_input = dt_dev_pixelpipe_cache_borrow_cl_payload(input_entry, NULL, pipe->devid,
-                                            piece->roi_in.width, piece->roi_in.height,
-                                            actual_input_dsc.bpp, CL_MEM_READ_WRITE);
-    borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
+    dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s has no input cache entry... aborting.\n", module->name());
+    return 1;
   }
+
+  // Try to reuse the cached vRAM buffer for the input entry if available 
+  cl_mem_input = dt_dev_pixelpipe_cache_borrow_cl_payload(input_entry, pipe->devid,
+                                          piece->roi_in.width, piece->roi_in.height,
+                                          actual_input_dsc.bpp);
+  borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
+  if(IS_NULL_PTR(cl_mem_input))
+    dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dev_pixelpipe] %s could not get a cached vRAM input buffer.\n", module->name());
+    
+  // Note: if that fails, we will attempt resync from RAM cache later
 
   if(IS_NULL_PTR(input) && IS_NULL_PTR(cl_mem_input))
   {

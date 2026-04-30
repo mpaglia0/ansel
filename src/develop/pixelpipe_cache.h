@@ -223,8 +223,8 @@ dt_dev_pixelpipe_cache_get_writable(dt_dev_pixelpipe_cache_t *cache, const uint6
  * @param flags Tracked OpenCL flags used when the payload was cached.
  * @return void* Borrowed `cl_mem`, or NULL if no matching cached payload exists.
  */
-void *dt_dev_pixelpipe_cache_borrow_cl_payload(struct dt_pixel_cache_entry_t *entry, void *host_ptr,
-                                               int devid, int width, int height, int bpp, int flags);
+void *dt_dev_pixelpipe_cache_borrow_cl_payload(struct dt_pixel_cache_entry_t *entry,
+                                               int devid, int width, int height, int bpp);
 
 /**
  * @brief Return a borrowed cached OpenCL payload to its cache entry.
