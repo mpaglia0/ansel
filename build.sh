@@ -284,7 +284,7 @@ num_cpu()
 	SunOS)
 		ncpu=$(/usr/sbin/psrinfo |wc -l)
 		;;
-	Linux|MINGW64*)
+	Linux|MSYS*|MINGW*|UCRT*|CLANG*)
 		if [ -r /proc/cpuinfo ]; then
 			ncpu=$(grep -c "^processor" /proc/cpuinfo)
 		elif [ -x /sbin/sysctl ]; then
@@ -298,7 +298,7 @@ num_cpu()
 		ncpu=$(/usr/sbin/sysctl -n machdep.cpu.core_count 2>/dev/null)
 		;;
 	*)
-		printf "warning: unable to determine number of CPUs on $platform\n"
+		printf "warning: unable to determine number of CPUs on $platform\n" >&2
 		ncpu=-1
 		;;
 	esac
@@ -437,6 +437,16 @@ else
 	CMAKE_MORE_OPTIONS="${CMAKE_MORE_OPTIONS} -DBINARY_PACKAGE_BUILD=OFF"
 fi
 
+# Choose between a parallel install or regular, depending on the CMake version and generator
+CMAKE_MAJOR=$(cmake --version | sed -n 's/^cmake version \([0-9][0-9]*\)\..*/\1/p' | head -n 1)
+CMAKE_MINOR=$(cmake --version | sed -n 's/^cmake version [0-9][0-9]*\.\([0-9][0-9]*\).*/\1/p' | head -n 1)
+INSTALL_TARGET="$TARGET"
+if [ -n "$CMAKE_MAJOR" ] && [ -n "$CMAKE_MINOR" ] \
+	&& [ "$TARGET" = "install" ] && [[ "$BUILD_GENERATOR" =~ ^Ninja ]] \
+	&& { [ "$CMAKE_MAJOR" -gt 3 ] || { [ "$CMAKE_MAJOR" -eq 3 ] && [ "$CMAKE_MINOR" -ge 30 ]; }; }; then
+	INSTALL_TARGET="install/parallel"
+fi
+
 # ---------------------------------------------------------------------------
 # Let's go
 # ---------------------------------------------------------------------------
@@ -449,6 +459,7 @@ Installation prefix: $INSTALL_PREFIX
 Build type:          $BUILD_TYPE
 Build generator:     $BUILD_GENERATOR
 Build tasks:         $MAKE_TASKS
+Install target:      $INSTALL_TARGET
 CPU Architecture:    $CPU_ARCHITECTURE
 Compiler:            $CC_COMPILER $CXX_COMPILER
 Skip Lensfun update: $([ $SKIP_UPDATE_LENSFUN -eq 1 ] && echo "Yes" || echo "No")
@@ -497,7 +508,7 @@ fi
 
 cmd_config="CXX=${CXX_COMPILER} CC=${CC_COMPILER} ${ASAN_FLAGS}cmake -G \"$BUILD_GENERATOR\" -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ${CMAKE_MORE_OPTIONS} \"$DT_SRC_DIR\""
 cmd_build="cmake --build "$BUILD_DIR" -- -j$MAKE_TASKS"
-cmd_install="${SUDO}cmake --build \"$BUILD_DIR\" --target $TARGET -- -j$MAKE_TASKS"
+cmd_install="${SUDO}cmake --build \"$BUILD_DIR\" --target $INSTALL_TARGET -- -j$MAKE_TASKS"
 
 cat <<EOF
 

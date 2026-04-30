@@ -31,6 +31,12 @@ endif()
 
 set(CMAKE_C_STANDARD 11)
 
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.30)
+  # CMake parallelizes installation per subdirectory; install-time ordering
+  # dependencies therefore need to stay in the subdirectory that consumes them.
+  set_property(GLOBAL PROPERTY INSTALL_PARALLEL TRUE)
+endif()
+
 # Shell to use for scripts (prefer bash for bash-specific scripts)
 if(WIN32)
   if(CMAKE_SH)
