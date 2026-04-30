@@ -903,53 +903,7 @@ void dt_dev_pixelpipe_cache_resync_host_pinned_image(dt_dev_pixelpipe_cache_t *c
 }
 #endif
 
-/**
- * @brief Determine whether a `CL_MEM_USE_HOST_PTR` OpenCL image is truly "zero-copy".
- *
- * @param devid OpenCL device index.
- * @param mem OpenCL image object (`cl_mem`).
- * @param host_ptr The CPU pointer we passed to `CL_MEM_USE_HOST_PTR`.
- * @param roi Image dimensions.
- * @param bpp Bytes per pixel.
- *
- * @return TRUE if the OpenCL driver mapped the image to the exact same `host_ptr` pointer, meaning
- *         the device is directly accessing the host memory (true zero-copy). FALSE otherwise.
- *
- * @details
- * Many drivers accept `CL_MEM_USE_HOST_PTR` but still create an internal device-side copy.
- * In that case, host memory is not automatically in sync with device memory, and explicit transfers
- * are required for correctness.
- *
- * We use a conservative runtime test:
- *
- * - map the image (blocking),
- * - compare the returned pointer with the original `host_ptr`,
- * - unmap and `clFinish` to ensure the unmap/synchronization completed.
- *
- * If the pointer matches, we treat the image as zero-copy and keep the cache entry locked while GPU
- * work is in flight.
- */
 #ifdef HAVE_OPENCL
-static gboolean _cl_is_zero_copy_image(const int devid, cl_mem mem, void *host_ptr, const dt_iop_roi_t *roi,
-                                       const size_t bpp)
-{
-  if(devid < 0 || IS_NULL_PTR(mem) || IS_NULL_PTR(host_ptr) || IS_NULL_PTR(roi) || roi->width <= 0 || roi->height <= 0 || bpp == 0) return FALSE;
-
-  void *mapped = dt_opencl_map_image(devid, mem, TRUE, CL_MAP_READ, roi->width, roi->height, (int)bpp);
-  if(IS_NULL_PTR(mapped)) return FALSE;
-
-  const gboolean ptr_matches = (mapped == host_ptr);
-  const gboolean is_zero_copy = ptr_matches;
-  const cl_int unmap_err = dt_opencl_unmap_mem_object(devid, mem, mapped);
-  if(unmap_err != CL_SUCCESS) return FALSE;
-
-  // Use clFinish rather than event wait: some drivers disable event tracking, but we still need to guarantee
-  // the unmap (and implicit sync) is complete before touching host memory or unlocking the cache entry.
-  dt_opencl_finish(devid);
-
-  return is_zero_copy;
-}
-
 static inline gboolean _is_gamma_rgba8_output(const dt_iop_module_t *module, const size_t bpp,
                                               const char *message)
 {
@@ -1015,10 +969,11 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
 
   if(out_reused) *out_reused = FALSE;
 
-  if(host_ptr)
+  if(host_ptr && dt_opencl_use_pinned_memory(devid))
   {
     const int flags = CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR;
 
+    // Try to reuse existing buffer
     if(reuse_pinned && cache_entry)
     {
       cl_mem_input = _pixel_cache_clmem_get(cache_entry, host_ptr, devid, roi->width, roi->height,
@@ -1026,12 +981,14 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
       reused_from_cache = (!IS_NULL_PTR(cl_mem_input));
     }
 
+    // No luck: alloc new pinned memory buffer
     if(IS_NULL_PTR(cl_mem_input))
       cl_mem_input = dt_opencl_alloc_device_use_host_pointer(devid, roi->width, roi->height, cl_bpp,
                                                              host_ptr, flags);
 
     if(IS_NULL_PTR(cl_mem_input))
     {
+      // Still no luck: flush all cached vRAM buffers and retry 
       dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid, NULL);
       if(reuse_pinned && cache_entry)
       {
@@ -1055,6 +1012,7 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
       reused_from_cache = (!IS_NULL_PTR(cl_mem_input));
     }
 
+    // This will internally try to free up cache space if first alloc fails
     if(IS_NULL_PTR(cl_mem_input))
       cl_mem_input = dt_dev_pixelpipe_cache_alloc_cl_device_buffer(devid, roi, bpp, module, message, keep);
   }
@@ -1089,9 +1047,7 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
 
   return cl_mem_input;
 }
-#endif
 
-#ifdef HAVE_OPENCL
 /**
  * @brief Release or cache an OpenCL image associated with a host cache line.
  *
@@ -1291,11 +1247,10 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
     dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s will use its input directly from vRAM\n", module->name());
     const cl_mem mem = (cl_mem)*cl_mem_input;
     if(dt_opencl_is_pinned_memory(mem))
-      if(_cl_is_zero_copy_image(pipe->devid, mem, input, roi_in, in_bpp))
-      {
-        dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, input_entry);
-        *locked_input_entry = input_entry;
-      }
+    {
+      dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, input_entry);
+      *locked_input_entry = input_entry;
+    }
     return 0;
   }
 
@@ -1310,7 +1265,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
   // Try to reuse a cached pinned buffer; otherwise allocate a new pinned image backed by `input`.
   gboolean input_reused_from_cache = FALSE;
   *cl_mem_input = dt_dev_pixelpipe_cache_get_cl_buffer(pipe->devid, input, roi_in, in_bpp, module,
-                                                       "input", input_entry, TRUE, FALSE,
+                                                       "input", input_entry, TRUE, TRUE,
                                                        &input_reused_from_cache, keep);
   int fail = (IS_NULL_PTR(*cl_mem_input));
 
@@ -1322,8 +1277,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
   if(!fail && *cl_mem_input)
   {
     mem = (cl_mem)*cl_mem_input;
-    if(dt_opencl_is_pinned_memory(mem))
-      keep_lock = _cl_is_zero_copy_image(pipe->devid, mem, input, roi_in, in_bpp);
+    keep_lock = dt_opencl_is_pinned_memory(mem);
   }
 
   /* A reused cached pinned image already carries the authoritative device payload from the

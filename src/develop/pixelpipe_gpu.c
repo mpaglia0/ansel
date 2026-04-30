@@ -309,11 +309,9 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
 
     if(IS_NULL_PTR(cl_mem_output))
     {
-      const gboolean reuse_output_cacheline = _requests_cache(pipe, piece)
-                                              && (pipe->realtime || !(*cache_output));
-      const gboolean reuse_output_pinned = reuse_output_cacheline;
+      const gboolean reuse_output_cacheline = _requests_cache(pipe, piece) && (pipe->realtime || !(*cache_output));
       cl_mem_output = dt_dev_pixelpipe_cache_get_cl_buffer(pipe->devid, output, &piece->roi_out, piece->dsc_out.bpp, module,
-                                       "output", output_entry, reuse_output_pinned, reuse_output_cacheline,
+                                       "output", output_entry, reuse_output_cacheline, reuse_output_cacheline,
                                        NULL, cl_mem_input);
       if(IS_NULL_PTR(cl_mem_output)) goto error;
     }
