@@ -85,11 +85,6 @@ const char *dt_pixelpipe_cache_set_current_module(const char *module)
 typedef struct dt_cache_clmem_t
 {
   void *host_ptr;
-  int devid;
-  int width;
-  int height;
-  int bpp;
-  int flags;
   void *mem;
   int refs;
 } dt_cache_clmem_t;
@@ -270,7 +265,6 @@ int dt_dev_pixelpipe_cache_remove(dt_dev_pixelpipe_cache_t *cache, const gboolea
 static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t *entry, int preferred_devid,
                                                           gboolean prefer_device_payload)
 {
-  if(IS_NULL_PTR(entry)) return FALSE;
   dt_cache_clmem_t *source = NULL;
   gboolean ok = FALSE;
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
@@ -283,41 +277,27 @@ static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t
    * - if a preferred OpenCL device is known, rank payloads from that device ahead of the rest.
    * This keeps the fallback order explicit without scattering it over six loops. */
   dt_pixel_cache_materialize_source_rank_t best_rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_NONE;
-  for(GList *l = entry->cl_mem_list; l;)
+  for(GList *l = g_list_first(entry->cl_mem_list); l; l = g_list_next(l))
   {
-    GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    if(IS_NULL_PTR(c) || IS_NULL_PTR(c->mem))
-    {
-      l = next;
-      continue;
-    }
+    if(IS_NULL_PTR(c) || IS_NULL_PTR(c->mem)) continue;
 
     /* We are looking for one authoritative cached payload to materialize back to RAM.
      * Only consider records whose live OpenCL context still matches the recorded device.
      * Other cached payloads may belong to a different pipeline/device and must stay untouched. */
     const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-    if(mem_devid != c->devid)
-    {
-      l = next;
-      continue;
-    }
+    if(mem_devid != preferred_devid) continue;
 
-    const cl_mem_flags flags = dt_opencl_get_mem_flags((cl_mem)c->mem);
-    const gboolean host_backed = (c->host_ptr == entry->data) && (flags & CL_MEM_USE_HOST_PTR);
+    const gboolean host_backed = (c->host_ptr == entry->data);
     const gboolean device_only = (IS_NULL_PTR(c->host_ptr));
-    if(!host_backed && !device_only)
-    {
-      l = next;
-      continue;
-    }
+    if(!host_backed && !device_only) continue;
 
     dt_pixel_cache_materialize_source_rank_t rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_NONE;
     if(!prefer_device_payload)
     {
-      if(host_backed && (preferred_devid < 0 || c->devid == preferred_devid))
+      if(host_backed && (preferred_devid < 0 || mem_devid == preferred_devid))
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_PRIMARY_PREFERRED;
-      else if(device_only && preferred_devid >= 0 && c->devid == preferred_devid)
+      else if(device_only && preferred_devid >= 0 && mem_devid == preferred_devid)
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_SECONDARY_PREFERRED;
       else if(device_only)
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_SECONDARY_ANY;
@@ -326,11 +306,11 @@ static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t
     }
     else
     {
-      if(device_only && preferred_devid >= 0 && c->devid == preferred_devid)
+      if(device_only && preferred_devid >= 0 && mem_devid == preferred_devid)
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_PRIMARY_PREFERRED;
       else if(device_only)
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_PRIMARY_ANY;
-      else if(host_backed && (preferred_devid < 0 || c->devid == preferred_devid))
+      else if(host_backed && (preferred_devid < 0 || mem_devid == preferred_devid))
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_SECONDARY_PREFERRED;
       else if(host_backed)
         rank = DT_PIXEL_CACHE_MATERIALIZE_SOURCE_SECONDARY_ANY;
@@ -342,50 +322,30 @@ static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t
       source = c;
       if(rank == DT_PIXEL_CACHE_MATERIALIZE_SOURCE_PRIMARY_PREFERRED) break;
     }
-
-    l = next;
   }
 
   if(source)
   {
+
+    const int devid = dt_opencl_get_mem_context_id(source->mem);
+    const int width = dt_opencl_get_image_width(source->mem);
+    const int height = dt_opencl_get_image_height(source->mem);
+    const int bpp = dt_opencl_get_image_element_size(source->mem);
+
     if(dt_opencl_is_pinned_memory((cl_mem)source->mem) && source->host_ptr == entry->data)
     {
-      void *mapped = dt_opencl_map_image(source->devid, (cl_mem)source->mem, TRUE, CL_MAP_READ,
-                                         source->width, source->height, source->bpp);
-      if(!mapped)
+      void *mapped = dt_opencl_map_image(devid, (cl_mem)source->mem, TRUE, CL_MAP_READ,
+                                         width, height, bpp);
+      if(!IS_NULL_PTR(mapped))
       {
-        ok = FALSE;
-      }
-      else
-      {
-        const cl_int unmap_err = dt_opencl_unmap_mem_object(source->devid, (cl_mem)source->mem, mapped);
-        dt_opencl_finish(source->devid);
-
-        if(unmap_err != CL_SUCCESS)
-        {
-          ok = FALSE;
-        }
-        else
-        {
-          /* dt_opencl_map_image() does not expose the mapped row pitch, so a non-zero-copy mapping
-           * cannot be copied back with a flat memcpy without risking row-stride corruption. Only the
-           * true zero-copy case guarantees that `entry->data` already aliases the authoritative pixels.
-           * Otherwise, fall back to the explicit device->host transfer helper, which handles image rows
-           * correctly through the OpenCL runtime. */
-          if(mapped == entry->data)
-            ok = TRUE;
-          else
-          {
-            ok = (dt_opencl_read_host_from_device(source->devid, entry->data, source->mem,
-                                                  source->width, source->height, source->bpp) == CL_SUCCESS);
-          }
-        }
+        ok = (dt_opencl_unmap_mem_object(devid, (cl_mem)source->mem, mapped) == CL_SUCCESS);
+        dt_opencl_finish(devid);
       }
     }
-    else
+    if(!ok)
     {
-      ok = (dt_opencl_read_host_from_device(source->devid, entry->data, source->mem,
-                                            source->width, source->height, source->bpp) == CL_SUCCESS);
+      ok = (dt_opencl_read_host_from_device(devid, entry->data, source->mem,
+                                            width, height, bpp) == CL_SUCCESS);
     }
   }
 
@@ -409,10 +369,13 @@ static gboolean _cache_entry_materialize_host_data(dt_dev_pixelpipe_cache_t *cac
   if(preferred_devid < 0 && dt_pixel_cache_entry_get_data(entry) == NULL) return FALSE;
 
   dt_dev_pixelpipe_cache_wrlock_entry(cache, TRUE, entry);
-  const gboolean had_host_payload = (dt_pixel_cache_entry_get_data(entry) != NULL);
-  if(!had_host_payload)
+  gboolean use_host_ptr = TRUE;
+  if(IS_NULL_PTR(dt_pixel_cache_entry_get_data(entry)))
+  {
     dt_pixel_cache_alloc(cache, entry);
-  const gboolean ok = _cache_entry_materialize_host_data_locked(entry, preferred_devid, !had_host_payload);
+    use_host_ptr = FALSE;
+  }
+  const gboolean ok = _cache_entry_materialize_host_data_locked(entry, preferred_devid, use_host_ptr);
   dt_dev_pixelpipe_cache_wrlock_entry(cache, FALSE, entry);
 
   return ok;
@@ -425,15 +388,12 @@ static gboolean _cache_entry_clmem_has_host_pinned_locked(dt_pixel_cache_entry_t
 
   gboolean found = FALSE;
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
-  for(GList *l = entry->cl_mem_list; l; l = g_list_next(l))
+  for(GList *l = g_list_first(entry->cl_mem_list); l; l = g_list_next(l))
   {
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    const int mem_devid = (c && c->mem) ? dt_opencl_get_mem_context_id((cl_mem)c->mem) : -1;
+    if(IS_NULL_PTR(c) || IS_NULL_PTR(c->mem)) continue;
 
-    if(c && c->mem && mem_devid != c->devid) continue;
-
-    if(c && c->mem && c->refs == 0 && c->host_ptr == host_ptr && (devid < 0 || c->devid == devid)
-       && dt_opencl_is_pinned_memory(c->mem))
+    if(c->refs == 0 && devid == dt_opencl_get_mem_context_id((cl_mem)c->mem))
     {
       found = TRUE;
       break;
@@ -446,39 +406,41 @@ static gboolean _cache_entry_clmem_has_host_pinned_locked(dt_pixel_cache_entry_t
 
 static gboolean _cache_entry_clmem_flush_host_pinned_locked(dt_pixel_cache_entry_t *entry, void *host_ptr, int devid)
 {
+  // If host_ptr is NULL, we don't have RAM cache for this buffer, 
+  // so we can't flush the vRAM cache or we would loose it forever.
   if(IS_NULL_PTR(entry) || IS_NULL_PTR(host_ptr)) return FALSE;
 
   gboolean flushed = FALSE;
+
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
-  for(GList *l = entry->cl_mem_list; l;)
+  for(GList *l = g_list_first(entry->cl_mem_list); l;)
   {
     GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    const int mem_devid = (c && c->mem) ? dt_opencl_get_mem_context_id((cl_mem)c->mem) : -1;
-
-    if(c && c->mem && mem_devid != c->devid)
+    if(IS_NULL_PTR(c->mem))
     {
+      // Current cacheline holds an empty buffer, no point keeping it
+      entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
+      dt_free(c);
+      l = next;
+      continue;
+    }
+    if(dt_opencl_get_mem_context_id(c->mem) != devid)
+    {
+      // Current cacheline doesn't belong to current OpenCL devide: don't touch it
       l = next;
       continue;
     }
 
-    if(c && c->host_ptr == host_ptr && (devid < 0 || c->devid == devid) && dt_opencl_is_pinned_memory(c->mem))
-    {
-      if(c->refs > 0)
-      {
-        l = next;
-        continue;
-      }
-
-      entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
-      dt_opencl_release_mem_object(c->mem);
-      dt_free(c);
-      flushed = TRUE;
-    }
-
+    entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
+    dt_opencl_release_mem_object(c->mem);
+    dt_free(c);
+    flushed = TRUE;
     l = next;
   }
+
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
+
   return flushed;
 }
 #endif
@@ -597,37 +559,35 @@ static void *_pixel_cache_clmem_get(dt_pixel_cache_entry_t *entry, void *host_pt
                                     int width, int height, int bpp, int flags)
 {
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
-  for(GList *l = entry->cl_mem_list; l;)
+  for(GList *l = g_list_first(entry->cl_mem_list); l;)
   {
     GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    if(c && c->host_ptr == host_ptr && c->width == width && c->height == height
-       && c->bpp == bpp && c->flags == flags)
+    if(IS_NULL_PTR(c->mem))
     {
-      if(c->refs > 0)
-      {
-        l = next;
-        continue;
-      }
+      // No point in keeping buffer-less cachelines
+      entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
+      dt_free(c);
+      l = next;
+      continue;
+    }
 
-      /* Reuse must stay on the same OpenCL device. Be defensive and verify the
-       * live cl_mem context too, not only the cached metadata. */
-      const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-      if(c->devid != devid || mem_devid != devid)
-      {
-        entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
-        dt_opencl_release_mem_object((cl_mem)c->mem);
-        dt_free(c);
-        l = next;
-        continue;
-      }
-
+    // Buffer reuse must stay on the same OpenCL device and ensure proper size
+    if(dt_opencl_get_mem_context_id(c->mem) == devid 
+       && dt_opencl_get_image_width(c->mem) == width
+       && dt_opencl_get_image_height(c->mem) == height
+       && dt_opencl_get_image_element_size(c->mem) == bpp
+       && c->refs == 0)
+    {
+      // Destroy the current OpenCL cacheline and return the buffer, the cacheline will be recreated
+      // when we are done consuming the buffer
       entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
       void *mem = c->mem;
       dt_free(c);
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
       return mem;
     }
+
     l = next;
   }
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
@@ -650,18 +610,15 @@ void *dt_dev_pixelpipe_cache_borrow_cl_payload(dt_pixel_cache_entry_t *entry, in
   for(GList *l = g_list_first(entry->cl_mem_list); l; l = g_list_next(l))
   {
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    if(c && c->width == width && c->height == height && c->bpp == bpp && c->devid == devid)
+    if(dt_opencl_get_mem_context_id(c->mem) == devid 
+       && dt_opencl_get_image_width(c->mem) == width
+       && dt_opencl_get_image_height(c->mem) == height
+       && dt_opencl_get_image_element_size(c->mem) == bpp)
     {
       c->refs++;
       void *mem = c->mem;
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
       return mem;
-    }
-    else
-    {
-      dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, 
-        "[dt_dev_pixelpipe_cache_borrow_cl_payload] entry w=%i h=%i bpp=%i devid=%i flags=%i discarded\n", 
-        c->width, c->height, c->bpp, c->devid, c->flags);
     }
   }
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
@@ -708,7 +665,6 @@ void dt_dev_pixelpipe_cache_return_cl_payload(dt_pixel_cache_entry_t *entry, voi
 static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr, void *mem)
 {
   cl_mem clmem = (cl_mem)mem;
-  const cl_mem_flags flags = dt_opencl_get_mem_flags(clmem);
   const int devid = dt_opencl_get_mem_context_id(clmem);
   const int width = dt_opencl_get_image_width(clmem);
   const int height = dt_opencl_get_image_height(clmem);
@@ -723,7 +679,10 @@ static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr,
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
       return 3;
     }
-    if(c->devid == devid && c->width == width && c->height == height && c->bpp == bpp)
+    if(dt_opencl_get_mem_context_id(c->mem) == devid 
+       && dt_opencl_get_image_width(c->mem) == width
+       && dt_opencl_get_image_height(c->mem) == height
+       && dt_opencl_get_image_element_size(c->mem) == bpp)
     {
       if(c->refs > 0) continue;
 
@@ -745,11 +704,6 @@ static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr,
   }
 
   c->host_ptr = host_ptr;
-  c->devid = devid;
-  c->width = width;
-  c->height = height;
-  c->bpp = bpp;
-  c->flags = flags;
   c->mem = mem;
   entry->cl_mem_list = g_list_prepend(entry->cl_mem_list, c);
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
@@ -1587,43 +1541,39 @@ static inline void _log_arena_allocation_failure(dt_dev_pixelpipe_cache_t *cache
 #ifdef HAVE_OPENCL
 static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid, void *keep)
 {
+  if(devid < 0) return;
+
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
-  GList *l = entry->cl_mem_list;
-  while(l)
+
+  for(GList *l = g_list_first(entry->cl_mem_list); l;)
   {
     GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    const int mem_devid = (c && c->mem) ? dt_opencl_get_mem_context_id((cl_mem)c->mem) : -1;
-    if(c && c->mem && mem_devid != c->devid)
+    if(IS_NULL_PTR(c->mem))
     {
+      // Don't keep cacheline with NULL buffer
+      entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
+      dt_free(c);
       l = next;
       continue;
     }
 
-    if(c && (devid < 0 || (c->devid == devid && c->mem != keep)))
+    if(dt_opencl_get_mem_context_id(c->mem) != devid 
+       || c->mem != keep 
+       || IS_NULL_PTR(c->host_ptr)
+       || c->refs > 0
+       || IS_NULL_PTR(entry->data) 
+       || dt_atomic_get_int(&entry->refcount) > 0)
     {
-      /* Device-only payloads on hostless cache entries are the authoritative pixels until some
-       * downstream CPU stage materializes RAM or the entry gets destroyed. A global OpenCL flush
-       * may run between 2 modules of the same thumbnail batch, so only looking at `c->refs` is
-       * not enough here: a published entry can be live through its cache refcount while its
-       * device payload has not been borrowed yet by the next module. Flushing it in that window
-       * turns a valid GPU-only intermediate into an empty cacheline that later aborts on consume. */
-      if(IS_NULL_PTR(c->host_ptr) && IS_NULL_PTR(entry->data) && dt_atomic_get_int(&entry->refcount) > 0)
-      {
-        l = next;
-        continue;
-      }
-
-      if(c->refs > 0)
-      {
-        l = next;
-        continue;
-      }
-
-      entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
-      dt_opencl_release_mem_object(c->mem);
-      dt_free(c);
+      // Don't flush cachelines that don't belong to the current OpenCL device,
+      // or might still be used (references > 0), or have no RAM cache but only vRAM.
+      l = next;
+      continue;
     }
+
+    entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
+    dt_opencl_release_mem_object(c->mem);
+    dt_free(c);
     l = next;
   }
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
@@ -1852,8 +1802,7 @@ static void _free_cache_entry(dt_pixel_cache_entry_t *cache_entry)
         * queued work completes. We therefore wait for the owning device before releasing the host arena slot,
         * otherwise an auto-destroyed intermediate can be recycled into another module output while the GPU
         * is still reading the previous pixels. */
-      const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-      dt_opencl_finish(mem_devid >= 0 ? mem_devid : c->devid);
+      dt_opencl_finish(dt_opencl_get_mem_context_id((cl_mem)c->mem));
     }
     dt_pthread_mutex_unlock(&cache_entry->cl_mem_lock);
 #endif
@@ -2167,37 +2116,29 @@ static gboolean _cache_entry_has_device_payload(dt_pixel_cache_entry_t *cache_en
 #ifdef HAVE_OPENCL
   gboolean has_payload = FALSE;
   dt_pthread_mutex_lock(&cache_entry->cl_mem_lock);
-  for(GList *l = cache_entry->cl_mem_list; l;)
+  for(GList *l = g_list_first(cache_entry->cl_mem_list); l; l = g_list_next(l))
   {
-    GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    if(IS_NULL_PTR(c) || IS_NULL_PTR(c->mem))
-    {
-      l = next;
-      continue;
-    }
+    if(IS_NULL_PTR(c) || IS_NULL_PTR(c->mem)) continue;
 
     const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-    if(mem_devid != c->devid)
-    {
-      l = next;
-      continue;
-    }
-
-    if(IS_NULL_PTR(c->host_ptr) && (preferred_devid < 0 || c->devid == preferred_devid))
+    if(IS_NULL_PTR(c->host_ptr) && mem_devid == preferred_devid)
     {
       has_payload = TRUE;
       break;
     }
-
-    l = next;
   }
+
   dt_pthread_mutex_unlock(&cache_entry->cl_mem_lock);
   return has_payload;
+
 #else
+
   (void)preferred_devid;
   return FALSE;
+
 #endif
+
 }
 
 static dt_pixel_cache_entry_t *_cache_lookup_existing(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash,
@@ -2230,21 +2171,9 @@ static gboolean _cache_try_restore_device_payload(dt_pixel_cache_entry_t *cache_
   {
     GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
-    if(c && IS_NULL_PTR(c->host_ptr) && c->devid == preferred_devid && c->flags == CL_MEM_READ_WRITE)
+    if(!IS_NULL_PTR(c->mem) && c->refs == 0
+       && dt_opencl_get_mem_context_id((cl_mem)c->mem) == preferred_devid)
     {
-      const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-      if(mem_devid != preferred_devid)
-      {
-        l = next;
-        continue;
-      }
-
-      if(c->refs > 0)
-      {
-        l = next;
-        continue;
-      }
-
       cache_entry->cl_mem_list = g_list_delete_link(cache_entry->cl_mem_list, l);
       *cl_mem_output = c->mem;
       dt_free(c);
@@ -2360,7 +2289,7 @@ gboolean dt_dev_pixelpipe_cache_peek(dt_dev_pixelpipe_cache_t *cache, const uint
     return TRUE;
   }
 
-  if(data && dt_dev_pixelpipe_cache_restore_host_payload(cache, cache_entry, preferred_devid, data))
+  if(!IS_NULL_PTR(data) && dt_dev_pixelpipe_cache_restore_host_payload(cache, cache_entry, preferred_devid, data))
   {
     _trace_exact_hit("restore-host", hash, cache_entry, data ? *data : NULL,
                      cl_mem_output ? *cl_mem_output : NULL, preferred_devid, FALSE);
@@ -2370,7 +2299,7 @@ gboolean dt_dev_pixelpipe_cache_peek(dt_dev_pixelpipe_cache_t *cache, const uint
 
   if(!IS_NULL_PTR(data) && _cache_entry_has_device_payload(cache_entry, preferred_devid))
   {
-    if(data) *data = NULL;
+    *data = NULL;
     _trace_exact_hit("device-only", hash, cache_entry, NULL, NULL, preferred_devid, FALSE);
     return FALSE;
   }
