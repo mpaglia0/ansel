@@ -133,14 +133,8 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
                                                                 roi_out->height, piece->dsc_out.bpp,
                                                                 CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
                                                                 NULL);
-    if(cl_mem_base != NULL)
-    {
-      if(dt_dev_pixelpipe_cache_sync_cl_buffer(pipe->devid, ovoid, cl_mem_base, roi_out, CL_MAP_WRITE,
-                                               piece->dsc_out.bpp, NULL, "base buffer preload to device") == 0)
-        dt_dev_pixelpipe_cache_put_pinned_image(darktable.pixelpipe_cache, ovoid, cache_entry, &cl_mem_base);
-      else
-        dt_dev_pixelpipe_cache_release_cl_buffer(&cl_mem_base, cache_entry, NULL, FALSE);
-    }
+    if(!IS_NULL_PTR(cl_mem_base))
+      dt_dev_pixelpipe_cache_put_pinned_image(darktable.pixelpipe_cache, ovoid, cache_entry, &cl_mem_base);
   }
 #endif
 

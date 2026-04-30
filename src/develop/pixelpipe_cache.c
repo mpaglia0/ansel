@@ -696,38 +696,43 @@ void dt_dev_pixelpipe_cache_return_cl_payload(dt_pixel_cache_entry_t *entry, voi
 }
 
 #ifdef HAVE_OPENCL
-static void _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr, int devid,
-                                   int width, int height, int bpp, int flags, void *mem)
+/**
+ * @brief 
+ * 
+ * @param entry 
+ * @param host_ptr 
+ * @param mem 
+ * @return int 3 if the memory was already cached (no-op), 2 if we updated a previous cacheline (same width/height/bpp/devid) with a 
+ *  new buffer, 0 if we failed to create a new cacheline, 1 if we created a new cacheline.
+ */
+static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr, void *mem)
 {
-  const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)mem);
-  if(mem_devid < 0 || mem_devid != devid)
-  {
-    dt_print(DT_DEBUG_OPENCL,
-             "[pixelpipe_cache] refusing to cache cl_mem %p on recorded device %d (live device %d)\n",
-             mem, devid, mem_devid);
-    dt_opencl_release_mem_object((cl_mem)mem);
-    return;
-  }
+  cl_mem clmem = (cl_mem)mem;
+  const cl_mem_flags flags = dt_opencl_get_mem_flags(clmem);
+  const int devid = dt_opencl_get_mem_context_id(clmem);
+  const int width = dt_opencl_get_image_width(clmem);
+  const int height = dt_opencl_get_image_height(clmem);
+  const int bpp = dt_opencl_get_image_element_size(clmem);
 
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
-  for(GList *l = entry->cl_mem_list; l; l = g_list_next(l))
+  for(GList *l = g_list_first(entry->cl_mem_list); l; l = g_list_next(l))
   {
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
     if(c->mem == mem)
     {
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
-      return;
+      return 3;
     }
-    if(c->host_ptr == host_ptr && c->devid == devid && c->width == width && c->height == height
-       && c->bpp == bpp && c->flags == flags)
+    if(c->devid == devid && c->width == width && c->height == height && c->bpp == bpp)
     {
       if(c->refs > 0) continue;
 
       void *old = c->mem;
       c->mem = mem;
+      c->host_ptr = host_ptr;
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
       dt_opencl_release_mem_object(old);
-      return;
+      return 2;
     }
   }
 
@@ -736,7 +741,7 @@ static void _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr
   {
     dt_pthread_mutex_unlock(&entry->cl_mem_lock);
     dt_opencl_release_mem_object(mem);
-    return;
+    return 0;
   }
 
   c->host_ptr = host_ptr;
@@ -748,6 +753,7 @@ static void _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr
   c->mem = mem;
   entry->cl_mem_list = g_list_prepend(entry->cl_mem_list, c);
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
+  return 1;
 }
 
 static void _pixel_cache_clmem_remove(dt_pixel_cache_entry_t *entry, void *mem)
@@ -803,9 +809,16 @@ void *dt_dev_pixelpipe_cache_get_pinned_image(dt_dev_pixelpipe_cache_t *cache, v
                                               int width, int height, int bpp, int flags,
                                               gboolean *out_reused)
 {
-  if(out_reused) *out_reused = FALSE;
-  if(IS_NULL_PTR(cache) || IS_NULL_PTR(host_ptr) || devid < 0 || width <= 0 || height <= 0 || bpp <= 0) return NULL;
+  if(!IS_NULL_PTR(out_reused)) *out_reused = FALSE;
+  if(devid < 0 || width <= 0 || height <= 0 || bpp <= 0) return NULL;
 
+  // Pinning is enabled if the calling function requests it and if it is allowed by user for this device
+  gboolean use_pinned = dt_opencl_use_pinned_memory(devid) && (flags & CL_MEM_USE_HOST_PTR);
+
+  // If no pinning, remove the allocation flag now because pinning happens at vRAM alloc time
+  if(!use_pinned) flags &= ~CL_MEM_USE_HOST_PTR;
+
+  // Reuse the entry hint if available, else find the cache entry attached to the host_ptr
   dt_pixel_cache_entry_t *entry = entry_hint;
   if(IS_NULL_PTR(entry))
   {
@@ -814,43 +827,52 @@ void *dt_dev_pixelpipe_cache_get_pinned_image(dt_dev_pixelpipe_cache_t *cache, v
     dt_pthread_mutex_unlock(&cache->lock);
   }
 
+  // Reuse the vRAM buffer attached to the cache entry if any
   void *mem = NULL;
   if(entry)
   {
     mem = _pixel_cache_clmem_get(entry, host_ptr, devid, width, height, bpp, flags);
-    if(mem && out_reused) *out_reused = TRUE;
+    if(!IS_NULL_PTR(mem) && !IS_NULL_PTR(out_reused)) *out_reused = TRUE;
   }
 
+  // If no vRAM buffer was found, allocate a new one, pinning the host_ptr memory if the option is enabled
   if(IS_NULL_PTR(mem))
   {
-    mem = dt_opencl_alloc_device_use_host_pointer(devid, width, height, bpp, host_ptr, flags);
+    mem = dt_opencl_alloc_device_use_host_pointer(devid, width, height, bpp, use_pinned ? host_ptr : NULL, flags);
     if(IS_NULL_PTR(mem)) return NULL;
-    return mem;
   }
 
   const cl_mem clmem = (cl_mem)mem;
-  const cl_mem_flags mem_flags = dt_opencl_get_mem_flags(clmem);
   gboolean synced = FALSE;
 
-  if(mem_flags & CL_MEM_USE_HOST_PTR)
+  // Synchronize host_ptr with clmem
+  if(dt_opencl_is_pinned_memory(clmem))
   {
+    // Zero-copy for pinned buffers : note that some drivers may still use non-zero-copy,
+    // in which case that degrades to basic memory copy.
     void *mapped = dt_opencl_map_image(devid, clmem, TRUE, CL_MAP_WRITE, width, height, bpp);
-    if(mapped)
-    {
-      const gboolean zero_copy = (mapped == host_ptr);
-      if(dt_opencl_unmap_mem_object(devid, clmem, mapped) == CL_SUCCESS)
-      {
-        dt_opencl_finish(devid);
-        synced = zero_copy;
-      }
-    }
+    synced = (dt_opencl_unmap_mem_object(devid, clmem, mapped) == CL_SUCCESS);
   }
 
-  if(!synced && dt_opencl_write_host_to_device(devid, host_ptr, mem, width, height, bpp) != CL_SUCCESS)
+  if(!synced)
   {
-    if(entry) _pixel_cache_clmem_remove(entry, mem);
-    dt_opencl_release_mem_object(mem);
-    return NULL;
+    // Zero-copy failed or pinned memory is disabled for this device : use plain memory transfer
+    if(dt_opencl_write_host_to_device(devid, host_ptr, mem, width, height, bpp) != CL_SUCCESS)
+    {
+      // Clean everything up on error and abort
+      if(entry) _pixel_cache_clmem_remove(entry, mem);
+      dt_opencl_release_mem_object(mem);
+      dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_get_pinned_image] failed to synchronize\n");
+      return NULL;
+    }
+    else
+    {
+      dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_get_pinned_image] synchronized with write_host_to_device\n");
+    }
+  }
+  else
+  {
+    dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_get_pinned_image] synchronized with mapping/unmapping\n");
   }
 
   return mem;
@@ -859,34 +881,18 @@ void *dt_dev_pixelpipe_cache_get_pinned_image(dt_dev_pixelpipe_cache_t *cache, v
 void dt_dev_pixelpipe_cache_put_pinned_image(dt_dev_pixelpipe_cache_t *cache, void *host_ptr,
                                              dt_pixel_cache_entry_t *entry_hint, void **mem)
 {
-  if(IS_NULL_PTR(mem) || !*mem) return;
-
+  if(IS_NULL_PTR(mem) || IS_NULL_PTR(*mem) || IS_NULL_PTR(host_ptr)) return;
   dt_pixel_cache_entry_t *entry = entry_hint;
-  if(IS_NULL_PTR(entry) && cache && host_ptr)
+  if(IS_NULL_PTR(entry)) 
   {
-    dt_pthread_mutex_lock(&cache->lock);
-    entry = _cache_entry_for_host_ptr_locked(cache, host_ptr);
-    dt_pthread_mutex_unlock(&cache->lock);
+    dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dt_dev_pixelpipe_cache_put_pinned_image] no cache entry to put the vRAM buffer\n");
+    return;
   }
 
-  cl_mem clmem = (cl_mem)*mem;
-  const cl_mem_flags flags = dt_opencl_get_mem_flags(clmem);
-  const gboolean can_cache = (entry && host_ptr && (flags & CL_MEM_USE_HOST_PTR));
-  if(can_cache)
-  {
-    const int devid = dt_opencl_get_mem_context_id(clmem);
-    const int width = dt_opencl_get_image_width(clmem);
-    const int height = dt_opencl_get_image_height(clmem);
-    const int bpp = dt_opencl_get_image_element_size(clmem);
-    _pixel_cache_clmem_put(entry, host_ptr, devid, width, height, bpp, (int)flags, clmem);
-  }
-  else
-  {
-    if(entry) _pixel_cache_clmem_remove(entry, clmem);
-    dt_opencl_release_mem_object(clmem);
-  }
-
+  // FIXME: is it safe to cache non-pinned vRAM buffers (aka no CL_MEM_USE_HOST_PTR in flags) ?
+  const int state = _pixel_cache_clmem_put(entry, host_ptr, (cl_mem)*mem);
   *mem = NULL;
+  dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dt_dev_pixelpipe_cache_put_pinned_image] cache entry put the vRAM buffer (state=%i) in %p\n", state, entry);
 }
 
 gboolean dt_dev_pixelpipe_cache_flush_host_pinned_image(dt_dev_pixelpipe_cache_t *cache, void *host_ptr,
@@ -1160,19 +1166,9 @@ void dt_dev_pixelpipe_cache_release_cl_buffer(void **cl_mem_buffer, dt_pixel_cac
   if(cl_mem_buffer && !IS_NULL_PTR(*cl_mem_buffer))
   {
     cl_mem mem = *cl_mem_buffer;
-    const cl_mem_flags flags = dt_opencl_get_mem_flags(mem);
-    const gboolean can_cache_pinned = (cache_entry && host_ptr && (flags & CL_MEM_USE_HOST_PTR));
-    const gboolean can_cache_device = (cache_entry && !host_ptr && cache_device
-                                       && !(flags & CL_MEM_USE_HOST_PTR));
-    const gboolean can_cache = (can_cache_pinned || can_cache_device);
-    if(can_cache)
+    if(cache_device)
     {
-      const int devid = dt_opencl_get_mem_context_id(mem);
-      const int width = dt_opencl_get_image_width(mem);
-      const int height = dt_opencl_get_image_height(mem);
-      const int bpp = dt_opencl_get_image_element_size(mem);
-      const int tracked_flags = can_cache_device ? CL_MEM_READ_WRITE : (int)flags;
-      _pixel_cache_clmem_put(cache_entry, host_ptr, devid, width, height, bpp, tracked_flags, mem);
+      _pixel_cache_clmem_put(cache_entry, host_ptr, mem);
     }
     else
     {
