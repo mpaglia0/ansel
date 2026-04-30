@@ -55,16 +55,16 @@ file(GENERATE
   CONTENT
 "execute_process(
   COMMAND \"${CMAKE_COMMAND}\"
-    -DANSEL_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
-    -DANSEL_AUTHORS_FILE=\"${ANSEL_AUTHORS_FILE}\"
-    -DANSEL_SH_EXECUTABLE=\"${ANSEL_SH_EXECUTABLE}\"
-    -DANSEL_BASE=release-3.9.0
-    -DANSEL_HEAD=HEAD
-    -P \"${CMAKE_SOURCE_DIR}/tools/generate-authors.cmake\"
+    \"-DANSEL_SOURCE_DIR=${CMAKE_SOURCE_DIR}\"
+    \"-DANSEL_AUTHORS_FILE=${ANSEL_AUTHORS_FILE}\"
+    \"-DANSEL_SH_EXECUTABLE=${ANSEL_SH_EXECUTABLE}\"
+    \"-DANSEL_BASE=release-3.9.0\"
+    \"-DANSEL_HEAD=HEAD\"
+    \"-P\"
+    \"${CMAKE_SOURCE_DIR}/tools/generate-authors.cmake\"
 )
 "
 )
-install(SCRIPT "${CMAKE_BINARY_DIR}/cmake/install_generate_authors.cmake")
 
 # Allow forcing the C/CPP compiler that is actually used during the compilation
 # to something other than what is used by the cmake run. This is useful when
