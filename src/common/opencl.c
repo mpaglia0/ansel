@@ -190,7 +190,7 @@ gboolean dt_opencl_use_pinned_memory(const int devid)
 gboolean dt_opencl_is_pinned_memory(cl_mem mem)
 {
   const cl_mem_flags flags = dt_opencl_get_mem_flags(mem);
-  return (flags & CL_MEM_USE_HOST_PTR);
+  return (flags & CL_MEM_USE_HOST_PTR) || (flags & CL_MEM_ALLOC_HOST_PTR);
 }
 
 void dt_opencl_write_device_config(const int devid)
