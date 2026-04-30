@@ -941,7 +941,7 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
     }
     dev_background = dt_dev_pixelpipe_cache_get_pinned_image(
         darktable.pixelpipe_cache, background, NULL, devid, target_roi->width, target_roi->height,
-        4 * sizeof(float), CL_MEM_READ_WRITE, NULL);
+        4 * sizeof(float), CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, NULL);
     if(IS_NULL_PTR(dev_background)) goto cleanup;
   }
   else
