@@ -847,11 +847,6 @@ static gboolean _drawlayer_acquire_layer_image(const int devid, dt_pixel_cache_e
   if(IS_NULL_PTR(layer->mem))
   {
     layer->mem = dt_opencl_alloc_device(devid, target_roi->width, target_roi->height, 4 * sizeof(float));
-    if(IS_NULL_PTR(layer->mem))
-    {
-      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
-      layer->mem = dt_opencl_alloc_device(devid, target_roi->width, target_roi->height, 4 * sizeof(float));
-    }
   }
 
   if(IS_NULL_PTR(layer->mem))

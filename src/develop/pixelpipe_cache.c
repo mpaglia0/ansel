@@ -923,13 +923,7 @@ void *dt_dev_pixelpipe_cache_alloc_cl_device_buffer(int devid, const dt_iop_roi_
 {
   const gboolean gamma_rgba8 = _is_gamma_rgba8_output(module, bpp, message);
   const int cl_bpp = gamma_rgba8 ? DT_OPENCL_BPP_ENCODE_RGBA8((int)bpp) : (int)bpp;
-  void *mem = dt_opencl_alloc_device(devid, roi->width, roi->height, cl_bpp);
-  if(IS_NULL_PTR(mem))
-  {
-    dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
-    mem = dt_opencl_alloc_device(devid, roi->width, roi->height, cl_bpp);
-  }
-  return mem;
+  return dt_opencl_alloc_device(devid, roi->width, roi->height, cl_bpp);
 }
 
 /**
@@ -978,25 +972,10 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
       reused_from_cache = (!IS_NULL_PTR(cl_mem_input));
     }
 
-    // No luck: alloc new pinned memory buffer
+    // This will internally try to free up cache space if first alloc fails
     if(IS_NULL_PTR(cl_mem_input))
       cl_mem_input = dt_opencl_alloc_device_use_host_pointer(devid, roi->width, roi->height, cl_bpp,
                                                              host_ptr, flags);
-
-    if(IS_NULL_PTR(cl_mem_input))
-    {
-      // Still no luck: flush all cached vRAM buffers and retry 
-      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
-      if(reuse_pinned && cache_entry)
-      {
-        cl_mem_input = _pixel_cache_clmem_get(cache_entry, host_ptr, devid, roi->width, roi->height,
-                                              (int)bpp, flags);
-        reused_from_cache = (!IS_NULL_PTR(cl_mem_input));
-      }
-      if(IS_NULL_PTR(cl_mem_input))
-        cl_mem_input = dt_opencl_alloc_device_use_host_pointer(devid, roi->width, roi->height, cl_bpp,
-                                                               host_ptr, flags);
-    }
   }
   else
   {
