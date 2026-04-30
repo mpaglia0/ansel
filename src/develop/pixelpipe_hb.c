@@ -239,7 +239,7 @@ static inline gboolean _is_focused_realtime_gui_module(const dt_dev_pixelpipe_t 
                                                        const dt_develop_t *dev,
                                                        const dt_iop_module_t *module)
 {
-  return pipe && (pipe->type == DT_DEV_PIXELPIPE_FULL || pipe->type == DT_DEV_PIXELPIPE_PREVIEW)
+  return (pipe->type == DT_DEV_PIXELPIPE_FULL || pipe->type == DT_DEV_PIXELPIPE_PREVIEW)
          && pipe->realtime && dev && module && dev->gui_module == module;
 }
 
@@ -247,9 +247,9 @@ static inline gboolean _is_focused_realtime_gui_module(const dt_dev_pixelpipe_t 
 gboolean dt_dev_pixelpipe_cache_gpu_device_buffer(const dt_dev_pixelpipe_t *pipe,
                                                   const dt_pixel_cache_entry_t *cache_entry)
 {
-  return pipe && (pipe->realtime
+  return (pipe->realtime
              || (cache_entry
-                 && dt_pixel_cache_entry_get_data((dt_pixel_cache_entry_t *)cache_entry) == NULL));
+                 && IS_NULL_PTR(dt_pixel_cache_entry_get_data((dt_pixel_cache_entry_t *)cache_entry))));
 }
 
 char *dt_pixelpipe_get_pipe_name(dt_dev_pixelpipe_type_t pipe_type)
@@ -1080,10 +1080,6 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
      * obsolete pixels. Drop them here so later mixed GPU/CPU modules cannot resurrect stale device payloads. */
     dt_dev_pixelpipe_cache_flush_entry_clmem(output_entry);
   }
-
-  if(!IS_NULL_PTR(cl_mem_output))
-    dt_dev_pixelpipe_cache_release_cl_buffer(&cl_mem_output, output_entry, output,
-                                      dt_dev_pixelpipe_cache_gpu_device_buffer(pipe, output_entry));
 
   // Flag to throw away intermediate outputs as soon as the next module consumes them.
   // `cache_output` only means the backend had to keep a host-authoritative payload for this

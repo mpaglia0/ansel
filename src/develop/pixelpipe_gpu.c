@@ -625,10 +625,9 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
 
   /* The backend now owns the authoritative module output payload until publish time.
    * When the output stayed GPU-only, the recursion no longer carries `cl_mem_output`
-   * back explicitly, so we must cache or release it here before returning. Otherwise
+   * back explicitly, so we must cache it here before returning. Otherwise
    * the caller publishes a cacheline with metadata only and no recoverable payload. */
-  dt_dev_pixelpipe_cache_release_cl_buffer(&cl_mem_output, output_entry, output,
-                                    dt_dev_pixelpipe_cache_gpu_device_buffer(pipe, output_entry));
+  dt_dev_pixelpipe_cache_release_cl_buffer(&cl_mem_output, output_entry, output, TRUE);
 
   dt_dev_pixelpipe_cache_release_cl_buffer(&cl_mem_blend_output_temp, NULL, NULL, FALSE);
   dt_dev_pixelpipe_cache_release_cl_buffer(&cl_mem_blend_input_temp, NULL, NULL, FALSE);
