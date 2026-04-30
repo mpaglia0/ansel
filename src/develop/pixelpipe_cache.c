@@ -114,7 +114,7 @@ static dt_pixel_cache_entry_t *dt_pixel_cache_new_entry(const uint64_t hash, con
                                                         const char *name, const int id,
                                                         dt_dev_pixelpipe_cache_t *cache, gboolean alloc,
                                                         GHashTable *table);
-static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid, void *keep);
+static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid);
 static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t *entry, int preferred_devid,
                                                           gboolean prefer_device_payload);
 static int dt_dev_pixelpipe_cache_flush_old(dt_dev_pixelpipe_cache_t *cache);
@@ -445,7 +445,7 @@ static gboolean _cache_entry_clmem_flush_host_pinned_locked(dt_pixel_cache_entry
 }
 #endif
 
-void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const int devid, void *keep)
+void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const int devid)
 {
   if(devid >= 0) dt_opencl_events_wait_for(devid);
 
@@ -460,7 +460,10 @@ void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const i
      * must stay lightweight and must not wait on per-entry writer locks, otherwise
      * allocation fallback can deadlock against in-flight GPU renders that already
      * hold cache entry locks. */
-    _cache_entry_clmem_flush_device(entry, devid, keep);
+    dt_print(DT_DEBUG_OPENCL | DT_DEBUG_VERBOSE, 
+      "[dt_dev_pixelpipe_cache_flush_clmem] trying to flush vRAM for entry %" PRIu64 "...\n",
+      entry->hash);
+    _cache_entry_clmem_flush_device(entry, devid);
   }
   dt_pthread_mutex_unlock(&cache->lock);
 }
@@ -721,12 +724,6 @@ static void _pixel_cache_clmem_remove(dt_pixel_cache_entry_t *entry, void *mem)
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
     if(c && c->mem == mem)
     {
-      if(c->refs > 0)
-      {
-        dt_pthread_mutex_unlock(&entry->cl_mem_lock);
-        return;
-      }
-
       entry->cl_mem_list = g_list_delete_link(entry->cl_mem_list, l);
       dt_free(c);
     }
@@ -929,7 +926,7 @@ void *dt_dev_pixelpipe_cache_alloc_cl_device_buffer(int devid, const dt_iop_roi_
   void *mem = dt_opencl_alloc_device(devid, roi->width, roi->height, cl_bpp);
   if(IS_NULL_PTR(mem))
   {
-    dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid, keep);
+    dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
     mem = dt_opencl_alloc_device(devid, roi->width, roi->height, cl_bpp);
   }
   return mem;
@@ -989,7 +986,7 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
     if(IS_NULL_PTR(cl_mem_input))
     {
       // Still no luck: flush all cached vRAM buffers and retry 
-      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid, NULL);
+      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
       if(reuse_pinned && cache_entry)
       {
         cl_mem_input = _pixel_cache_clmem_get(cache_entry, host_ptr, devid, roi->width, roi->height,
@@ -1493,10 +1490,10 @@ static inline void _log_arena_allocation_failure(dt_dev_pixelpipe_cache_t *cache
 
 // keep: OpenCL buffer to NOT release
 #ifdef HAVE_OPENCL
-static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid, void *keep)
+static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid)
 {
-  if(devid < 0) return;
-
+  // devid = -1 is code for flush all regardless of device
+  // it runs at pipeline cleanup
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
 
   for(GList *l = g_list_first(entry->cl_mem_list); l;)
@@ -1512,15 +1509,17 @@ static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const
       continue;
     }
 
-    if(dt_opencl_get_mem_context_id(c->mem) != devid 
-       || c->mem != keep 
-       || IS_NULL_PTR(c->host_ptr)
-       || c->refs > 0
-       || IS_NULL_PTR(entry->data) 
-       || dt_atomic_get_int(&entry->refcount) > 0)
+    gboolean referenced = c->refs > 0;
+    gboolean not_ours = (dt_opencl_get_mem_context_id(c->mem) != devid) && devid > -1;
+
+    if(referenced || not_ours)
     {
       // Don't flush cachelines that don't belong to the current OpenCL device,
       // or might still be used (references > 0), or have no RAM cache but only vRAM.
+      dt_print(DT_DEBUG_OPENCL | DT_DEBUG_VERBOSE, 
+        "[dt_dev_pixelpipe_cache_flush_clmem] for entry %" PRIu64 ": couldn't flush %p "
+        "(referenced=%i not ours=%i)\n",
+        entry->hash, c->mem, referenced, not_ours);
       l = next;
       continue;
     }
@@ -1533,7 +1532,7 @@ static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const
   dt_pthread_mutex_unlock(&entry->cl_mem_lock);
 }
 #else 
-static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid, void *keep)
+static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const int devid)
 {
   return;
 }

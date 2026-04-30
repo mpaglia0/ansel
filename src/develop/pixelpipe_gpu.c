@@ -258,7 +258,7 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
     dt_print(DT_DEBUG_OPENCL,
              "[dev_pixelpipe] %s pre-check didn't fit on device, flushing cached pinned buffers and retrying\n",
              module->name());
-    dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, pipe->devid, cl_mem_input);
+    dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, pipe->devid);
     fits_on_device = dt_opencl_image_fits_device(pipe->devid, precheck_width, precheck_height,
                                                  MAX(piece->dsc_in.bpp, piece->dsc_out.bpp),
                                                  required_factor_cl, tiling->overhead);

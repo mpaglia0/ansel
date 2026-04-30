@@ -2270,7 +2270,7 @@ static inline void *_dt_opencl_alloc_image2d(const int devid, const int width, c
       dt_print(DT_DEBUG_OPENCL,
                "[opencl %s] out of memory on device %d, flushing cached pinned buffers and retrying\n",
                context, devid);
-      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid, NULL);
+      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
       continue;
     }
     break;
@@ -2341,7 +2341,7 @@ void *dt_opencl_alloc_device_buffer_with_flags(const int devid, const size_t siz
       dt_print(DT_DEBUG_OPENCL,
                "[opencl alloc_device_buffer] out of memory on device %d, flushing cached pinned buffers and retrying\n",
                devid);
-      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid, NULL);
+      dt_dev_pixelpipe_cache_flush_clmem(darktable.pixelpipe_cache, devid);
       continue;
     }
     break;
