@@ -131,7 +131,7 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
     void *cl_mem_base = dt_dev_pixelpipe_cache_get_pinned_image(darktable.pixelpipe_cache, ovoid,
                                                                 cache_entry, pipe->devid, roi_out->width,
                                                                 roi_out->height, piece->dsc_out.bpp,
-                                                                CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                                                CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
                                                                 NULL);
     if(!IS_NULL_PTR(cl_mem_base))
       dt_dev_pixelpipe_cache_put_pinned_image(darktable.pixelpipe_cache, ovoid, cache_entry, &cl_mem_base);
