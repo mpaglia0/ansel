@@ -711,8 +711,7 @@ static gboolean _drawlayer_sync_host_image_to_device(const int devid, cl_mem dev
     }
   }
 
-  const cl_mem_flags flags = dt_opencl_get_mem_flags(device_image);
-  if(flags & CL_MEM_USE_HOST_PTR)
+  if(dt_opencl_is_pinned_memory(device_image))
   {
     void *mapped = dt_opencl_map_image(devid, device_image, TRUE, CL_MAP_WRITE, width, height, bpp);
     if(mapped)

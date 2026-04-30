@@ -348,8 +348,7 @@ static gboolean _cache_entry_materialize_host_data_locked(dt_pixel_cache_entry_t
 
   if(source)
   {
-    const cl_mem_flags flags = dt_opencl_get_mem_flags((cl_mem)source->mem);
-    if((flags & CL_MEM_USE_HOST_PTR) && source->host_ptr == entry->data)
+    if(dt_opencl_is_pinned_memory((cl_mem)source->mem) && source->host_ptr == entry->data)
     {
       void *mapped = dt_opencl_map_image(source->devid, (cl_mem)source->mem, TRUE, CL_MAP_READ,
                                          source->width, source->height, source->bpp);
@@ -430,12 +429,11 @@ static gboolean _cache_entry_clmem_has_host_pinned_locked(dt_pixel_cache_entry_t
   {
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
     const int mem_devid = (c && c->mem) ? dt_opencl_get_mem_context_id((cl_mem)c->mem) : -1;
-    const cl_mem_flags flags = c ? dt_opencl_get_mem_flags((cl_mem)c->mem) : 0;
 
     if(c && c->mem && mem_devid != c->devid) continue;
 
     if(c && c->mem && c->refs == 0 && c->host_ptr == host_ptr && (devid < 0 || c->devid == devid)
-       && (flags & CL_MEM_USE_HOST_PTR))
+       && dt_opencl_is_pinned_memory(c->mem))
     {
       found = TRUE;
       break;
@@ -457,7 +455,6 @@ static gboolean _cache_entry_clmem_flush_host_pinned_locked(dt_pixel_cache_entry
     GList *next = g_list_next(l);
     dt_cache_clmem_t *c = (dt_cache_clmem_t *)l->data;
     const int mem_devid = (c && c->mem) ? dt_opencl_get_mem_context_id((cl_mem)c->mem) : -1;
-    const cl_mem_flags flags = c ? dt_opencl_get_mem_flags((cl_mem)c->mem) : 0;
 
     if(c && c->mem && mem_devid != c->devid)
     {
@@ -465,7 +462,7 @@ static gboolean _cache_entry_clmem_flush_host_pinned_locked(dt_pixel_cache_entry
       continue;
     }
 
-    if(c && c->host_ptr == host_ptr && (devid < 0 || c->devid == devid) && (flags & CL_MEM_USE_HOST_PTR))
+    if(c && c->host_ptr == host_ptr && (devid < 0 || c->devid == devid) && dt_opencl_is_pinned_memory(c->mem))
     {
       if(c->refs > 0)
       {
@@ -1216,10 +1213,9 @@ int dt_dev_pixelpipe_cache_sync_cl_buffer(const int devid, void *host_ptr, void 
   if(IS_NULL_PTR(host_ptr) || IS_NULL_PTR(cl_mem_buffer)) return 1;
 
   const cl_mem mem = (cl_mem)cl_mem_buffer;
-  const cl_mem_flags flags = dt_opencl_get_mem_flags(mem);
 
   // Fast path for true zero-copy pinned images: map/unmap is enough to synchronize host<->device.
-  if(flags & CL_MEM_USE_HOST_PTR)
+  if(dt_opencl_is_pinned_memory(mem))
   {
     void *mapped = dt_opencl_map_image(devid, mem, TRUE, cl_mode, roi->width, roi->height, (int)bpp);
     if(mapped)
@@ -1338,8 +1334,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
     // otherwise another thread may overwrite host memory while the GPU is still reading it.
     dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s will use its input directly from vRAM\n", module->name());
     const cl_mem mem = (cl_mem)*cl_mem_input;
-    const cl_mem_flags flags = dt_opencl_get_mem_flags(mem);
-    if(flags & CL_MEM_USE_HOST_PTR)
+    if(dt_opencl_is_pinned_memory(mem))
       if(_cl_is_zero_copy_image(pipe->devid, mem, input, roi_in, in_bpp))
       {
         dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, input_entry);
@@ -1371,8 +1366,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
   if(!fail && *cl_mem_input)
   {
     mem = (cl_mem)*cl_mem_input;
-    const cl_mem_flags flags = dt_opencl_get_mem_flags(mem);
-    if(flags & CL_MEM_USE_HOST_PTR)
+    if(dt_opencl_is_pinned_memory(mem))
       keep_lock = _cl_is_zero_copy_image(pipe->devid, mem, input, roi_in, in_bpp);
   }
 

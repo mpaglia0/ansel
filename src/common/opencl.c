@@ -187,6 +187,12 @@ gboolean dt_opencl_use_pinned_memory(const int devid)
   return cl->dev[devid].pinned_memory;
 }
 
+gboolean dt_opencl_is_pinned_memory(cl_mem mem)
+{
+  const cl_mem_flags flags = dt_opencl_get_mem_flags(mem);
+  return (flags & CL_MEM_USE_HOST_PTR);
+}
+
 void dt_opencl_write_device_config(const int devid)
 {
   if(devid < 0) return;

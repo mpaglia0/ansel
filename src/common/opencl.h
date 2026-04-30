@@ -490,6 +490,7 @@ gboolean dt_opencl_read_device_config(const int devid);
 int dt_opencl_avoid_atomics(const int devid);
 int dt_opencl_micro_nap(const int devid);
 gboolean dt_opencl_use_pinned_memory(const int devid);
+gboolean dt_opencl_is_pinned_memory(cl_mem mem);
 
 #ifdef __cplusplus
 }
