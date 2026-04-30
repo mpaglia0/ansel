@@ -1070,7 +1070,7 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   else
     _reset_piece_cache_entry(piece);
 
-  if(!IS_NULL_PTR(output_entry) && !IS_NULL_PTR(output)
+  if(!IS_NULL_PTR(output_entry) && !IS_NULL_PTR(output) && !(module->flags() & IOP_FLAGS_CPU_WRITES_OPENCL)
      && ((pixelpipe_flow & PIXELPIPE_FLOW_PROCESSED_ON_CPU)
          || (pixelpipe_flow & PIXELPIPE_FLOW_PROCESSED_WITH_TILING)))
   {

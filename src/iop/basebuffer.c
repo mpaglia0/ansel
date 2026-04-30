@@ -50,7 +50,7 @@ int default_group()
 
 int flags()
 {
-  return IOP_FLAGS_HIDDEN | IOP_FLAGS_ONE_INSTANCE | IOP_FLAGS_NO_HISTORY_STACK | IOP_FLAGS_UNSAFE_COPY | IOP_FLAGS_TAKE_NO_INPUT;
+  return IOP_FLAGS_HIDDEN | IOP_FLAGS_ONE_INSTANCE | IOP_FLAGS_NO_HISTORY_STACK | IOP_FLAGS_UNSAFE_COPY | IOP_FLAGS_TAKE_NO_INPUT | IOP_FLAGS_CPU_WRITES_OPENCL;
 }
 
 int default_colorspace(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_t *piece)
