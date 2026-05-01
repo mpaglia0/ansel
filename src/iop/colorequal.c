@@ -898,13 +898,7 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
   const int height = piece->roi_in.height;
   const int ch = piece->dsc_in.channels;
 
-  if(IS_NULL_PTR(d->clut) || d->clut_level == 0)
-  {
-    dt_iop_image_copy_by_size(obuf, ibuf, width, height, ch);
-    return 0;
-  }
-
-  if(IS_NULL_PTR(d->lut_profile) || IS_NULL_PTR(d->work_profile))
+  if(IS_NULL_PTR(d->clut) || d->clut_level == 0 || IS_NULL_PTR(d->lut_profile) || IS_NULL_PTR(d->work_profile))
   {
     dt_iop_image_copy_by_size(obuf, ibuf, width, height, ch);
     return 0;
