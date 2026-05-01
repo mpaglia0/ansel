@@ -817,7 +817,7 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   dt_pixel_cache_entry_t *existing_cache = NULL;
   void *existing_output = NULL;
   const gboolean exact_output_cache_hit
-      = _requests_cache(pipe, piece)
+      = !_bypass_cache(pipe, piece)
         && dt_dev_pixelpipe_cache_peek(darktable.pixelpipe_cache, hash, &existing_output, &existing_cache,
                                        pipe->devid, NULL)
         && !IS_NULL_PTR(existing_output);
@@ -916,13 +916,13 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   dt_pixelpipe_flow_t pixelpipe_flow = (PIXELPIPE_FLOW_NONE | PIXELPIPE_FLOW_HISTOGRAM_NONE);
 
   gchar *name = g_strdup_printf("module %s (%s) for pipe %s", module->op, module->multi_name, type);
-  gboolean cache_output = piece->force_opencl_cache;
+  gboolean cache_output = piece->force_opencl_cache && !_bypass_cache(pipe, piece);
   const gboolean allow_cache_reuse = !(darktable.unmuted & DT_DEBUG_NOCACHE_REUSE);
   /* `piece->cache_entry` is only valid as a writable-reuse hint for transient outputs that will
    * be fully overwritten later. As soon as we keep the current output as a published cacheline in
    * RAM, rekey reuse must stop for that piece so later runs cannot overwrite a long-term state in
    * place just because the pipe is running in realtime. */
-  const gboolean allow_rekey_reuse = _requests_cache(pipe, piece) && allow_cache_reuse
+  const gboolean allow_rekey_reuse = !_bypass_cache(pipe, piece) && allow_cache_reuse
                                      && !cache_output;
   const dt_dev_pixelpipe_cache_writable_status_t acquire_status
       = dt_dev_pixelpipe_cache_get_writable(darktable.pixelpipe_cache, hash, bufsize, name, pipe->type,
@@ -1313,7 +1313,7 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
                                                     : requested_piece ? requested_piece->global_hash
                                                                       : DT_PIXELPIPE_CACHE_HASH_INVALID;
   dt_pixel_cache_entry_t *entry = NULL;
-  if(_requests_cache(pipe, requested_piece)
+  if(!_bypass_cache(pipe, requested_piece)
      && requested_hash != DT_PIXELPIPE_CACHE_HASH_INVALID
      && dt_dev_pixelpipe_cache_peek(darktable.pixelpipe_cache, requested_hash, &buf, &entry,
                                     pipe->devid, NULL)
