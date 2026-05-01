@@ -71,13 +71,16 @@ void modify_roi_out(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, dt_de
   *roi_out = (dt_iop_roi_t){ 0, 0, pipe->iwidth, pipe->iheight, 1.f };
 }
 
-static int _fetch_base_buffer(const dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_t *piece, 
-                              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out, 
-                              const dt_mipmap_buffer_t buf, const void *const ivoid, void *const ovoid)
+
+__DT_CLONE_TARGETS__
+int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_t *piece,
+            const void *const ivoid, void *const ovoid)
 {
-  if(IS_NULL_PTR(buf.buf)) return 1;
-  if(roi_out->width <= 0 || roi_out->height <= 0) return 1;
-  const void *const restrict input = buf.buf;
+  const dt_iop_roi_t *const roi_out = &piece->roi_out;
+  const dt_iop_roi_t *const roi_in = &piece->roi_in;
+  dt_mipmap_buffer_t buf;
+
+  dt_mipmap_cache_get(darktable.mipmap_cache, &buf, pipe->imgid, pipe->size, DT_MIPMAP_BLOCKING, 'r');
 
   // Catch out-of-bounds here because roi_in -> roi_out conversions
   // use float scaling that may not always respect initial size.
@@ -99,47 +102,59 @@ static int _fetch_base_buffer(const dt_dev_pixelpipe_t *pipe, const dt_dev_pixel
   /* This stage copies the immutable mipmap-cache payload into the pixelpipe cacheline that will
    * be consumed by the first real processing stage. Keeping the source copy local here makes the
    * cache ownership and lifetime visible in the recursion instead of in a hidden bootstrap path. */
+  const void *const restrict input = buf.buf;
+
   __OMP_PARALLEL_FOR__()
   for(size_t j = 0; j < MIN(roi_out->height, in_height); j++)
     memcpy(ovoid + j * out_stride, input + x_offset + y_offset + j * in_stride, MIN(in_stride, out_stride));
 
+  dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
+
   return 0;
 }
 
-int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_t *piece,
-            const void *const ivoid, void *const ovoid)
+#ifdef HAVE_OPENCL
+int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out)
 {
   const dt_iop_roi_t *const roi_out = &piece->roi_out;
   const dt_iop_roi_t *const roi_in = &piece->roi_in;
-  int err = 1;
   dt_mipmap_buffer_t buf;
 
   dt_mipmap_cache_get(darktable.mipmap_cache, &buf, pipe->imgid, pipe->size, DT_MIPMAP_BLOCKING, 'r');
-  err = _fetch_base_buffer(pipe, piece, roi_in, roi_out, buf, ivoid, ovoid);
+
+  // Catch out-of-bounds here because roi_in -> roi_out conversions
+  // use float scaling that may not always respect initial size.
+
+  // Crop rectangle offset
+  const size_t x = MAX(roi_in->x, 0);
+  const size_t y = MAX(roi_in->y, 0);
+
+  // Crop rectangle size
+  const size_t in_width = MIN(roi_in->width, pipe->iwidth - x);
+  const size_t in_stride = in_width * piece->dsc_in.bpp;
+
+  // Crop offset translated in memory sizes
+  const size_t y_offset = y * in_stride;
+  const size_t x_offset = x * piece->dsc_in.bpp;
+
+  /* This stage copies the immutable mipmap-cache payload into the pixelpipe cacheline that will
+   * be consumed by the first real processing stage. Keeping the source copy local here makes the
+   * cache ownership and lifetime visible in the recursion instead of in a hidden bootstrap path. */
+  const void *const restrict input = buf.buf;
+
+  size_t origin[] = { x, y, 0 };
+  size_t region[] = { MIN(roi_out->width, roi_in->width), MIN(roi_out->height, roi_in->height), 1 };
+
+  int err = dt_opencl_write_host_to_device_raw(pipe->devid, input + x_offset + y_offset, dev_out, origin,
+                                               region, in_stride, CL_TRUE);
+
+
   dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
 
-#ifdef HAVE_OPENCL
-  if(!err && pipe->opencl_enabled)
-  {
-    /**
-     * Put the RAM output on the GPU memory right now. This is optional, as it would be done by the next
-     * OpenCL-able module anyway, but on some shitty GPU (AMD), that copy is expensive and it would look
-     * as if the next module was slow. So we pay the memory expense now for the sake of accurate benchmarking
-     * in later modules.
-     */
-    dt_pixel_cache_entry_t *cache_entry = dt_dev_pixelpipe_cache_get_entry_by_data(darktable.pixelpipe_cache, ovoid);
-    void *cl_mem_base = dt_dev_pixelpipe_cache_get_pinned_image(darktable.pixelpipe_cache, ovoid,
-                                                                cache_entry, pipe->devid, roi_out->width,
-                                                                roi_out->height, piece->dsc_out.bpp,
-                                                                CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
-                                                                NULL);
-    if(!IS_NULL_PTR(cl_mem_base))
-      dt_dev_pixelpipe_cache_put_pinned_image(darktable.pixelpipe_cache, ovoid, cache_entry, &cl_mem_base);
-  }
+  return err == CL_SUCCESS;
+}
 #endif
 
-  return err;
-}
 
 void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {

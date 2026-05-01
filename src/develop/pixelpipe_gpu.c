@@ -201,35 +201,24 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   dt_iop_buffer_dsc_t blend_input_dsc = actual_input_dsc;
   dt_iop_buffer_dsc_t blend_output_dsc = piece->dsc_out;
 
-  // Special case for basebuffer module : first module of the pipe, so there is no input entry.
-  // It will grab its input from pipeline directly
-  if(IS_NULL_PTR(input_entry) && (piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT))
-  {
-    return pixelpipe_process_on_CPU(pipe, piece, previous_piece, tiling, pixelpipe_flow,
-                                    cache_output, NULL, output_entry);
-  }
-
-  // No input entry otherwise : nothing we can do
-  if(IS_NULL_PTR(input_entry))
-  {
-    dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s has no input cache entry... aborting.\n", module->name());
-    return 1;
-  }
-
   // Try to reuse the cached vRAM buffer for the input entry if available 
-  cl_mem_input = dt_dev_pixelpipe_cache_borrow_cl_payload(input_entry, pipe->devid,
-                                          piece->roi_in.width, piece->roi_in.height,
-                                          actual_input_dsc.bpp);
-  borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
-  if(IS_NULL_PTR(cl_mem_input))
-    dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dev_pixelpipe] %s could not get a cached vRAM input buffer.\n", module->name());
-    
-  // Note: if that fails, we will attempt resync from RAM cache later
-
-  if(IS_NULL_PTR(input) && IS_NULL_PTR(cl_mem_input))
+  // except for basebuffer module which takes no input
+  if(!(piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT))
   {
-    dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s has no RAM nor vRAM input... aborting.\n", module->name());
-    return 1;
+    cl_mem_input = dt_dev_pixelpipe_cache_borrow_cl_payload(input_entry, pipe->devid,
+                                            piece->roi_in.width, piece->roi_in.height,
+                                            actual_input_dsc.bpp);
+    borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
+    if(IS_NULL_PTR(cl_mem_input))
+      dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dev_pixelpipe] %s could not get a cached vRAM input buffer.\n", module->name());
+      
+    // Note: if that fails, we will attempt resync from RAM cache later
+
+    if(IS_NULL_PTR(input) && IS_NULL_PTR(cl_mem_input))
+    {
+      dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s has no RAM nor vRAM input... aborting.\n", module->name());
+      return 1;
+    }
   }
 
   if(!_is_opencl_supported(pipe, piece, module) || !pipe->opencl_enabled || !(pipe->devid >= 0))
@@ -277,6 +266,7 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
 
   if(possible_cl && !fits_on_device)
   {
+    // Prepare the input buffer for tiling
     const float cl_px = dt_opencl_get_device_available(pipe->devid)
                         / (sizeof(float) * MAX(piece->dsc_in.bpp, piece->dsc_out.bpp)
                            * ceilf(required_factor_cl));
@@ -292,8 +282,10 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
       goto error;
     }
 
+    // Ensure the input image is present on RAM cache,
+    // tiling on OpenCL will only copy tiles from it to GPU.
     if(_gpu_init_input(pipe, &input, &cl_mem_input, piece, tiling,
-                       input_entry, output_entry))
+                      input_entry, output_entry))
       goto error;
   }
 
@@ -301,21 +293,22 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
 
   if(fits_on_device)
   {
-    if(dt_dev_pixelpipe_cache_prepare_cl_input(pipe, module, input, &cl_mem_input,
-                             &piece->roi_in, piece->dsc_in.bpp, input_entry,
-                             &locked_input_entry, NULL))
-      goto error;
+    // Alloc input GPU buffer if we didn't already borrow it
+    if(!(piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT))
+      if(dt_dev_pixelpipe_cache_prepare_cl_input(pipe, module, input, &cl_mem_input,
+                              &piece->roi_in, piece->dsc_in.bpp, input_entry,
+                              &locked_input_entry, NULL))
+        goto error;
+
     cl_mem_process_input = cl_mem_input;
 
-    if(IS_NULL_PTR(cl_mem_output))
-    {
-      const gboolean reuse_output_cacheline = _requests_cache(pipe, piece) && (pipe->realtime || !(*cache_output));
-      cl_mem_output = dt_dev_pixelpipe_cache_get_cl_buffer(pipe->devid, output, &piece->roi_out, piece->dsc_out.bpp, module,
-                                       "output", output_entry, reuse_output_cacheline, reuse_output_cacheline,
-                                       NULL, cl_mem_input);
-      if(IS_NULL_PTR(cl_mem_output)) goto error;
-    }
-
+    // Alloc output GPU buffer - non-optional
+    const gboolean reuse_output_cacheline = _requests_cache(pipe, piece) && (pipe->realtime || !(*cache_output));
+    cl_mem_output = dt_dev_pixelpipe_cache_get_cl_buffer(pipe->devid, output, &piece->roi_out, piece->dsc_out.bpp, module,
+                                      "output", output_entry, reuse_output_cacheline, reuse_output_cacheline,
+                                      NULL, cl_mem_input);
+    if(IS_NULL_PTR(cl_mem_output)) goto error;
+    
     const int cst_before_cl = process_input_dsc.cst;
     if(process_input_dsc.cst != piece->dsc_in.cst
        && !(dt_iop_colorspace_is_rgb(process_input_dsc.cst) && dt_iop_colorspace_is_rgb(piece->dsc_in.cst)))
@@ -453,6 +446,8 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   }
   else if(piece->process_tiling_ready && !IS_NULL_PTR(input))
   {
+    // FIXME: we don't cover the case (piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT)
+    // in tiling path
     const float *module_input = input;
     const float *blend_input = input;
     float *module_input_temp = NULL;

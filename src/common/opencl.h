@@ -388,7 +388,7 @@ int dt_opencl_write_host_to_device_rowpitch_non_blocking(const int devid, void *
                                                          const int width, const int height,
                                                          const int rowpitch);
 
-int dt_opencl_write_host_to_device_raw(const int devid, void *host, void *device, const size_t *origin,
+int dt_opencl_write_host_to_device_raw(const int devid, const void *host, void *device, const size_t *origin,
                                        const size_t *region, const int rowpitch, const int blocking);
 
 void *dt_opencl_copy_host_to_device(const int devid, void *host, const int width, const int height,
