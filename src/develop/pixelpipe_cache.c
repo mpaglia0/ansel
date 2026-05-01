@@ -665,9 +665,6 @@ static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr,
 {
   cl_mem clmem = (cl_mem)mem;
   const int devid = dt_opencl_get_mem_context_id(clmem);
-  const int width = dt_opencl_get_image_width(clmem);
-  const int height = dt_opencl_get_image_height(clmem);
-  const int bpp = dt_opencl_get_image_element_size(clmem);
 
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
   for(GList *l = g_list_first(entry->cl_mem_list); l; l = g_list_next(l))
@@ -678,12 +675,11 @@ static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr,
       dt_pthread_mutex_unlock(&entry->cl_mem_lock);
       return 3;
     }
-    if(dt_opencl_get_mem_context_id(c->mem) == devid 
-       && dt_opencl_get_image_width(c->mem) == width
-       && dt_opencl_get_image_height(c->mem) == height
-       && dt_opencl_get_image_element_size(c->mem) == bpp)
+    if(dt_opencl_get_mem_context_id(c->mem) == devid)
     {
-      if(c->refs > 0) continue;
+      // We keep one GPU cacheline per GPU device per pipeline cache entry
+      // If refs > 0 here, we have a problem earlier.
+      assert(c->refs > 0);
 
       void *old = c->mem;
       c->mem = mem;
