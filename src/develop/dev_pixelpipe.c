@@ -163,7 +163,7 @@ static gboolean _sync_realtime_top_history_in_place(dt_dev_pixelpipe_t *pipe)
  * @brief Seal host-cache retention policy on synchronized pieces before processing starts.
  *
  * @details
- * `piece->force_opencl_cache` is part of the sealed runtime contract: the
+ * `piece->cache_output_on_ram` is part of the sealed runtime contract: the
  * processing recursion only consumes it and must not infer GUI/runtime
  * heuristics while running. This pass therefore authors all host-cache
  * retention requests immediately after history synchronization, while the live
@@ -178,7 +178,7 @@ static gboolean _sync_realtime_top_history_in_place(dt_dev_pixelpipe_t *pipe)
  * enabled module, not on the current one.
  *
  * We add to that:
- * - the module's own authored `force_opencl_cache`,
+ * - the module's own authored `cache_output_on_ram`,
  * - user cache preferences,
  * - active color-picker sampling,
  * - global histogram stages sampling their output,
@@ -209,9 +209,9 @@ static void _seal_opencl_cache_policy(dt_dev_pixelpipe_t *pipe)
 
     gchar *string = g_strdup_printf("/plugins/%s/cache", module->op);
     if(!dt_conf_key_exists(string) || !dt_conf_key_not_empty(string))
-      dt_conf_set_bool(string, piece->force_opencl_cache);
+      dt_conf_set_bool(string, piece->cache_output_on_ram);
 
-    const gboolean authored_cache = piece->force_opencl_cache;
+    const gboolean authored_cache = piece->cache_output_on_ram;
     const gboolean user_requested_cache = dt_conf_get_bool(string);
     dt_free(string);
 
@@ -232,7 +232,7 @@ static void _seal_opencl_cache_policy(dt_dev_pixelpipe_t *pipe)
     const gboolean previous_output_must_cache_host
         = !supports_opencl || active_in_gui || module_hist_on || global_hist_input_on || has_autoset;
 
-    piece->force_opencl_cache
+    piece->cache_output_on_ram
         = authored_cache || user_requested_cache || color_picker_on
           || global_hist_output_on
           || current_output_must_cache_host;

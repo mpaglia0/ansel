@@ -2805,7 +2805,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   piece->process_cl_ready = (d->mode == DT_IOP_HIGHLIGHTS_INPAINT) ? 0 : 1;
 
   if(d->mode == DT_IOP_HIGHLIGHTS_LAPLACIAN) 
-    piece->force_opencl_cache = TRUE;
+    piece->cache_output_on_ram = TRUE;
 
   if(d->mode != DT_IOP_HIGHLIGHTS_LAPLACIAN)
   {

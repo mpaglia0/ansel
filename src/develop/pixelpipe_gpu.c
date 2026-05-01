@@ -303,10 +303,9 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
     cl_mem_process_input = cl_mem_input;
 
     // Alloc output GPU buffer - non-optional
-    const gboolean reuse_output_cacheline = !_bypass_cache(pipe, piece) && (pipe->realtime || !(*cache_output));
     cl_mem_output = dt_dev_pixelpipe_cache_get_cl_buffer(pipe->devid, output, &piece->roi_out, piece->dsc_out.bpp, module,
-                                      "output", output_entry, reuse_output_cacheline, reuse_output_cacheline,
-                                      NULL, cl_mem_input);
+                                                         "output", output_entry,
+                                                         NULL, cl_mem_input);
     if(IS_NULL_PTR(cl_mem_output)) goto error;
     
     const int cst_before_cl = process_input_dsc.cst;

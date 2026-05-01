@@ -1754,7 +1754,7 @@ void dt_iop_commit_params(dt_iop_module_t *module, dt_iop_params_t *params,
   if(module->process_cl)
     piece->process_cl_ready = 1;
 
-  piece->force_opencl_cache = 0;
+  piece->cache_output_on_ram = 0;
 #endif // HAVE_OPENCL
 
   // register if module allows tiling, commit_params can overwrite this.

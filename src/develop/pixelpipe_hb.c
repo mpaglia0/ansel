@@ -248,8 +248,8 @@ gboolean dt_dev_pixelpipe_cache_gpu_device_buffer(const dt_dev_pixelpipe_t *pipe
                                                   const dt_pixel_cache_entry_t *cache_entry)
 {
   return (pipe->realtime
-             || (cache_entry
-                 && IS_NULL_PTR(dt_pixel_cache_entry_get_data((dt_pixel_cache_entry_t *)cache_entry))));
+          || (cache_entry && IS_NULL_PTR(dt_pixel_cache_entry_get_data((dt_pixel_cache_entry_t *)cache_entry)))
+          || !_bypass_cache(pipe, NULL));
 }
 
 char *dt_pixelpipe_get_pipe_name(dt_dev_pixelpipe_type_t pipe_type)
@@ -612,7 +612,7 @@ void dt_dev_pixelpipe_create_nodes(dt_dev_pixelpipe_t *pipe)
     piece->global_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
     piece->global_mask_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
     _reset_piece_cache_entry(piece);
-    piece->force_opencl_cache = TRUE;
+    piece->cache_output_on_ram = TRUE;
     piece->raster_masks = dt_pixelpipe_raster_alloc();
 
     // dsc_mask is static, single channel float image
@@ -916,18 +916,16 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   dt_pixelpipe_flow_t pixelpipe_flow = (PIXELPIPE_FLOW_NONE | PIXELPIPE_FLOW_HISTOGRAM_NONE);
 
   gchar *name = g_strdup_printf("module %s (%s) for pipe %s", module->op, module->multi_name, type);
-  gboolean cache_output = piece->force_opencl_cache && !_bypass_cache(pipe, piece);
-  const gboolean allow_cache_reuse = !(darktable.unmuted & DT_DEBUG_NOCACHE_REUSE);
+  gboolean cache_ram_output = piece->cache_output_on_ram && !_bypass_cache(pipe, piece);
   /* `piece->cache_entry` is only valid as a writable-reuse hint for transient outputs that will
    * be fully overwritten later. As soon as we keep the current output as a published cacheline in
    * RAM, rekey reuse must stop for that piece so later runs cannot overwrite a long-term state in
    * place just because the pipe is running in realtime. */
-  const gboolean allow_rekey_reuse = !_bypass_cache(pipe, piece) && allow_cache_reuse
-                                     && !cache_output;
+  const gboolean allow_rekey_reuse = !(darktable.unmuted & DT_DEBUG_NOCACHE_REUSE) && !cache_ram_output;
   const dt_dev_pixelpipe_cache_writable_status_t acquire_status
       = dt_dev_pixelpipe_cache_get_writable(darktable.pixelpipe_cache, hash, bufsize, name, pipe->type,
-                                            cache_output, allow_rekey_reuse,
-                                            allow_rekey_reuse ? &piece->cache_entry : NULL,
+                                            cache_ram_output, allow_rekey_reuse,
+                                            &piece->cache_entry,
                                             &output, &output_entry);
   dt_free(name);
   if(acquire_status == DT_DEV_PIXELPIPE_CACHE_WRITABLE_EXACT_HIT)
@@ -1017,11 +1015,11 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
 
 #ifdef HAVE_OPENCL
   error = pixelpipe_process_on_GPU(pipe, piece, previous_piece, &tiling, &pixelpipe_flow,
-                                   &cache_output,
+                                   &cache_ram_output,
                                    input_entry, output_entry);
 #else
   error = pixelpipe_process_on_CPU(pipe, piece, previous_piece, &tiling, &pixelpipe_flow,
-                                   &cache_output,
+                                   &cache_ram_output,
                                    input_entry, output_entry);
 #endif
 
@@ -1063,7 +1061,7 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   _trace_cache_owner(pipe, module, "publish", "output", hash, output, output_entry, FALSE);
   _trace_buffer_content(pipe, module, "publish", output, &piece->dsc_out, &piece->roi_out);
 
-  if(!IS_NULL_PTR(piece) && allow_rekey_reuse && !IS_NULL_PTR(output_entry) && !cache_output)
+  if(!IS_NULL_PTR(output_entry))
   {
     piece->cache_entry = *output_entry;
   }

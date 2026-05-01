@@ -746,7 +746,7 @@ static gboolean _drawlayer_acquire_source_image(const int devid, const float *la
     const dt_iop_roi_t source_roi = { .width = source_w, .height = source_h };
     gboolean reused_from_cache = FALSE;
     source->mem = dt_dev_pixelpipe_cache_get_cl_buffer(devid, NULL, &source_roi, 4 * sizeof(float), NULL,
-                                                       "drawlayer source", resolved_entry, FALSE, TRUE,
+                                                       "drawlayer source", resolved_entry,
                                                        &reused_from_cache, NULL);
     if(source->mem)
     {
@@ -833,7 +833,7 @@ static gboolean _drawlayer_acquire_layer_image(const int devid, dt_pixel_cache_e
   if(realtime_reuse && resolved_entry)
   {
     layer->mem = dt_dev_pixelpipe_cache_get_cl_buffer(devid, NULL, target_roi, 4 * sizeof(float), NULL,
-                                                      "drawlayer layer", resolved_entry, FALSE, TRUE, NULL,
+                                                      "drawlayer layer", resolved_entry, NULL,
                                                       dev_source_rgba);
     layer->is_cached_device = (!IS_NULL_PTR(layer->mem));
   }

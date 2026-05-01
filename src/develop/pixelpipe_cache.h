@@ -347,8 +347,6 @@ gboolean dt_dev_pixelpipe_cache_flush_host_pinned_image(dt_dev_pixelpipe_cache_t
  * @param module Module for debug messages.
  * @param message Human-readable allocation context.
  * @param entry Owning cache entry.
- * @param reuse_pinned Whether pinned images may be reused from cache.
- * @param reuse_device Whether device-only images may be reused from cache.
  * @param[out] out_reused Optional flag set TRUE when the buffer came from cache reuse.
  * @param keep Optional OpenCL buffer that must not be flushed during retry.
  * @return void* OpenCL image (`cl_mem`) or NULL on failure.
@@ -356,7 +354,6 @@ gboolean dt_dev_pixelpipe_cache_flush_host_pinned_image(dt_dev_pixelpipe_cache_t
 void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *host_ptr, const struct dt_iop_roi_t *roi,
                                            size_t bpp, struct dt_iop_module_t *module,
                                            const char *message, struct dt_pixel_cache_entry_t *entry,
-                                           gboolean reuse_pinned, gboolean reuse_device,
                                            gboolean *out_reused, void *keep);
 
 /**
