@@ -405,7 +405,7 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
 
         if(!success)
         {
-          dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] couldn't transform blending colorspace for module %s\n",
+          dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] couldn't transform blending colorspace for module %s\n",
                    module->name());
           goto error;
         }
@@ -593,7 +593,7 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   }
   else
   {
-    dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] could not run module '%s' on gpu. falling back to cpu path\n",
+    dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] could not run module '%s' on gpu. falling back to cpu path\n",
              module->name());
     goto error;
   }

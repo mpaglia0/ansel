@@ -456,9 +456,10 @@ void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const i
      * must stay lightweight and must not wait on per-entry writer locks, otherwise
      * allocation fallback can deadlock against in-flight GPU renders that already
      * hold cache entry locks. */
-    dt_print(DT_DEBUG_OPENCL | DT_DEBUG_VERBOSE, 
-      "[dt_dev_pixelpipe_cache_flush_clmem] trying to flush vRAM for entry %" PRIu64 "...\n",
-      entry->hash);
+    if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      dt_print(DT_DEBUG_OPENCL, 
+        "[dt_dev_pixelpipe_cache_flush_clmem] trying to flush vRAM for entry %" PRIu64 "...\n",
+        entry->hash);
     _cache_entry_clmem_flush_device(entry, devid);
   }
   dt_pthread_mutex_unlock(&cache->lock);
@@ -602,7 +603,8 @@ void *dt_dev_pixelpipe_cache_borrow_cl_payload(dt_pixel_cache_entry_t *entry, in
 
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
 
-  dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, 
+  if(darktable.unmuted & DT_DEBUG_VERBOSE)
+  dt_print(DT_DEBUG_OPENCL, 
     "[dt_dev_pixelpipe_cache_borrow_cl_payload] %u entries in %p\n", 
     g_list_length(entry->cl_mem_list), entry);
 
@@ -827,14 +829,16 @@ void dt_dev_pixelpipe_cache_put_pinned_image(dt_dev_pixelpipe_cache_t *cache, vo
   dt_pixel_cache_entry_t *entry = entry_hint;
   if(IS_NULL_PTR(entry)) 
   {
-    dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dt_dev_pixelpipe_cache_put_pinned_image] no cache entry to put the vRAM buffer\n");
+    if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_put_pinned_image] no cache entry to put the vRAM buffer\n");
     return;
   }
 
   // FIXME: is it safe to cache non-pinned vRAM buffers (aka no CL_MEM_USE_HOST_PTR in flags) ?
   const int state = _pixel_cache_clmem_put(entry, host_ptr, (cl_mem)*mem);
   *mem = NULL;
-  dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dt_dev_pixelpipe_cache_put_pinned_image] cache entry put the vRAM buffer (state=%i) in %p\n", state, entry);
+  if(darktable.unmuted & DT_DEBUG_VERBOSE)
+    dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_put_pinned_image] cache entry put the vRAM buffer (state=%i) in %p\n", state, entry);
 }
 
 gboolean dt_dev_pixelpipe_cache_flush_host_pinned_image(dt_dev_pixelpipe_cache_t *cache, void *host_ptr,
@@ -948,6 +952,8 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
   gboolean reused_from_cache = FALSE;
   const gboolean gamma_rgba8 = _is_gamma_rgba8_output(module, bpp, message);
   const int cl_bpp = gamma_rgba8 ? DT_OPENCL_BPP_ENCODE_RGBA8((int)bpp) : (int)bpp;
+  static dt_atomic_int clmem_reuse_hits;
+  static dt_atomic_int clmem_reuse_misses;
 
   if(out_reused) *out_reused = FALSE;
 
@@ -965,8 +971,12 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
 
     // This will internally try to free up cache space if first alloc fails
     if(IS_NULL_PTR(cl_mem_input))
+    {
       cl_mem_input = dt_opencl_alloc_device_use_host_pointer(devid, roi->width, roi->height, cl_bpp,
                                                              host_ptr, flags);
+      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+        dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] allocated a pinned GPU buffer for %s %s\n", module->name(), message);
+    }
   }
   else
   {
@@ -981,37 +991,33 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
 
     // This will internally try to free up cache space if first alloc fails
     if(IS_NULL_PTR(cl_mem_input))
+    {
       cl_mem_input = dt_dev_pixelpipe_cache_alloc_cl_device_buffer(devid, roi, bpp, module, message, keep);
+
+      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+        dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] allocated a device-only GPU buffer for %s %s\n", module->name(), message);
+    }
   }
 
   if(IS_NULL_PTR(cl_mem_input))
   {
-    dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] couldn't generate %s buffer for module %s\n", message,
-             module ? module->op : "unknown");
+    dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] couldn't allocate GPU buffer for module %s %s\n", module->name(), message);
   }
-  else if(reuse_pinned && cache_entry && host_ptr)
+  else if(reuse_pinned || reused_from_cache)
   {
-    static dt_atomic_int clmem_reuse_hits;
-    static dt_atomic_int clmem_reuse_misses;
-    if(out_reused) *out_reused = reused_from_cache;
-    if(reused_from_cache)
-    {
-      const int hits = dt_atomic_add_int(&clmem_reuse_hits, 1) + 1;
-      const int misses = dt_atomic_get_int(&clmem_reuse_misses);
+    const int hits = dt_atomic_add_int(&clmem_reuse_hits, 1) + 1;
+    const int misses = dt_atomic_get_int(&clmem_reuse_misses);
+    if(darktable.unmuted & DT_DEBUG_VERBOSE)
       dt_print(DT_DEBUG_OPENCL,
-               "[opencl_pixelpipe] %s reused pinned input from cache (hits=%d, misses=%d)\n",
-               module ? module->name() : "unknown", hits, misses);
-    }
-    else
-    {
-      (void)dt_atomic_add_int(&clmem_reuse_misses, 1);
-    }
+              "[dev_pixelpipe] reused GPU buffer from cache (hits=%d, misses=%d) for module %s %s\n",
+              hits, misses, module->name(), message);
   }
-  else if(reuse_device && cache_entry && !host_ptr && out_reused)
+  else
   {
-    *out_reused = reused_from_cache;
+    dt_atomic_add_int(&clmem_reuse_misses, 1);
   }
 
+  if(out_reused) *out_reused = reused_from_cache;
   return cl_mem_input;
 }
 
@@ -1100,7 +1106,7 @@ int dt_dev_pixelpipe_cache_sync_cl_buffer(const int devid, void *host_ptr, void 
     if(dt_opencl_unmap_mem_object(devid, mem, mapped) == CL_SUCCESS)
     {
       dt_print(DT_DEBUG_OPENCL,
-                "[opencl_pixelpipe] successfully synced image %s via map/unmap for module %s (%s)\n",
+                "[dev_pixelpipe] successfully synced image %s via map/unmap for module %s (%s)\n",
                 (cl_mode == CL_MAP_WRITE) ? "host to device" : "device to host",
                 (module) ? module->op : "base buffer", message);
       return 0;
@@ -1118,13 +1124,13 @@ int dt_dev_pixelpipe_cache_sync_cl_buffer(const int devid, void *host_ptr, void 
 
   if(err != CL_SUCCESS)
   {
-    dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] couldn't copy image %s for module %s (%s)\n",
+    dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] couldn't copy image %s for module %s (%s)\n",
              (cl_mode == CL_MAP_WRITE) ? "host to device" : "device to host",
              (module) ? module->op : "base buffer", message);
     return 1;
   }
 
-  dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] successfully copied image %s for module %s (%s)\n",
+  dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] successfully copied image %s for module %s (%s)\n",
            (cl_mode == CL_MAP_WRITE) ? "host to device" : "device to host",
            (module) ? module->op : "base buffer", message);
   return 0;
@@ -1246,13 +1252,13 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
                                                       (int)in_bpp);
     if(err != CL_SUCCESS)
     {
-      dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] couldn't copy image host to device for module %s (%s)\n",
+      dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] couldn't copy image host to device for module %s (%s)\n",
                (module) ? module->op : "base buffer", "cache to input");
       fail = TRUE;
     }
     else
     {
-      dt_print(DT_DEBUG_OPENCL, "[opencl_pixelpipe] successfully copied image host to device for module %s (%s)\n",
+      dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] successfully copied image host to device for module %s (%s)\n",
                (module) ? module->op : "base buffer", "cache to input");
     }
   }
@@ -1475,10 +1481,11 @@ static void _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, const
     {
       // Don't flush cachelines that don't belong to the current OpenCL device,
       // or might still be used (references > 0), or have no RAM cache but only vRAM.
-      dt_print(DT_DEBUG_OPENCL | DT_DEBUG_VERBOSE, 
-        "[dt_dev_pixelpipe_cache_flush_clmem] for entry %" PRIu64 ": couldn't flush %p "
-        "(referenced=%i not ours=%i)\n",
-        entry->hash, c->mem, referenced, not_ours);
+      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+        dt_print(DT_DEBUG_OPENCL, 
+          "[dt_dev_pixelpipe_cache_flush_clmem] for entry %" PRIu64 ": couldn't flush %p "
+          "(referenced=%i not ours=%i)\n",
+          entry->hash, c->mem, referenced, not_ours);
       l = next;
       continue;
     }
