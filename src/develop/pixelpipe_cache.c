@@ -789,16 +789,15 @@ void *dt_dev_pixelpipe_cache_get_pinned_image(dt_dev_pixelpipe_cache_t *cache, v
     if(IS_NULL_PTR(mem)) return NULL;
   }
 
-  const cl_mem clmem = (cl_mem)mem;
   gboolean synced = FALSE;
 
-  // Synchronize host_ptr with clmem
-  if(dt_opencl_is_pinned_memory(clmem))
+  // Synchronize host_ptr with mem
+  if(dt_opencl_is_pinned_memory(mem))
   {
     // Zero-copy for pinned buffers : note that some drivers may still use non-zero-copy,
     // in which case that degrades to basic memory copy.
-    void *mapped = dt_opencl_map_image(devid, clmem, TRUE, CL_MAP_WRITE, width, height, bpp);
-    synced = (dt_opencl_unmap_mem_object(devid, clmem, mapped) == CL_SUCCESS);
+    void *mapped = dt_opencl_map_image(devid, mem, TRUE, CL_MAP_WRITE, width, height, bpp);
+    synced = (dt_opencl_unmap_mem_object(devid, mem, mapped) == CL_SUCCESS);
   }
 
   if(!synced)
