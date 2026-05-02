@@ -1276,7 +1276,7 @@ static gboolean _blendop_masks_add_shape(GtkWidget *widget, GdkEventButton *even
   if(GTK_IS_TOGGLE_BUTTON(bd->masks_edit))
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bd->masks_edit), FALSE);
   // we create the new form
-  dt_masks_creation_mode(self, bd->masks_type[this]);
+  dt_masks_creation_mode_enter(self, bd->masks_type[this]);
   dt_control_queue_redraw_center();
 
   return TRUE;

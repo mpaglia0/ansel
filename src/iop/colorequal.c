@@ -1929,35 +1929,30 @@ static void _switch_preview_cursor(dt_iop_module_t *self)
 
   if(!widget || !gtk_widget_get_window(widget)) return;
 
+  dt_control_set_cursor_visible(TRUE);
+
   if(!g->has_focus || dt_iop_color_picker_is_visible(self->dev))
   {
-    GdkCursor *const cursor = gdk_cursor_new_from_name(gdk_display_get_default(), "default");
-    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
-    g_object_unref(cursor);
+    dt_control_queue_cursor_by_name("default");
     return;
   }
 
   if(g->cursor_valid && self->dev && self->dev->preview_pipe && self->dev->preview_pipe->processing)
   {
-    GdkCursor *const cursor = gdk_cursor_new_from_name(gdk_display_get_default(), "wait");
-    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
-    g_object_unref(cursor);
+    dt_control_queue_cursor_by_name("wait");
     return;
   }
 
   if(g->cursor_valid && self->enabled)
   {
-    dt_control_change_cursor(GDK_BLANK_CURSOR);
-    dt_control_set_cursor(GDK_BLANK_CURSOR);
+    dt_control_set_cursor_visible(FALSE);
     dt_control_hinter_message(darktable.control,
                               _("scroll over image to adjust the selected color graph\n"
                                 "right-click to add a node at the sampled hue"));
     return;
   }
 
-  GdkCursor *const cursor = gdk_cursor_new_from_name(gdk_display_get_default(), "default");
-  gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
-  g_object_unref(cursor);
+    dt_control_queue_cursor_by_name("default");
 }
 
 static gboolean _refresh_preview_cursor_sample(dt_iop_module_t *self)

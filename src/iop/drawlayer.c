@@ -121,7 +121,6 @@ typedef dt_drawlayer_runtime_context_t drawlayer_runtime_host_context_t;
 #define _ensure_layer_cache dt_drawlayer_ensure_layer_cache
 #define _release_all_base_patch_extra_refs dt_drawlayer_release_all_base_patch_extra_refs
 #define _drawlayer_wait_for_rasterization_modal dt_drawlayer_wait_for_rasterization_modal
-#define _set_drawlayer_os_cursor_hidden dt_drawlayer_set_os_cursor_hidden
 #define _current_live_padding dt_drawlayer_current_live_padding
 #define _layer_to_widget_coords dt_drawlayer_layer_to_widget_coords
 #define _touch_stroke_commit_hash dt_drawlayer_touch_stroke_commit_hash
@@ -1061,26 +1060,6 @@ static void _ensure_cursor_stamp_surface(dt_iop_module_t *self, const float widg
   g->ui.cursor_color[0] = display_rgb[0];
   g->ui.cursor_color[1] = display_rgb[1];
   g->ui.cursor_color[2] = display_rgb[2];
-}
-
-void dt_drawlayer_set_os_cursor_hidden(const gboolean hidden)
-{
-  if(IS_NULL_PTR(darktable.gui) || IS_NULL_PTR(darktable.gui->ui)) return;
-
-  GtkWidget *center = dt_ui_center(darktable.gui->ui);
-  GtkWidget *main = dt_ui_main_window(darktable.gui->ui);
-  GdkDisplay *display = gdk_display_get_default();
-  if(IS_NULL_PTR(display)) return;
-
-  const dt_cursor_t cursor_id = hidden ? GDK_BLANK_CURSOR : GDK_LEFT_PTR;
-  GdkCursor *cursor = gdk_cursor_new_for_display(display, cursor_id);
-  if(IS_NULL_PTR(cursor)) return;
-
-  if(center && gtk_widget_get_window(center)) gdk_window_set_cursor(gtk_widget_get_window(center), cursor);
-  if(main && gtk_widget_get_window(main)) gdk_window_set_cursor(gtk_widget_get_window(main), cursor);
-
-  dt_control_set_cursor(cursor_id);
-  g_object_unref(cursor);
 }
 
 static drawlayer_wait_dialog_t _show_drawlayer_wait_dialog(const char *title, const char *message)
@@ -3241,7 +3220,7 @@ void gui_focus(dt_iop_module_t *self, gboolean in)
       .event = DT_DRAWLAYER_RUNTIME_EVENT_GUI_FOCUS_LOSS,
       .raw_input_kind = DT_DRAWLAYER_RUNTIME_RAW_INPUT_NONE,
     };
-    _set_drawlayer_os_cursor_hidden(FALSE);
+    dt_control_set_cursor_visible(TRUE);
     if(g) dt_drawlayer_runtime_manager_update(&g->manager, &update, &runtime_manager);
     if(had_pending_edits && params)
       _touch_stroke_commit_hash(params, pending_samples, g->stroke.last_dab_valid, g->stroke.last_dab_x,
@@ -3290,7 +3269,7 @@ void gui_cleanup(dt_iop_module_t *self)
   dt_iop_drawlayer_gui_data_t *g = (dt_iop_drawlayer_gui_data_t *)self->gui_data;
   if(IS_NULL_PTR(g)) return;
 
-  _set_drawlayer_os_cursor_hidden(FALSE);
+  dt_control_set_cursor_visible(TRUE);
   _update_gui_runtime_manager(self, g, DT_DRAWLAYER_RUNTIME_EVENT_GUI_FOCUS_LOSS, FALSE);
 
   DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_develop_ui_pipe_finished_callback), self);

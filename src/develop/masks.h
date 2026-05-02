@@ -1433,7 +1433,8 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form, dt_masks_for
                                         dt_masks_post_select_fn post_select_cb,
                                         void *user_data);
 
-gboolean dt_masks_creation_mode(dt_iop_module_t *module, const dt_masks_type_t type);
+void dt_masks_creation_mode_quit(dt_masks_form_gui_t *gui);
+gboolean dt_masks_creation_mode_enter(dt_iop_module_t *module, const dt_masks_type_t type);
 void apply_operation(struct dt_masks_form_group_t *pt, const dt_masks_state_t apply_state);
 
 /** Contextual menu */

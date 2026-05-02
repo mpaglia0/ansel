@@ -2545,6 +2545,7 @@ void leave(dt_view_t *self)
   dt_print(DT_DEBUG_CONTROL, "[run_job-] 11 %f in darkroom mode\n", dt_get_wtime());
 }
 
+// Leave central view
 void mouse_leave(dt_view_t *self)
 {
   // if we are not hovering over a thumbnail in the filmstrip -> show metadata of opened image.
@@ -2563,7 +2564,7 @@ void mouse_leave(dt_view_t *self)
     dt_control_queue_redraw_center();
 
   // reset any changes the selected plugin might have made.
-  dt_control_set_cursor(GDK_LEFT_PTR);
+  dt_control_set_cursor_visible(TRUE);
   dt_control_change_cursor(GDK_LEFT_PTR);
 }
 
@@ -2595,11 +2596,11 @@ static gboolean mouse_in_actionarea(dt_view_t *self, double x, double y)
 static void _set_default_cursor(dt_view_t *self, double x, double y)
 {
   if(mouse_in_imagearea(self, x, y))
-    dt_control_set_cursor(GDK_DOT);
+    dt_control_queue_cursor(GDK_DOT);
   else if(mouse_in_actionarea(self, x, y))
-    dt_control_set_cursor(GDK_CROSSHAIR);
+    dt_control_queue_cursor(GDK_CROSSHAIR);
   else
-    dt_control_set_cursor(GDK_LEFT_PTR);
+    dt_control_queue_cursor(GDK_LEFT_PTR);
 }
 
 void mouse_enter(dt_view_t *self)
@@ -2737,7 +2738,7 @@ int button_released(dt_view_t *self, double x, double y, int which, uint32_t sta
   {
     // only sample box picker at end, for speed
     if(darktable.develop->color_picker.primary_sample->size == DT_LIB_COLORPICKER_SIZE_BOX)
-      dt_control_set_cursor(GDK_LEFT_PTR);
+      dt_control_queue_cursor(GDK_LEFT_PTR);
 
     dt_control_queue_redraw_center();
     return 1;
@@ -2832,7 +2833,7 @@ int button_pressed(dt_view_t *self, double x, double y, double pressure, int whi
             };
             dt_lib_colorpicker_set_box_area(darktable.lib, box);
           }
-          dt_control_set_cursor(GDK_FLEUR);
+          dt_control_queue_cursor(GDK_FLEUR);
         }
         else
         {

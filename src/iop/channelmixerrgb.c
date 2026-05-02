@@ -2284,14 +2284,13 @@ int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressur
   // if cursor is close from a node, remove the system pointer arrow to prevent hiding the spot behind it
   if(g->is_cursor_close)
   {
-    dt_control_set_cursor(GDK_BLANK_CURSOR);
+    dt_control_set_cursor_visible(FALSE);
   }
   else
   {
     // fall back to default cursor
-    GdkCursor *const cursor = gdk_cursor_new_from_name(gdk_display_get_default(), "default");
-    gdk_window_set_cursor(gtk_widget_get_window(dt_ui_main_window(darktable.gui->ui)), cursor);
-    g_object_unref(cursor);
+    dt_control_set_cursor_visible(TRUE);
+    dt_control_queue_cursor_by_name("default");
   }
 
   dt_control_queue_redraw_center();

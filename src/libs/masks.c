@@ -285,7 +285,7 @@ static void _lib_masks_blending_gui_changed_callback(gpointer instance, dt_lib_m
 static void _tree_add_circle(GtkButton *button, dt_iop_module_t *module)
 {
   // we create the new form
-  dt_masks_creation_mode(module, DT_MASKS_CIRCLE);
+  dt_masks_creation_mode_enter(module, DT_MASKS_CIRCLE);
   darktable.develop->form_gui->group_selected = 0;
   dt_control_queue_redraw_center();
 }
@@ -306,7 +306,7 @@ static void _bt_add_circle(GtkWidget *widget, GdkEventButton *event, dt_lib_modu
 static void _tree_add_ellipse(GtkButton *button, dt_iop_module_t *module)
 {
   // we create the new form
-  dt_masks_creation_mode(module, DT_MASKS_ELLIPSE);
+  dt_masks_creation_mode_enter(module, DT_MASKS_ELLIPSE);
   darktable.develop->form_gui->group_selected = 0;
   dt_control_queue_redraw_center();
 }
@@ -327,7 +327,7 @@ static void _bt_add_ellipse(GtkWidget *widget, GdkEventButton *event, dt_lib_mod
 static void _tree_add_polygon(GtkButton *button, dt_iop_module_t *module)
 {
   // we create the new form
-  dt_masks_creation_mode(module, DT_MASKS_POLYGON);
+  dt_masks_creation_mode_enter(module, DT_MASKS_POLYGON);
   darktable.develop->form_gui->group_selected = 0;
   dt_control_queue_redraw_center();
 }
@@ -348,7 +348,7 @@ static void _bt_add_path(GtkWidget *widget, GdkEventButton *event, dt_lib_module
 static void _tree_add_gradient(GtkButton *button, dt_iop_module_t *module)
 {
   // we create the new form
-  dt_masks_creation_mode(module, DT_MASKS_GRADIENT);
+  dt_masks_creation_mode_enter(module, DT_MASKS_GRADIENT);
   darktable.develop->form_gui->group_selected = 0;
   dt_control_queue_redraw_center();
 }
@@ -368,7 +368,7 @@ static void _bt_add_gradient(GtkWidget *widget, GdkEventButton *event, dt_lib_mo
 static void _tree_add_brush(GtkButton *button, dt_iop_module_t *module)
 {
   // we create the new form
-  dt_masks_creation_mode(module, DT_MASKS_BRUSH);
+  dt_masks_creation_mode_enter(module, DT_MASKS_BRUSH);
   darktable.develop->form_gui->group_selected = 0;
   dt_control_queue_redraw_center();
 }

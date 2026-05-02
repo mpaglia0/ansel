@@ -448,7 +448,7 @@ dt_masks_form_group_t *dt_masks_form_group_from_parentid(int parent_id, int form
  * Use dt_masks_form_get_selected_group() in tight GUI paths where the list is known
  * stable; use dt_masks_form_get_selected_group_live() when correctness matters across
  * potential list mutations.
- * 
+ *
  * @todo simplify that.
  */
 dt_masks_form_group_t *dt_masks_form_get_selected_group(const dt_masks_form_t *mask_form,
@@ -1064,6 +1064,7 @@ gboolean dt_masks_form_cancel_creation(dt_iop_module_t *module, dt_masks_form_gu
       mask_gui->guipoints_count = 0;
     }
 
+    dt_masks_creation_mode_quit(mask_gui);
     dt_masks_set_edit_mode(module, DT_MASKS_EDIT_FULL);
     dt_masks_iop_update(module);
 
@@ -1219,7 +1220,7 @@ void dt_masks_gui_form_save_creation(dt_develop_t *develop, dt_iop_module_t *mod
   // we check if the id is already registered
   _check_id(mask_form);
 
-  if(mask_gui) mask_gui->creation = FALSE;
+  dt_masks_creation_mode_quit(mask_gui);
 
   // mask nb will be at least the length of the list
   guint form_count = 0;
@@ -2107,10 +2108,10 @@ static void _set_cursor_shape(dt_masks_form_gui_t *mask_gui)
 
   // circular arrows
   if(mask_gui->pivot_selected)
-    dt_control_set_cursor(GDK_EXCHANGE);
+    dt_control_queue_cursor(GDK_EXCHANGE);
   // pointing hand
   else if(mask_gui->creation_closing_form)
-    dt_control_set_cursor(GDK_HAND2);
+    dt_control_queue_cursor(GDK_HAND2);
 
   /*else if(gui->handle_dragging >= 0)
     dt_control_set_cursor(GDK_HAND1);*/
@@ -2119,7 +2120,7 @@ static void _set_cursor_shape(dt_masks_form_gui_t *mask_gui)
   else if(!mask_gui->creation
           && (dt_masks_is_anything_selected(mask_gui)
               || dt_masks_is_anything_hovered(mask_gui)))
-    dt_control_set_cursor(GDK_FLEUR);
+    dt_control_queue_cursor(GDK_FLEUR);
 }
 
 static void _apply_gui_button_pressed_state(dt_masks_form_gui_t *mask_gui, const int button,
@@ -2824,7 +2825,8 @@ void dt_masks_clear_form_gui(dt_develop_t *develop)
   develop->form_gui->node_selected_idx = -1;
   develop->form_gui->handle_border_dragging = develop->form_gui->seg_dragging = develop->form_gui->handle_dragging
       = develop->form_gui->node_dragging = -1;
-  develop->form_gui->creation_closing_form = develop->form_gui->creation = FALSE;
+  develop->form_gui->creation_closing_form = FALSE;
+  dt_masks_creation_mode_quit(develop->form_gui);
   develop->form_gui->pressure_sensitivity = DT_MASKS_PRESSURE_OFF;
   develop->form_gui->creation_module = NULL;
   develop->form_gui->node_selected = FALSE;
@@ -2934,7 +2936,7 @@ static void _menu_no_masks(struct dt_iop_module_t *module)
 
 static void _menu_add_shape(struct dt_iop_module_t *module, dt_masks_type_t type)
 {
-  dt_masks_creation_mode(module, type);
+  dt_masks_creation_mode_enter(module, type);
 }
 
 static void _menu_add_exist(dt_iop_module_t *module, int form_id)
@@ -4024,11 +4026,23 @@ float dt_masks_rotate_with_anchor(dt_develop_t *develop, const float anchor[2], 
 }
 
 /**
+ * @brief Exit mask creation mode, restoring cursor visibility and resetting GUI state.
+ *
+ * @param mask_gui The GUI state of the mask form
+ */
+void dt_masks_creation_mode_quit(dt_masks_form_gui_t *mask_gui)
+{
+  if(IS_NULL_PTR(mask_gui)) return;
+
+  mask_gui->creation = FALSE;
+}
+
+/**
  * @brief Enter mask creation mode for a given shape type.
  *
  * NOTE: this does quite the same as _menu_add_shape.
  */
-gboolean dt_masks_creation_mode(dt_iop_module_t *module, const dt_masks_type_t type)
+gboolean dt_masks_creation_mode_enter(dt_iop_module_t *module, const dt_masks_type_t type)
 {
   if(IS_NULL_PTR(module) || (type & DT_MASKS_ALL) == 0) return FALSE;
   // we want to be sure that the iop has focus

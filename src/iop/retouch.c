@@ -1048,7 +1048,7 @@ static gboolean rt_add_shape(GtkWidget *widget, dt_iop_module_t *self)
     else
       masks_type = (type | DT_MASKS_NON_CLONE);
 
-    dt_masks_creation_mode(self, masks_type);
+    dt_masks_creation_mode_enter(self, masks_type);
 
     dt_control_queue_redraw_center();
   }
@@ -1867,7 +1867,7 @@ static gboolean rt_select_algorithm_callback(GtkToggleButton *togglebutton, GdkE
     else
       masks_type = (type | DT_MASKS_NON_CLONE);
 
-    dt_masks_creation_mode(self, masks_type);
+    dt_masks_creation_mode_enter(self, masks_type);
 
     dt_control_queue_redraw_center();
   }
