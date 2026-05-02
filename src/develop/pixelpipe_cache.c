@@ -682,7 +682,7 @@ static int _pixel_cache_clmem_put(dt_pixel_cache_entry_t *entry, void *host_ptr,
     {
       // We keep one GPU cacheline per GPU device per pipeline cache entry
       // If refs > 0 here, we have a problem earlier.
-      assert(c->refs > 0);
+      if(c->refs > 0) continue;
 
       void *old = c->mem;
       c->mem = mem;
@@ -1258,8 +1258,6 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *host_ptr, const dt_i
   (void)module;
   (void)message;
   (void)entry;
-  (void)reuse_pinned;
-  (void)reuse_device;
   (void)keep;
   if(out_reused) *out_reused = FALSE;
   return NULL;
