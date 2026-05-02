@@ -94,6 +94,15 @@ static int _gpu_early_cpu_fallback_if_unsupported(dt_dev_pixelpipe_t *pipe, floa
 
   dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s will run directly on CPU\n", module->name());
 
+  /** Modules that author their own root input, such as basebuffer, have no
+   * upstream cache entry by design. The OpenCL path skips input borrowing for
+   * them before reaching process_cl(); the CPU fallback must preserve the same
+   * contract and let pixelpipe_process_on_CPU() call process() with a NULL
+   * input. */
+  if(module->flags() & IOP_FLAGS_TAKE_NO_INPUT)
+    return pixelpipe_process_on_CPU(pipe, piece, previous_piece, tiling, pixelpipe_flow,
+                                    cache_output, input_entry, output_entry);
+
   /* CPU fallback only needs a valid host buffer. If `input` already exists here, the upstream
    * hand-off has already materialized authoritative RAM and re-reading the same pixels back out
    * of the cached OpenCL image is redundant. */
