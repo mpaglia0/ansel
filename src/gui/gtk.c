@@ -942,6 +942,8 @@ static gboolean _mouse_moved(GtkWidget *w, GdkEventMotion *event, gpointer user_
 }
 
 #ifdef _WIN32
+/* Arbitrary stable subclass identifier encoded as ASCII "ASNN".
+ * It only needs to stay unique within this process for SetWindowSubclass(). */
 #define DT_WIN32_CURSOR_SUBCLASS_CENTER ((UINT_PTR)0x41534e4e)
 
 static LRESULT CALLBACK _center_win32_cursor_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param,
