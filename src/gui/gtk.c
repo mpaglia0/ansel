@@ -102,6 +102,9 @@
 #ifdef GDK_WINDOWING_WAYLAND
 #include <gdk/gdkwayland.h>
 #endif
+#ifdef _WIN32
+#include <gdk/gdkwin32.h>
+#endif
 #include <gtk/gtk.h>
 #include <math.h>
 #include <stdlib.h>
@@ -938,6 +941,40 @@ static gboolean _mouse_moved(GtkWidget *w, GdkEventMotion *event, gpointer user_
   return FALSE;
 }
 
+#ifdef _WIN32
+#define DT_WIN32_CURSOR_SUBCLASS_CENTER ((UINT_PTR)0x41534e4e)
+
+static LRESULT CALLBACK _center_win32_cursor_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param,
+                                                  UINT_PTR subclass_id, DWORD_PTR ref_data)
+{
+  /* On Win32, DefSubclassProc() answers WM_SETCURSOR for the drawing area in center view by
+   * restoring the window-class default arrow on every mouse move. The center
+   * view already selected the proper cursor through GDK, so swallow the
+   * client-area reset and keep the current cursor unchanged until the view
+   * requests another explicit cursor change. */
+  if(subclass_id == DT_WIN32_CURSOR_SUBCLASS_CENTER && message == WM_SETCURSOR && LOWORD(l_param) == HTCLIENT)
+    return TRUE;
+
+  return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
+static void _center_realize(GtkWidget *widget, gpointer user_data)
+{
+  GdkWindow *center_window = gtk_widget_get_window(widget);
+  HWND center_hwnd = center_window ? (HWND)gdk_win32_window_get_handle(center_window) : NULL;
+  if(!IS_NULL_PTR(center_hwnd))
+    SetWindowSubclass(center_hwnd, _center_win32_cursor_proc, DT_WIN32_CURSOR_SUBCLASS_CENTER, (DWORD_PTR)widget);
+}
+
+static void _center_unrealize(GtkWidget *widget, gpointer user_data)
+{
+  GdkWindow *center_window = gtk_widget_get_window(widget);
+  HWND center_hwnd = center_window ? (HWND)gdk_win32_window_get_handle(center_window) : NULL;
+  if(!IS_NULL_PTR(center_hwnd))
+    RemoveWindowSubclass(center_hwnd, _center_win32_cursor_proc, DT_WIN32_CURSOR_SUBCLASS_CENTER);
+}
+#endif
+
 static gboolean _key_pressed(GtkWidget *w, GdkEventKey *event)
 {
   if(!gtk_window_is_active(GTK_WINDOW(darktable.gui->ui->main_window))) return FALSE;
@@ -1090,6 +1127,12 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
   g_signal_connect(G_OBJECT(widget), "button-press-event", G_CALLBACK(_button_pressed), NULL);
   g_signal_connect(G_OBJECT(widget), "button-release-event", G_CALLBACK(_button_released), NULL);
   g_signal_connect(G_OBJECT(widget), "scroll-event", G_CALLBACK(_scrolled), NULL);
+#ifdef _WIN32
+  g_signal_connect(G_OBJECT(widget), "realize", G_CALLBACK(_center_realize), NULL);
+  g_signal_connect(G_OBJECT(widget), "unrealize", G_CALLBACK(_center_unrealize), NULL);
+  if(gtk_widget_get_realized(widget))
+    _center_realize(widget, NULL);
+#endif
 
   dt_gui_presets_init();
 
