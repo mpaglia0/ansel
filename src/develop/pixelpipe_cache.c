@@ -1022,7 +1022,7 @@ void dt_dev_pixelpipe_cache_release_cl_buffer(void **cl_mem_buffer, dt_pixel_cac
     cl_mem mem = *cl_mem_buffer;
     if(cache_device && !IS_NULL_PTR(cache_entry))
     {
-      int status = _pixel_cache_clmem_put(cache_entry, host_ptr, mem);
+      _pixel_cache_clmem_put(cache_entry, host_ptr, mem);
     }
     else
     {
