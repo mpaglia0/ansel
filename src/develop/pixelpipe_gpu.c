@@ -219,7 +219,7 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
                                             actual_input_dsc.bpp);
     borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
     if(IS_NULL_PTR(cl_mem_input))
-      dt_print(DT_DEBUG_OPENCL & DT_DEBUG_VERBOSE, "[dev_pixelpipe] %s could not get a cached vRAM input buffer.\n", module->name());
+      dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s could not get a cached vRAM input buffer.\n", module->name());
       
     // Note: if that fails, we will attempt resync from RAM cache later
 
