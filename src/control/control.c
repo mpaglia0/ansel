@@ -99,7 +99,7 @@ void dt_control_init(dt_control_t *s)
   s->cursor.shape = GDK_LEFT_PTR;
   s->cursor.current_shape = GDK_LEFT_PTR;
   s->cursor.shape_str = NULL;
-  s->cursor.current_shape_str = "default";
+  s->cursor.current_shape_str = NULL;
   s->cursor.hide = FALSE;
   // s->last_expose_time = dt_get_wtime();
   s->log_pos = s->log_ack = 0;
@@ -255,6 +255,15 @@ static void _control_apply_cursor(GdkCursor *cursor)
     _control_set_cursor_on_widget(center, cursor);
 }
 
+static void _control_store_current_cursor(const dt_cursor_t shape, const char *shape_str)
+{
+  gchar *current_shape_str = g_strdup(shape_str);
+
+  darktable.control->cursor.current_shape = shape;
+  g_free(darktable.control->cursor.current_shape_str);
+  darktable.control->cursor.current_shape_str = current_shape_str;
+}
+
 void dt_control_commit_cursor()
 {
   //fprintf(stderr, "Committing cursor \n");
@@ -269,61 +278,121 @@ void dt_control_commit_cursor()
 void dt_control_change_cursor_EXT(dt_cursor_t cursor, const char *file, int line)
 {
   const gboolean hide = darktable.control->cursor.hide;
-  const dt_cursor_t chosen_shape = hide ? GDK_BLANK_CURSOR : cursor;
+
+  // GDK_CURSOR_IS_PIXMAP is returned by GTK for named cursors and custom pixmaps.
+  // It is not a cursor shape that can be constructed with gdk_cursor_new_for_display().
+  const dt_cursor_t requested_shape = cursor == GDK_CURSOR_IS_PIXMAP ? GDK_LEFT_PTR : cursor;
+  const dt_cursor_t chosen_shape = hide ? GDK_BLANK_CURSOR : requested_shape;
 
   // Keep the requested cursor queued even if the visible cursor stays blank.
-  dt_control_queue_cursor_EXT(cursor, file, line);
+  dt_control_queue_cursor_EXT(requested_shape, file, line);
 
-  if(darktable.control->cursor.current_shape == chosen_shape) return;
+  if(IS_NULL_PTR(darktable.control->cursor.current_shape_str)
+     && darktable.control->cursor.current_shape == chosen_shape)
+    return;
 
   if(!darktable.control->cursor.lock)
   {
-    darktable.control->cursor.current_shape = chosen_shape;
-
     GdkCursor *cursor_shape = gdk_cursor_new_for_display(gdk_display_get_default(), chosen_shape);
     if(IS_NULL_PTR(cursor_shape)) return;
     _control_apply_cursor(cursor_shape);
     g_object_unref(cursor_shape);
+    _control_store_current_cursor(chosen_shape, NULL);
 
     if(darktable.unmuted & DT_DEBUG_VERBOSE)
       dt_print(DT_DEBUG_CONTROL,
-               "Changing cursor to %s, requested from %s:%d\n",
-               hide ? "GDK_BLANK_CURSOR" : _get_cursor_name(cursor), file, line);
+               "Changing cursor to `%s`, requested from %s:%d\n",
+               hide ? "GDK_BLANK_CURSOR" : _get_cursor_name(requested_shape), file, line);
   }
 }
 
+/** \brief Apply a GTK named cursor without changing the queued cursor.
+ *
+ * Named cursors report GDK_CURSOR_IS_PIXMAP as their type, which is only a
+ * marker for GTK's cursor cache. The queued cursor state is owned by
+ * dt_control_queue_cursor_by_name(), so temporary named cursors such as the
+ * busy cursor do not overwrite the cursor that should be restored later.
+ */
 void dt_control_change_cursor_by_name(const char *curs_str)
 {
   if(IS_NULL_PTR(curs_str)) return;
 
   if(!darktable.control->cursor.lock)
   {
-    dt_control_queue_cursor_by_name(curs_str);
-    dt_control_commit_cursor();
+    const gboolean hide = darktable.control->cursor.hide;
+    const gboolean current_is_named_cursor =
+      !IS_NULL_PTR(darktable.control->cursor.current_shape_str)
+      && g_strcmp0(darktable.control->cursor.current_shape_str, curs_str) == 0;
+
+    // "progress" is a special cursor that should not overwrite the queued cursor.
+    if(g_strcmp0(curs_str, "progress") != 0)
+      dt_control_queue_cursor_by_name(curs_str);
+    
+    if(hide)
+    {
+      if(IS_NULL_PTR(darktable.control->cursor.current_shape_str)
+         && darktable.control->cursor.current_shape == GDK_BLANK_CURSOR)
+        return;
+    }
+    else if(current_is_named_cursor)
+      return;
+
+    // We choose the GTK constructor here because named cursors are pixmaps in
+    // GTK's cache, while the hidden cursor is one of the standard shapes.
+    const dt_cursor_t chosen_shape = hide ? GDK_BLANK_CURSOR : GDK_CURSOR_IS_PIXMAP;
+    GdkCursor *cursor_shape = hide
+      ? gdk_cursor_new_for_display(gdk_display_get_default(), GDK_BLANK_CURSOR)
+      : gdk_cursor_new_from_name(gdk_display_get_default(), curs_str);
+
+    if(IS_NULL_PTR(cursor_shape)) return;
+    _control_apply_cursor(cursor_shape);
+    _control_store_current_cursor(chosen_shape, hide ? NULL : curs_str);
+
+    if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      dt_print(DT_DEBUG_CONTROL, "Changing cursor to `%s`\n", hide ? "GDK_BLANK_CURSOR" : curs_str);
+
+    g_object_unref(cursor_shape);
   }
 }
 
 void dt_control_queue_cursor_EXT(dt_cursor_t cursor, const char *file, int line)
 {
-  if(darktable.control->cursor.shape == cursor) return;
+  const dt_cursor_t requested_shape = cursor == GDK_CURSOR_IS_PIXMAP ? GDK_LEFT_PTR : cursor;
+
+  if(darktable.control->cursor.shape == requested_shape
+     && IS_NULL_PTR(darktable.control->cursor.shape_str))
+    return;
 
   if(darktable.unmuted & DT_DEBUG_VERBOSE)
-    dt_print(DT_DEBUG_CONTROL, "Queue cursor to %s, requested from %s:%d\n", _get_cursor_name(cursor), file, line);
-  darktable.control->cursor.shape = cursor;
-}
-
-void dt_control_queue_cursor_by_name(const char *curs_str)
-{
-  if(IS_NULL_PTR(curs_str)) return;
-
-  GdkCursor *cursor = gdk_cursor_new_from_name(gdk_display_get_default(), curs_str);
-  if(IS_NULL_PTR(cursor)) return;
-
-  darktable.control->cursor.shape = gdk_cursor_get_cursor_type(cursor);
-  g_object_unref(cursor);
+    dt_print(DT_DEBUG_CONTROL, "Queue cursor to `%s`, requested from %s:%d\n", _get_cursor_name(requested_shape), file, line);
 
   g_free(darktable.control->cursor.shape_str);
   darktable.control->cursor.shape_str = NULL;
+  darktable.control->cursor.shape = requested_shape;
+}
+
+/** \brief Queue a GTK named cursor for the next cursor commit.
+ *
+ * The cursor object is created only to validate the theme name. The queued
+ * ownership remains the string because GTK exposes named cursors as
+ * GDK_CURSOR_IS_PIXMAP, which cannot be passed back to gdk_cursor_new_for_display().
+ */
+void dt_control_queue_cursor_by_name(const char *curs_str)
+{
+  if(IS_NULL_PTR(curs_str)) return;
+  // "progress" is a special cursor that should not overwrite the queued cursor.
+  // Use dt_change_cursor_by_name() to set it directly without queuing.
+  if(g_strcmp0(curs_str, "progress") == 0)
+    return;
+
+  if(g_strcmp0(darktable.control->cursor.shape_str, curs_str) == 0) return;
+
+  GdkCursor *cursor = gdk_cursor_new_from_name(gdk_display_get_default(), curs_str);
+  if(IS_NULL_PTR(cursor)) return;
+  g_object_unref(cursor);
+
+  g_free(darktable.control->cursor.shape_str);
+  darktable.control->cursor.shape_str = g_strdup(curs_str);
 }
 
 void dt_control_set_cursor_visible_EXT(gboolean visible, const char *file, int line)
@@ -384,6 +453,8 @@ void dt_control_cleanup(dt_control_t *s)
   // DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), "PRAGMA incremental_vacuum(0)", NULL, NULL, NULL);
   // DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), "vacuum", NULL, NULL, NULL);
   dt_control_jobs_cleanup(s);
+  g_free(s->cursor.shape_str);
+  g_free(s->cursor.current_shape_str);
   dt_pthread_mutex_destroy(&s->queue_mutex);
   dt_pthread_mutex_destroy(&s->cond_mutex);
   dt_pthread_mutex_destroy(&s->log_mutex);
@@ -483,7 +554,7 @@ void *dt_control_expose(void *voidptr)
   if(darktable.control->log_busy > 0)
   {
     dt_control_draw_busy_msg(cr, width, height);
-    // set the cursor to arrow with busy indicator
+    // force set the cursor to arrow with busy indicator
     dt_control_change_cursor_by_name("progress");
   }
   else // Apply cursor change
