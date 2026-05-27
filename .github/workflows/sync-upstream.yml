@@ -1,0 +1,20 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # ogni giorno alle 03:00 UTC (~05:00 Italia)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Sync fork
+        uses: wei/git-sync@v3
+        with:
+          source_repo: "aurelienpierreeng/ansel"
+          source_branch: "master"
+          destination_repo: "mpaglia0/ansel"
+          destination_branch: "master"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
