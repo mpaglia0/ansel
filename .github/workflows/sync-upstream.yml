@@ -2,7 +2,7 @@ name: Sync fork with upstream
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # ogni giorno alle 03:00 UTC (~05:00 Italia)
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 jobs:
@@ -10,11 +10,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Sync fork
-        uses: wei/git-sync@v3
+      - name: Checkout fork
+        uses: actions/checkout@v4
         with:
-          source_repo: "aurelienpierreeng/ansel"
-          source_branch: "master"
-          destination_repo: "mpaglia0/ansel"
-          destination_branch: "master"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/aurelienpierreeng/ansel.git
+          git fetch upstream
+
+      - name: Sync master
+        run: |
+          git checkout master
+          git merge upstream/master --ff-only || true
+
+      - name: Push changes
+        run: |
+          git push origin master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
