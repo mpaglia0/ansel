@@ -1,32 +1,35 @@
-name: Sync fork with upstream
+name: Sync Fork with Upstream
 
 on:
   schedule:
-    - cron: "0 3 * * *"
-  workflow_dispatch:
+    - cron: '0 6 * * *'  # ogni giorno alle 06:00 UTC
+  workflow_dispatch:       # permette lancio manuale
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Add upstream
+      - name: Configure git
         run: |
-          git remote add upstream https://github.com/aurelienpierreeng/ansel.git
-          git fetch upstream
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync master
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/aurelienpierreeng/ansel.git
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Merge upstream/master into master
         run: |
           git checkout master
-          git merge upstream/master --ff-only || true
+          git merge upstream/master --no-edit
 
-      - name: Push changes
-        run: |
-          git push origin master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push to fork
+        run: git push origin master
