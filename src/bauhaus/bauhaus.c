@@ -64,8 +64,10 @@
 #include "common/math.h"
 #include "common/debug.h"
 #include "control/control.h"
+#include "develop/imageop.h"
 
 
+#include "gui/accelerators.h"
 #include "gui/color_picker_proxy.h"
 #include "gui/gui_throttle.h"
 #include "gui/gtk.h"
@@ -369,30 +371,71 @@ static _bh_active_region_t _popup_coordinates(dt_bauhaus_t *bh, const double x_r
 }
 
 // Ensure the programmatically-focused widget is visible,
-// ake its parents are all visible.
+// and all its parents containers expose the right page before grabbing focus.
+#define DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY "dt-bauhaus-focus-idle-source"
+#define DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY "dt-bauhaus-focus-idle-tries"
+#define DT_BAUHAUS_FOCUS_IDLE_MAX_TRIES 20
 static gboolean ensure_focus_idle(gpointer data)
 {
-  GtkWidget *child = GTK_WIDGET(data);
+  GtkWidget *target = GTK_WIDGET(data);
+  if(!GTK_IS_WIDGET(target)) return G_SOURCE_REMOVE;
+
+  GtkWidget *child = target;
 
   for(GtkWidget *w = child; w; w = gtk_widget_get_parent(w))
   {
     if(GTK_IS_NOTEBOOK(w))
     {
+      GtkWidget *page = child;
+      while(!IS_NULL_PTR(page) && gtk_widget_get_parent(page) != w)
+        page = gtk_widget_get_parent(page);
+
       GtkNotebook *nb = GTK_NOTEBOOK(w);
-      gint page = gtk_notebook_page_num(nb, child);
-      gtk_notebook_set_current_page(nb, page);
+      const gint page_num = !IS_NULL_PTR(page) ? gtk_notebook_page_num(nb, page) : -1;
+      if(page_num >= 0) gtk_notebook_set_current_page(nb, page_num);
+    }
+    else if(GTK_IS_STACK(w))
+    {
+      GtkWidget *page = child;
+      while(!IS_NULL_PTR(page) && gtk_widget_get_parent(page) != w)
+        page = gtk_widget_get_parent(page);
+
+      GtkWidget *visible_child = gtk_stack_get_visible_child(GTK_STACK(w));
+      if(!IS_NULL_PTR(page) && visible_child != page) gtk_stack_set_visible_child(GTK_STACK(w), page);
     }
     child = w;
   }
 
-  GtkWidget *target = GTK_WIDGET(data);
   if(gtk_widget_is_drawable(target))
   {
     gtk_widget_grab_focus(target);
     darktable.gui->has_scroll_focus = target;
+    GtkWidget *gtk_focus = NULL;
+    if(!IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->ui))
+      gtk_focus = gtk_window_get_focus(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)));
+    dt_print(DT_DEBUG_SHORTCUTS,
+             "[bauhaus] ensure_focus_idle success target=%s(%p) gtk_focus=%s(%p) scroll_focus=%s(%p)\n",
+             gtk_widget_get_name(target), (void *)target,
+             !IS_NULL_PTR(gtk_focus) ? gtk_widget_get_name(gtk_focus) : "<null>", (void *)gtk_focus,
+             !IS_NULL_PTR(darktable.gui->has_scroll_focus) ? gtk_widget_get_name(darktable.gui->has_scroll_focus) : "<null>",
+             (void *)darktable.gui->has_scroll_focus);
+    g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY, NULL);
+    g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, NULL);
     return G_SOURCE_REMOVE;
   }
 
+  const int tries = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY)) + 1;
+  if(tries >= DT_BAUHAUS_FOCUS_IDLE_MAX_TRIES)
+  {
+    dt_print(DT_DEBUG_SHORTCUTS,
+             "[bauhaus] ensure_focus_idle abort target=%s(%p) tries=%d drawable=%d\n",
+             gtk_widget_get_name(target), (void *)target, tries, gtk_widget_is_drawable(target));
+    g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY, NULL);
+    g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, NULL);
+    return G_SOURCE_REMOVE;
+  }
+
+  g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, GINT_TO_POINTER(tries));
   return G_SOURCE_CONTINUE;
 }
 
@@ -442,12 +485,30 @@ gboolean _action_request_focus(GtkAccelGroup *accel_group, GObject *accelerable,
   {
     dt_iop_module_t *module = (dt_iop_module_t *)w->module;
     if(!IS_NULL_PTR(module->expander))
+    {
       g_object_set_data(G_OBJECT(module->expander), "dt-modulegroups-switch-from-active-once",
                         GINT_TO_POINTER(TRUE));
+      dt_iop_gui_set_expanded(module, TRUE, TRUE);
+    }
+
+    // If the target module is already marked as focused, modulegroups focus
+    // signal may not be emitted and tab visibility can stay stale. Drop focus
+    // once so the next focus request re-emits the full focus/update sequence.
+    if(!IS_NULL_PTR(darktable.develop) && darktable.develop->gui_module == module)
+      dt_iop_request_focus(NULL);
+
     w->module->focus(w->module, FALSE);
   }
 
-  g_idle_add(ensure_focus_idle, data);
+  GtkWidget *target = GTK_WIDGET(data);
+  const guint previous_source = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY));
+  if(previous_source > 0)
+    g_source_remove(previous_source);
+
+  g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, GINT_TO_POINTER(0));
+  const guint source = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, ensure_focus_idle, g_object_ref(target),
+                                       (GDestroyNotify)g_object_unref);
+  g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY, GUINT_TO_POINTER(source));
   return TRUE;
 }
 
@@ -905,6 +966,19 @@ static gboolean _enter_leave(GtkWidget *widget, GdkEventCrossing *event)
 static void _widget_finalize(GObject *widget)
 {
   struct dt_bauhaus_widget_t *w = DT_BAUHAUS_WIDGET(widget);
+
+  const guint focus_source = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(widget), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY));
+  if(focus_source > 0)
+  {
+    g_source_remove(focus_source);
+    g_object_set_data(G_OBJECT(widget), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY, NULL);
+    g_object_set_data(G_OBJECT(widget), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, NULL);
+  }
+
+  const char *accel_path = g_object_get_data(G_OBJECT(widget), "accel-path");
+  if(!IS_NULL_PTR(accel_path) && !IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->accels))
+    dt_accels_remove_accel(darktable.gui->accels, accel_path, widget);
+
   if(darktable.gui && darktable.gui->has_scroll_focus == GTK_WIDGET(w))
     darktable.gui->has_scroll_focus = NULL;
   dt_gui_throttle_cancel(widget);
