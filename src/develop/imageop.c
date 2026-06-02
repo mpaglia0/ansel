@@ -560,12 +560,30 @@ void dt_iop_init_pipe(struct dt_iop_module_t *module, struct dt_dev_pixelpipe_t 
 void dt_iop_cleanup_pipe(struct dt_iop_module_t *module, struct dt_dev_pixelpipe_t *pipe,
                         struct dt_dev_pixelpipe_iop_t *piece)
 {
-  if(IS_NULL_PTR(module)
-     || IS_NULL_PTR(module->cleanup_pipe)
-     || IS_NULL_PTR(pipe)
-     || IS_NULL_PTR(piece))
-        return;
-  module->cleanup_pipe(module, pipe, piece);
+  if(IS_NULL_PTR(module) || IS_NULL_PTR(pipe) || IS_NULL_PTR(piece)) return;
+
+  void (*cleanup_pipe)(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_t *pipe,
+                       struct dt_dev_pixelpipe_iop_t *piece) = module->cleanup_pipe;
+
+  if(IS_NULL_PTR(cleanup_pipe) || (gsize)cleanup_pipe <= 0x1000)
+  {
+    if(!IS_NULL_PTR(module->so) && !IS_NULL_PTR(module->so->cleanup_pipe) && (gsize)module->so->cleanup_pipe > 0x1000)
+    {
+      dt_print(DT_DEBUG_ALWAYS,
+               "[dt_iop_cleanup_pipe] invalid module cleanup callback for `%s`, using shared-object fallback\n",
+               module->op);
+      cleanup_pipe = module->so->cleanup_pipe;
+    }
+    else
+    {
+      dt_print(DT_DEBUG_ALWAYS,
+               "[dt_iop_cleanup_pipe] invalid cleanup callback for `%s`, skipping module pipe cleanup\n",
+               module->op);
+      cleanup_pipe = NULL;
+    }
+  }
+
+  if(!IS_NULL_PTR(cleanup_pipe)) cleanup_pipe(module, pipe, piece);
   dt_free_align(piece->blendop_data);
   piece->blendop_data = NULL;
 }
@@ -1524,8 +1542,14 @@ void dt_iop_unload_modules_so()
 
 void dt_iop_set_mask_mode(dt_iop_module_t *module, int mask_mode)
 {
+  (void)mask_mode;
   static const int key = 0;
-  if(mask_mode & DEVELOP_MASK_ENABLED && !(mask_mode & DEVELOP_MASK_RASTER))
+
+  gboolean drawn_used = FALSE;
+  gboolean parametric_used = FALSE;
+  dt_develop_blend_get_mask_usage(module, module->blend_params, NULL, NULL, &drawn_used, &parametric_used);
+
+  if(drawn_used || parametric_used)
   {
     char *modulename = dt_history_item_get_name(module);
     g_hash_table_insert(module->raster_mask.source.masks, GINT_TO_POINTER(key), modulename);
@@ -2393,29 +2417,74 @@ static void _display_mask_indicator_callback(GtkToggleButton *bt, dt_iop_module_
   dt_dev_pixelpipe_update_history_main(module->dev);
 }
 
+static void _mask_indicator_get_usage(dt_iop_module_t *module, gboolean *top_enabled, gboolean *raster_used,
+                                      gboolean *drawn_used, gboolean *parametric_used)
+{
+  if(!IS_NULL_PTR(top_enabled)) *top_enabled = FALSE;
+  if(!IS_NULL_PTR(raster_used)) *raster_used = FALSE;
+  if(!IS_NULL_PTR(drawn_used)) *drawn_used = FALSE;
+  if(!IS_NULL_PTR(parametric_used)) *parametric_used = FALSE;
+
+  if(IS_NULL_PTR(module) || IS_NULL_PTR(module->blend_params)) return;
+
+  const dt_iop_gui_blend_data_t *bd = (const dt_iop_gui_blend_data_t *)module->blend_data;
+  gboolean top = FALSE;
+  gboolean raster = FALSE;
+  gboolean drawn = FALSE;
+  gboolean parametric = FALSE;
+  dt_develop_blend_get_mask_usage(module, module->blend_params, &top, &raster, &drawn, &parametric);
+
+  // look if the user disabled masks modes
+
+  // raster mask must be enabled and a raster mask must be selected in the combo
+  if(!IS_NULL_PTR(bd) && GTK_IS_TOGGLE_BUTTON(bd->raster_enable)
+     && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(bd->raster_enable)))
+    raster = FALSE;
+
+  if(!IS_NULL_PTR(bd) && GTK_IS_TOGGLE_BUTTON(bd->masks_enable)
+     && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(bd->masks_enable)))
+    drawn = FALSE;
+
+  if(!IS_NULL_PTR(bd) && GTK_IS_TOGGLE_BUTTON(bd->blendif_enable)
+     && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(bd->blendif_enable)))
+    parametric = FALSE;
+
+  if(!IS_NULL_PTR(top_enabled)) *top_enabled = top;
+  if(!IS_NULL_PTR(raster_used)) *raster_used = raster;
+  if(!IS_NULL_PTR(drawn_used)) *drawn_used = drawn;
+  if(!IS_NULL_PTR(parametric_used)) *parametric_used = parametric;
+}
+
 static gboolean _mask_indicator_tooltip(GtkWidget *treeview, gint x, gint y, gboolean kb_mode,
       GtkTooltip* tooltip, dt_iop_module_t *module)
 {
+  (void)treeview;
+  (void)x;
+  (void)y;
+  (void)kb_mode;
+
   gboolean res = FALSE;
-  const gboolean raster = module->blend_params->mask_mode & DEVELOP_MASK_RASTER;
   if(module->mask_indicator)
   {
     gchar *type = _("unknown mask");
     gchar *text;
-    const uint32_t mm = module->blend_params->mask_mode;
-    if((mm & DEVELOP_MASK_MASK) && (mm & DEVELOP_MASK_CONDITIONAL))
+    gboolean top_enabled = FALSE, raster_used = FALSE, drawn_used = FALSE, parametric_used = FALSE;
+    _mask_indicator_get_usage(module, &top_enabled, &raster_used, &drawn_used, &parametric_used);
+    if(!top_enabled) return FALSE;
+
+    if(drawn_used && parametric_used)
       type=_("drawn + parametric mask");
-    else if(mm & DEVELOP_MASK_MASK)
+    else if(drawn_used)
       type=_("drawn mask");
-    else if(mm & DEVELOP_MASK_CONDITIONAL)
+    else if(parametric_used)
       type=_("parametric mask");
-    else if(mm & DEVELOP_MASK_RASTER)
+    else if(raster_used)
       type=_("raster mask");
     else
-      fprintf(stderr, "unknown mask mode '%d' in module '%s'\n", mm, module->op);
+      return FALSE;
     gchar *part1 = g_strdup_printf(_("this module has a '%s'"), type);
     gchar *part2 = NULL;
-    if(raster && module->raster_mask.sink.source)
+    if(raster_used && module->raster_mask.sink.source)
     {
       gchar *source = dt_history_item_get_name(module->raster_mask.sink.source);
       part2 = g_strdup_printf(_("taken from module %s"), source);
@@ -2461,8 +2530,10 @@ void dt_iop_add_remove_mask_indicator(dt_iop_module_t *module)
     return;
   }
 
-  // Note : DEVELOP_MASK_ENABLED means uniform blending (opacity), not masks
-  const gboolean use_masks = module->blend_params->mask_mode > DEVELOP_MASK_ENABLED;
+  gboolean top_enabled = FALSE, raster_used = FALSE, drawn_used = FALSE, parametric_used = FALSE;
+  _mask_indicator_get_usage(module, &top_enabled, &raster_used, &drawn_used, &parametric_used);
+
+  const gboolean use_masks = top_enabled && (raster_used || drawn_used || parametric_used);
 
   gtk_widget_set_visible(GTK_WIDGET(module->mask_indicator), use_masks);
   gtk_widget_set_sensitive(GTK_WIDGET(module->mask_indicator), module->enabled);
