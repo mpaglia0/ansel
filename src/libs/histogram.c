@@ -84,12 +84,13 @@
 #endif
 
 #define HISTOGRAM_BINS 256
-#define GAMMA 1.f / 1.5f
+#define GAMMA 1.f / 2.f
 #define DT_LIB_HISTOGRAM_SCOPE_MIN_VALUE (1.f / 256.f)
 #define DT_LIB_HISTOGRAM_SCOPE_ENABLE_SMOOTHING 1
 #define DT_LIB_HISTOGRAM_SCOPE_SMOOTH_SPATIAL_PASSES 1
 #define DT_LIB_HISTOGRAM_SCOPE_SMOOTH_TONE_PASSES 4
 #define DT_LIB_HISTOGRAM_SCOPE_SMOOTH_FORCE (256 * 0.33)
+#define DT_LIB_HISTOGRAM_SCOPE_RESTRICTED_LABEL_OPERATOR CAIRO_OPERATOR_ADD
 #define DT_LIB_HISTOGRAM_SCOPE_DEFAULT_HEIGHT 250
 #define DT_LIB_HISTOGRAM_SCOPE_MIN_HEIGHT 120
 #define DT_LIB_HISTOGRAM_SCOPE_MAX_HEIGHT 500
@@ -146,9 +147,6 @@ typedef struct dt_lib_histogram_t
   dt_backbuf_t *backbuf;               // reference to the dev backbuf currently in use
   const char *op;
   float zoom; // zoom level for the vectorscope
-  gboolean scope_resize_dragging;
-  int scope_resize_start_y;
-  int scope_resize_start_height;
   int scope_height;
 
   dt_lib_histogram_cache_t cache;
@@ -162,6 +160,7 @@ typedef struct dt_lib_histogram_t
   GtkWidget *samples_container;
   GtkWidget *add_sample_button;
   GtkWidget *display_samples_check_box;
+  GtkWidget *restrict_button;
   GArray *pending_hashes;
   guint refresh_idle_source;
   dt_dev_pixelpipe_cache_wait_t scope_wait;
@@ -821,11 +820,9 @@ static inline void _bin_pixels_histogram_in_roi(const float *const restrict imag
   // Process
 #ifdef _OPENMP
 #ifndef _WIN32
-#pragma omp parallel for default(firstprivate) \
-        reduction(+: bins[0: HISTOGRAM_BINS * 4])  collapse(3)
+__OMP_PARALLEL_FOR__(reduction(+: bins[0: HISTOGRAM_BINS * 4])  collapse(3))
 #else
-#pragma omp parallel for default(firstprivate) \
-        shared(bins)  collapse(3)
+__OMP_PARALLEL_FOR__(shared(bins)  collapse(3))
 #endif
 #endif
   for(size_t i = min_y; i < max_y; i++)
@@ -868,6 +865,16 @@ static inline void _bin_pickers_histogram(const float *const restrict image,
 
 static const dt_dev_pixelpipe_iop_t *_get_backbuf_source_piece(const dt_backbuf_t *backbuf, const char *op);
 
+static gboolean _is_restricted(dt_lib_histogram_t *d)
+{
+  if(IS_NULL_PTR(d)) return FALSE;
+  const gboolean restrict_active = !IS_NULL_PTR(d->restrict_button)
+      && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(d->restrict_button));
+  const gboolean picker_active = !IS_NULL_PTR(d->picker_button)
+      && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(d->picker_button));
+  return restrict_active && picker_active;
+}
+
 static void _process_histogram(dt_backbuf_t *backbuf, const char *op, cairo_t *cr, const int width,
                                const int height, dt_lib_histogram_t *d)
 {
@@ -902,7 +909,8 @@ static void _process_histogram(dt_backbuf_t *backbuf, const char *op, cairo_t *c
     return;
   }
 
-  if(dt_conf_get_bool("ui_last/colorpicker_restrict_histogram"))
+  const gboolean restrict_mode = _is_restricted(d);
+  if(restrict_mode)
   {
     // Bin only areas within color pickers
     GSList *samples = darktable.develop->color_picker.samples;
@@ -1071,13 +1079,13 @@ static inline void _bin_pickers_waveforms(const float *const restrict image, uin
 static inline void _bin_pixels_waveform(const float *const restrict image, uint32_t *const restrict bins,
                                         const size_t width, const size_t height, const size_t binning_size,
                                         const size_t tone_bins, const size_t raster_extent,
-                                        const gboolean vertical)
+                                        const gboolean vertical, const gboolean restricted)
 {
   // Init
   __OMP_FOR_SIMD__(aligned(bins: 64) )
   for(size_t k = 0; k < binning_size; k++) bins[k] = 0;
 
-  if(dt_conf_get_bool("ui_last/colorpicker_restrict_histogram"))
+  if(restricted)
   {
     // Bin only areas within color pickers
     GSList *samples = darktable.develop->color_picker.samples;
@@ -1198,9 +1206,10 @@ static void _process_waveform(dt_backbuf_t *backbuf, const char *op, cairo_t *cr
 
   if(darktable.unmuted & DT_DEBUG_VERBOSE)
     dt_print(DT_DEBUG_DEV,
-            "[histogram/scope] waveform setup op=%s parade=%d vertical=%d widget=%dx%d backbuf=%zux%zu "
-            "tone_bins=%zu raster_extent=%zu source_axis=%zu source_per_raster=%.4f binning_size=%zu "
-            "source_value=%0.6f..%0.6f clipped=%zu nan=%zu sample_step=%zu\n",
+            "[histogram/scope] waveform setup op=%s parade=%d vertical=%d widget=%dx%d backbuf=%" G_GSIZE_FORMAT "x%" G_GSIZE_FORMAT " "
+            "tone_bins=%" G_GSIZE_FORMAT " raster_extent=%" G_GSIZE_FORMAT " source_axis=%" G_GSIZE_FORMAT
+            " source_per_raster=%.4f binning_size=%" G_GSIZE_FORMAT " "
+            "source_value=%0.6f..%0.6f clipped=%" G_GSIZE_FORMAT " nan=%" G_GSIZE_FORMAT " sample_step=%" G_GSIZE_FORMAT "\n",
             op, parade, vertical, width, height, backbuf->width, backbuf->height,
             tone_bins, raster_extent, source_axis, (double)source_axis / (double)raster_extent,
             binning_size, source_min, source_max, source_clipped, source_nan, source_step);
@@ -1214,14 +1223,15 @@ static void _process_waveform(dt_backbuf_t *backbuf, const char *op, cairo_t *cr
   {
     if(darktable.unmuted & DT_DEBUG_VERBOSE)
       dt_print(DT_DEBUG_DEV,
-              "[histogram/scope] waveform allocation failed bins=%p image=%p binning_size=%zu image_size=%zu\n",
+              "[histogram/scope] waveform allocation failed bins=%p image=%p binning_size=%" G_GSIZE_FORMAT
+              " image_size=%" G_GSIZE_FORMAT "\n",
               (void *)bins, (void *)image, binning_size, image_size);
     goto error;
   }
 
   // 1. Pixel binning along columns/rows, aka compute a column/row-wise histogram
   _bin_pixels_waveform(data, bins, backbuf->width, backbuf->height, binning_size,
-                       tone_bins, raster_extent, vertical);
+                       tone_bins, raster_extent, vertical, _is_restricted(d));
 
   const uint32_t *render_bins = bins;
   int smoothing_passes = 0;
@@ -1377,8 +1387,8 @@ static void _process_waveform(dt_backbuf_t *backbuf, const char *op, cairo_t *cr
   }
   const size_t stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, img_width);
   dt_print(DT_DEBUG_DEV,
-           "[histogram/scope] waveform raster op=%s parade=%d vertical=%d image=%zux%zu stride=%zu "
-           "overall_max=%u empty_axis=%zu axis_total=%" PRIu64 "..%" PRIu64
+           "[histogram/scope] waveform raster op=%s parade=%d vertical=%d image=%" G_GSIZE_FORMAT "x%" G_GSIZE_FORMAT
+           " stride=%" G_GSIZE_FORMAT " overall_max=%u empty_axis=%" G_GSIZE_FORMAT " axis_total=%" PRIu64 "..%" PRIu64
            " axis_peak=%u..%u smooth=%d scale=%0.4fx%0.4f\n",
            op, parade, vertical, img_width, img_height, stride, overall_max_hist,
            empty_axis, min_axis, max_axis, min_axis_peak, max_axis_peak, smoothing_passes,
@@ -1396,10 +1406,10 @@ static void _process_waveform(dt_backbuf_t *backbuf, const char *op, cairo_t *cr
 
       for(size_t c = 0; c < 3; c++)
       {
-        const size_t x0 = (vertical) ? 0 : c * width / 3;
-        const size_t x1 = (vertical) ? width : (c + 1) * width / 3;
-        const size_t y0 = (vertical) ? c * height / 3 : 0;
-        const size_t y1 = (vertical) ? (c + 1) * height / 3 : height;
+        const size_t x0 = vertical ? 0 : c * width / 3;
+        const size_t x1 = vertical ? width : (c + 1) * width / 3;
+        const size_t y0 = vertical ? c * height / 3 : 0;
+        const size_t y1 = vertical ? (c + 1) * height / 3 : height;
         const size_t channel_width = x1 - x0;
         const size_t channel_height = y1 - y0;
         if(channel_width == 0 || channel_height == 0) continue;
@@ -1407,11 +1417,11 @@ static void _process_waveform(dt_backbuf_t *backbuf, const char *op, cairo_t *cr
         for(size_t y = y0; y < y1; y++)
           for(size_t x = x0; x < x1; x++)
           {
-            const size_t axis = (vertical)
+            const size_t axis = vertical
                 ? (y - y0) * raster_extent / channel_height
                 : (x - x0) * raster_extent / channel_width;
-            const size_t tone = (vertical) ? x : y;
-            const size_t bin_index = (vertical) ? (axis * tone_bins + tone) * 4 + c
+            const size_t tone = vertical ? x : y;
+            const size_t bin_index = vertical ? (axis * tone_bins + tone) * 4 + c
                                                 : (tone * raster_extent + axis) * 4 + c;
             const uint8_t value = (uint8_t)CLAMP(roundf(powf((float)render_bins[bin_index] / (float)overall_max_hist, GAMMA) * 255.f), 0, 255);
             const size_t image_index = (y * img_width + x) * 4;
@@ -1479,16 +1489,19 @@ static void _process_waveform(dt_backbuf_t *backbuf, const char *op, cairo_t *cr
       /* Raw data is linear, so integer bit stops are powers of two in normalized tone space.
        * Drawing those stops on the tone axis makes exposure clipping and low-bit detail readable
        * without depending on the current scope height. */
-      for(float value = 1.f; value >= DT_LIB_HISTOGRAM_SCOPE_MIN_VALUE; value *= 0.5f)
+      for(int stop = 0; stop <= 8; stop++)
       {
+        const double value = 1.0 / (double)(1u << stop);
+        if(value < (double)DT_LIB_HISTOGRAM_SCOPE_MIN_VALUE) break;
+
         if(vertical)
         {
-          const double x = (double)value * (double)width;
+          const double x = value * (double)width;
           dt_draw_line(cr, x, 0, x, height);
         }
         else
         {
-          const double y = (1.0 - (double)value) * (double)height;
+          const double y = (1.0 - value) * (double)height;
           dt_draw_line(cr, 0, y, width, y);
         }
         cairo_stroke(cr);
@@ -1622,7 +1635,7 @@ static void _bin_vectorscope(const float *const restrict image, uint32_t *const 
   __OMP_FOR_SIMD__(aligned(vectorscope: 64) )
   for(size_t k = 0; k < HISTOGRAM_BINS * HISTOGRAM_BINS; k++) vectorscope[k] = 0;
 
-  if(dt_conf_get_bool("ui_last/colorpicker_restrict_histogram"))
+  if(_is_restricted(d))
   {
     // Bin only areas within color pickers
     GSList *samples = darktable.develop->color_picker.samples;
@@ -1865,6 +1878,61 @@ void _get_allocation_size(dt_lib_histogram_t *d, int *width, int *height)
   *height = allocation.height;
 }
 
+/**
+ * @userdoc
+ * @id: restricted-scope
+ * @page: views/toolboxes/scopes.md
+ * @type: feature
+ * @section: Color picker
+ * @screenshot: optional
+ * @controls: color picker, Restrict scope to selection
+ *
+ * When the color picker is enabled and "Restrict scope to selection" is checked,
+ * the scope is computed only from the active picker area and live samples instead
+ * of the whole image. A "Restricted" label is shown on the scope while this mode
+ * is active.
+ */
+
+/**
+ * @brief Draw the restricted-scope label over the current Cairo surface.
+ *
+ * The scope content is rendered first because the label describes the final
+ * visible state. The theme owns the text color through graph_scope_restricted,
+ * while the module keeps the Cairo operator explicit because it controls how
+ * the label is composited with the already-rendered graph pixels.
+ */
+static void _process_restricted_text(dt_lib_histogram_t *d, cairo_t *cr, const int height)
+{
+  if(_is_restricted(d))
+  {
+    cairo_save(cr);
+    cairo_set_operator(cr, DT_LIB_HISTOGRAM_SCOPE_RESTRICTED_LABEL_OPERATOR);
+
+    PangoLayout *layout = pango_cairo_create_layout(cr);
+    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(12.) * PANGO_SCALE);
+    pango_layout_set_font_description(layout, desc);
+    pango_layout_set_text(layout, _("Restricted"), -1);
+
+    PangoRectangle ink;
+    PangoRectangle logical;
+    pango_layout_get_pixel_extents(layout, &ink, &logical);
+
+    const double padding = DT_PIXEL_APPLY_DPI(2.);
+    const double text_padding = DT_PIXEL_APPLY_DPI(1.5);
+    const double label_x = padding;
+    const double label_y = MAX(padding, height - logical.height - 2. * text_padding - padding);
+
+    set_color(cr, darktable.bauhaus->graph_scope_restricted);
+    cairo_move_to(cr, label_x + text_padding - ink.x, label_y + text_padding);
+    pango_cairo_show_layout(cr, layout);
+
+    pango_font_description_free(desc);
+    g_object_unref(layout);
+    cairo_restore(cr);
+  }
+}
+
 gboolean _redraw_surface(dt_lib_histogram_t *d)
 {
   if(IS_NULL_PTR(d->cst)) return 1;
@@ -1924,6 +1992,8 @@ gboolean _redraw_surface(dt_lib_histogram_t *d)
     default:
       break;
   }
+
+  _process_restricted_text(d, cr, height);
 
   cairo_destroy(cr);
   dt_show_times_f(&start, "[histogram]", "redraw");
@@ -2338,114 +2408,36 @@ static gboolean _area_scrolled_callback(GtkWidget *widget, GdkEventScroll *event
   return TRUE;
 }
 
-/**
- * @brief Paint the scope resize handle below the cached histogram image.
- *
- * @details
- * The handle is a separate event target so resizing never changes ownership of the cached Cairo
- * surface. We only draw a small grip here; all scope image drawing remains in @ref _draw_callback.
- */
-static gboolean _scope_resize_handle_draw_callback(GtkWidget *widget, cairo_t *cr, gpointer user_data)
+static int _scope_resize_handle_get_size(gpointer user_data)
 {
-  GtkAllocation allocation;
-  gtk_widget_get_allocation(widget, &allocation);
-  GtkStyleContext *context = gtk_widget_get_style_context(widget);
-  gtk_render_background(context, cr, 0, 0, allocation.width, allocation.height);
-
-  GdkRGBA color;
-  gtk_style_context_get_color(context, gtk_widget_get_state_flags(widget), &color);
-  gdk_cairo_set_source_rgba(cr, &color);
-  cairo_set_line_width(cr, 1.);
-
-  const double center_y = allocation.height / 2.0;
-  const double start_x = allocation.width * 0.35;
-  const double end_x = allocation.width * 0.65;
-
-  /* Draw the visible grip line in the middle of the event area we use for vertical dragging. */
-  cairo_move_to(cr, start_x, center_y);
-  cairo_line_to(cr, end_x, center_y);
-  cairo_stroke(cr);
-
-  return FALSE;
+  dt_lib_histogram_t *d = (dt_lib_histogram_t *)user_data;
+  return gtk_widget_get_allocated_height(d->scope_draw);
 }
 
 /**
- * @brief Switch to the north-south resize cursor while hovering the scope handle.
- */
-static gboolean _scope_resize_handle_cursor_callback(GtkWidget *widget, GdkEventCrossing *event,
-                                                     dt_lib_histogram_t *d)
-{
-  if(event->type == GDK_ENTER_NOTIFY)
-    dt_control_change_cursor(GDK_SB_V_DOUBLE_ARROW);
-  else if(!d->scope_resize_dragging)
-    dt_control_change_cursor(GDK_LEFT_PTR);
-
-  return TRUE;
-}
-
-/**
- * @brief Start or stop vertical resizing from the handle below the histogram surface.
+ * @brief Apply one vertical size request from the generic Bauhaus resize handle.
  *
- * @details
- * The drag stores the allocated scope height at button press so the motion path can apply only the
- * pointer delta. Persisting happens on release, not on every motion event, to avoid writing the
- * configuration backend for each pointer sample.
+ * @details The Bauhaus widget owns pointer tracking and sends requested heights here. The histogram
+ * owns the scope widget, the window-relative clamp, and persistence, so these side effects remain
+ * explicit in the module that owns the resized surface.
  */
-static gboolean _scope_resize_handle_button_callback(GtkWidget *widget, GdkEventButton *event,
-                                                     dt_lib_histogram_t *d)
+static int _scope_resize_handle_resize(int requested_size, gboolean finished, gpointer user_data)
 {
-  if(event->button != 1) return TRUE;
-
-  if(event->type == GDK_BUTTON_PRESS)
-  {
-    d->scope_resize_dragging = TRUE;
-    d->scope_resize_start_y = event->y_root;
-    d->scope_resize_start_height = gtk_widget_get_allocated_height(d->scope_draw);
-    gtk_grab_add(widget);
-    dt_control_change_cursor(GDK_SB_V_DOUBLE_ARROW);
-  }
-  else if(event->type == GDK_BUTTON_RELEASE)
-  {
-    d->scope_resize_dragging = FALSE;
-    gtk_grab_remove(widget);
-    dt_conf_set_int(DT_LIB_HISTOGRAM_SCOPE_HEIGHT_CONF, d->scope_height);
-
-    GtkAllocation allocation;
-    gtk_widget_get_allocation(widget, &allocation);
-    const gboolean pointer_on_handle = event->x >= 0. && event->x <= allocation.width
-                                      && event->y >= 0. && event->y <= allocation.height;
-    dt_control_change_cursor(pointer_on_handle ? GDK_SB_V_DOUBLE_ARROW : GDK_LEFT_PTR);
-  }
-
-  return TRUE;
-}
-
-/**
- * @brief Resize the histogram image surface while dragging the handle under it.
- *
- * @details
- * The loop here is the GTK motion stream: each pointer event maps to one new requested height.
- * The actual Cairo cache rebuild stays in the existing size-allocate path so allocation and
- * rendering remain synchronized by GTK.
- */
-static gboolean _scope_resize_handle_motion_callback(GtkWidget *widget, GdkEventMotion *event,
-                                                     dt_lib_histogram_t *d)
-{
-  if(!d->scope_resize_dragging) return TRUE;
-
+  dt_lib_histogram_t *d = (dt_lib_histogram_t *)user_data;
   int window_height;
   gtk_window_get_size(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), NULL, &window_height);
 
   const int min_height = DT_PIXEL_APPLY_DPI(DT_LIB_HISTOGRAM_SCOPE_MIN_HEIGHT);
   const int max_height = MAX(min_height, MIN(DT_PIXEL_APPLY_DPI(DT_LIB_HISTOGRAM_SCOPE_MAX_HEIGHT),
                                             window_height * 3 / 4));
-  const int delta_y = event->y_root - d->scope_resize_start_y;
-  d->scope_height = CLAMP(d->scope_resize_start_height + delta_y, min_height, max_height);
+  d->scope_height = CLAMP(requested_size, min_height, max_height);
 
   gtk_widget_set_size_request(d->scope_draw, -1, d->scope_height);
   gtk_widget_queue_resize(d->scope_draw);
+  if(finished)
+    dt_conf_set_int(DT_LIB_HISTOGRAM_SCOPE_HEIGHT_CONF, d->scope_height);
 
-  return TRUE;
+  return d->scope_height;
 }
 
 void _set_params(dt_lib_histogram_t *d)
@@ -2560,7 +2552,19 @@ static void _update_picker_output(dt_lib_module_t *self)
 
 static void _picker_button_toggled(GtkToggleButton *button, dt_lib_histogram_t *d)
 {
-  gtk_widget_set_sensitive(GTK_WIDGET(d->add_sample_button), gtk_toggle_button_get_active(button));
+  const gboolean picker_active = gtk_toggle_button_get_active(button);
+  gtk_widget_set_sensitive(GTK_WIDGET(d->add_sample_button), picker_active);
+
+  const gboolean restrict_active = !IS_NULL_PTR(d->restrict_button)
+      && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(d->restrict_button));
+  if(!picker_active && restrict_active)
+  {
+    /* Restrict mode changes the rendered bins from picker geometry to full-image
+     * bins when the live picker is disabled. The preview backbuffer hash does not
+     * change, so make the scope cache dirty from the UI state transition itself. */
+    _reset_cache(d);
+    if(_trigger_recompute(d)) _redraw_scopes(d);
+  }
 }
 
 /* set sample area proxy impl */
@@ -2821,9 +2825,19 @@ static void _display_samples_changed(GtkToggleButton *button, dt_lib_module_t *s
 static void _restrict_histogram_changed(GtkToggleButton *button, dt_lib_module_t *self)
 {
   dt_lib_histogram_t *d = self->data;
-  dt_conf_set_bool("ui_last/colorpicker_restrict_histogram", gtk_toggle_button_get_active(button));
-  darktable.develop->color_picker.restrict_histogram = gtk_toggle_button_get_active(button);
-  _reset_cache(d);
+  const gboolean restrict_active = gtk_toggle_button_get_active(button);
+  const gboolean picker_active = !IS_NULL_PTR(d->picker_button)
+      && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(d->picker_button));
+  dt_conf_set_bool("ui_last/colorpicker_restrict_histogram", restrict_active);
+  darktable.develop->color_picker.restrict_histogram = restrict_active;
+
+  if(picker_active)
+  {
+    /* Restrict toggling changes the scope bins between full-image and picker
+     * geometry while the preview backbuffer hash stays identical. Make the
+     * cached Cairo surface dirty so _update_everything() renders the new mode. */
+    _reset_cache(d);
+  }
   _update_everything(self);
 }
 
@@ -2906,25 +2920,11 @@ void gui_init(dt_lib_module_t *self)
    * Handle to resize the scope vertically. Drag the handle up or down to adjust the height of the scope display.
    */
 
-  d->scope_resize_handle = gtk_drawing_area_new();
-  gtk_widget_set_size_request(d->scope_resize_handle, -1,
-                              DT_PIXEL_APPLY_DPI(DT_LIB_HISTOGRAM_SCOPE_HANDLE_HEIGHT));
-  gtk_widget_set_events(d->scope_resize_handle, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
-                                                | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK
-                                                | GDK_POINTER_MOTION_MASK);
-  gtk_widget_set_tooltip_text(d->scope_resize_handle, _("drag to resize the scope vertically"));
-  g_signal_connect(G_OBJECT(d->scope_resize_handle), "draw",
-                   G_CALLBACK(_scope_resize_handle_draw_callback), d);
-  g_signal_connect(G_OBJECT(d->scope_resize_handle), "button-press-event",
-                   G_CALLBACK(_scope_resize_handle_button_callback), d);
-  g_signal_connect(G_OBJECT(d->scope_resize_handle), "button-release-event",
-                   G_CALLBACK(_scope_resize_handle_button_callback), d);
-  g_signal_connect(G_OBJECT(d->scope_resize_handle), "motion-notify-event",
-                   G_CALLBACK(_scope_resize_handle_motion_callback), d);
-  g_signal_connect(G_OBJECT(d->scope_resize_handle), "enter-notify-event",
-                   G_CALLBACK(_scope_resize_handle_cursor_callback), d);
-  g_signal_connect(G_OBJECT(d->scope_resize_handle), "leave-notify-event",
-                   G_CALLBACK(_scope_resize_handle_cursor_callback), d);
+  d->scope_resize_handle = dt_bauhaus_resize_handle_new(GTK_ORIENTATION_VERTICAL,
+                                                        DT_PIXEL_APPLY_DPI(DT_LIB_HISTOGRAM_SCOPE_HANDLE_HEIGHT),
+                                                        _("Drag to resize the scope vertically"),
+                                                        _scope_resize_handle_get_size,
+                                                        _scope_resize_handle_resize, d);
   gtk_box_pack_start(GTK_BOX(self->widget), d->scope_resize_handle, FALSE, FALSE, 0);
 
   d->stage = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(NULL));
@@ -3055,12 +3055,12 @@ void gui_init(dt_lib_module_t *self)
                    G_CALLBACK(_display_samples_changed), self);
   gtk_box_pack_start(GTK_BOX(self->widget), d->display_samples_check_box, TRUE, TRUE, 0);
 
-  GtkWidget *restrict_button = gtk_check_button_new_with_label(_("Restrict scope to selection"));
-  gtk_label_set_ellipsize(GTK_LABEL(gtk_bin_get_child(GTK_BIN(restrict_button))), PANGO_ELLIPSIZE_MIDDLE);
+  d->restrict_button = gtk_check_button_new_with_label(_("Restrict scope to selection"));
+  gtk_label_set_ellipsize(GTK_LABEL(gtk_bin_get_child(GTK_BIN(d->restrict_button))), PANGO_ELLIPSIZE_MIDDLE);
   gboolean restrict_histogram = dt_conf_get_bool("ui_last/colorpicker_restrict_histogram");
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(restrict_button), restrict_histogram);
-  g_signal_connect(G_OBJECT(restrict_button), "toggled", G_CALLBACK(_restrict_histogram_changed), self);
-  gtk_box_pack_start(GTK_BOX(self->widget), restrict_button, TRUE, TRUE, 0);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->restrict_button), restrict_histogram);
+  g_signal_connect(G_OBJECT(d->restrict_button), "toggled", G_CALLBACK(_restrict_histogram_changed), self);
+  gtk_box_pack_start(GTK_BOX(self->widget), d->restrict_button, TRUE, TRUE, 0);
 
   _reset_cache(d);
   _set_params(d);
