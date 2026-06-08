@@ -238,6 +238,31 @@ Why that? Just because it's a developer choice and most classes use underscore i
 @define-color brush_cursor alpha(white, .9);
 @define-color brush_trace alpha(black, .8);
 
+/* Blending UI alignment
+   Ensure internal blending containers (set in code via gtk_widget_set_name)
+   do not add extra margins/padding. The main library widget remains
+   responsible for outer spacing. */
+#blending-box,
+#blending-box box,
+#blending-wrapper,
+#blending-wrapper box
+{
+  margin: 0;
+  padding: 0;
+}
+
+/* Separator between global blending options and notebook: slightly thicker and brighter */
+#blending-separator,
+#blending-separator separator
+{
+  min-height: 1px;
+  margin: 0.5em 0;
+  background-color: @grey_80;
+  margin-top: 6px;
+  margin-bottom: 6px;
+  border: none;
+}
+
 /* Graphs : histogram, navigation thumbnail and some items on tone curve */
 @define-color graph_bg @grey_40;
 @define-color navigation_bg transparent;
@@ -586,6 +611,25 @@ menu separator
   margin: 0.25em 0;
   padding: 0;
   border-top: 1px solid @grey_48;
+}
+
+/* Module toolbox: keep rules GTK-compatible and simple. */
+.dt-module-toolbox {
+  padding: 3px;
+  /* Match the main menu/header background to visually integrate the toolbox */
+  background-color: @grey_35;
+  border-top: none;
+  border-bottom: none;
+}
+
+.dt-module-toolbox .dt_module_btn,
+.dt-module-toolbox .dt-module-toolbox-item
+{
+  min-height: 1.1em; /* override broader rule */
+  background-color: transparent;
+  border: none;
+  padding: 2px 0;
+  margin: 2px;
 }
 
 menubar menuitem label
