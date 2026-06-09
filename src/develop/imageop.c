@@ -486,7 +486,6 @@ int dt_iop_load_module_by_so(dt_iop_module_t *module, dt_iop_module_so_t *so, dt
       = 0;
   module->histogram_middle_grey = FALSE;
   module->request_mask_display = DT_DEV_PIXELPIPE_DISPLAY_NONE;
-  module->suppress_mask = 0;
   module->bypass_cache = FALSE;
   module->enabled = module->default_enabled = module->workflow_enabled = 0; // all modules disabled by default.
   g_strlcpy(module->op, so->op, 20);
@@ -2057,7 +2056,9 @@ void dt_iop_gui_cleanup_module(dt_iop_module_t *module)
   {
     DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_iop_color_picker_data_ready_callback), module);
   }
-  if(module->gui_cleanup)
+  // History refresh can delete pipeline-only modules created for ordering/history
+  // resolution. They have a module GUI cleanup callback but no module GUI data.
+  if(module->gui_cleanup && !IS_NULL_PTR(module->gui_data))
     module->gui_cleanup(module);
   dt_iop_gui_cleanup_blending(module);
 
