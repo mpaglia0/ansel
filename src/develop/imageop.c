@@ -2311,6 +2311,11 @@ static void _gui_set_single_expanded(dt_iop_module_t *module, gboolean expanded)
     }
   }
 
+  if(expanded)
+    dt_gui_add_class(module->expander, "expanded");
+  else
+    dt_gui_remove_class(module->expander, "expanded");
+
   char var[1024];
   snprintf(var, sizeof(var), "plugins/darkroom/%s/expanded", module->op);
   dt_conf_set_bool(var, expanded);
@@ -2675,10 +2680,10 @@ gboolean _iop_tooltip_callback(GtkWidget *widget, gint x, gint y, gboolean keybo
 
   if(IS_NULL_PTR(des)) return FALSE;
 
-  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   GtkWidget *grid = gtk_grid_new();
   gtk_grid_set_column_homogeneous(GTK_GRID(grid), FALSE);
-  gtk_grid_set_column_spacing(GTK_GRID(grid), DT_PIXEL_APPLY_DPI(10));
+  gtk_grid_set_column_spacing(GTK_GRID(grid), DT_GUI_BOX_SPACING);
   gtk_widget_set_hexpand(grid, FALSE);
 
   GtkWidget *label = gtk_label_new(des[0] ? des[0] : "");
@@ -2736,12 +2741,13 @@ gboolean _iop_tooltip_callback(GtkWidget *widget, gint x, gint y, gboolean keybo
 
 void dt_iop_gui_set_expander(dt_iop_module_t *module)
 {
-  GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING / 2.);
   gtk_widget_set_name(GTK_WIDGET(header), "module-header");
 
-  GtkWidget *iopw = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *iopw = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   GtkWidget *expander = dtgtk_expander_new(header, iopw);
   dt_gui_add_class(expander, "dt_module_frame");
+  dt_gui_add_class(expander, "dt_iop_module");
 
   GtkWidget *header_evb = dtgtk_expander_get_header_event_box(DTGTK_EXPANDER(expander));
   GtkWidget *body_evb = dtgtk_expander_get_body_event_box(DTGTK_EXPANDER(expander));
@@ -2843,9 +2849,21 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
 
   /* reorder header, for now, iop are always in the right panel */
   for(int i = 0; i <= IOP_MODULE_LABEL; i++)
-    if(hw[i]) gtk_box_pack_start(GTK_BOX(header), hw[i], FALSE, FALSE, 0);
+  {
+    if(hw[i]) 
+    {
+      gtk_box_pack_start(GTK_BOX(header), hw[i], FALSE, FALSE, 0);
+      gtk_widget_set_valign(hw[i], GTK_ALIGN_CENTER);
+    }
+  }
   for(int i = IOP_MODULE_LAST - 1; i > IOP_MODULE_LABEL; i--)
-    if(hw[i]) gtk_box_pack_end(GTK_BOX(header), hw[i], FALSE, FALSE, 0);
+  {
+    if(hw[i]) 
+    {
+      gtk_box_pack_end(GTK_BOX(header), hw[i], FALSE, FALSE, 0);
+      gtk_widget_set_valign(hw[i], GTK_ALIGN_CENTER);
+    }
+  }
 
   dt_gui_add_help_link(header, dt_get_help_url("module_header"));
   // for the module label, point to module specific help page

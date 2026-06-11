@@ -309,7 +309,7 @@ static gboolean _panel_handle_motion_callback(GtkWidget *w, GdkEventButton *e, g
 /* initialize the top container of panel */
 static GtkWidget *_ui_init_panel_container_top(GtkWidget *container)
 {
-  GtkWidget *w = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_UI_PANEL_MODULE_SPACING);
+  GtkWidget *w = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   gtk_box_pack_start(GTK_BOX(container), w, FALSE, FALSE, 0);
   return w;
 }
@@ -416,6 +416,7 @@ static GtkWidget *_ui_init_panel_container_center(GtkWidget *container, gboolean
 
   /* create the container */
   container = widget;
+  // WARNING: no spacing between modules in left sidebar
   widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_name(widget, "plugins_box");
   gtk_container_add(GTK_CONTAINER(container), widget);
@@ -426,7 +427,7 @@ static GtkWidget *_ui_init_panel_container_center(GtkWidget *container, gboolean
 /* initialize the bottom container of panel */
 static GtkWidget *_ui_init_panel_container_bottom(GtkWidget *container)
 {
-  GtkWidget *w = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *w = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   gtk_box_pack_start(GTK_BOX(container), w, FALSE, FALSE, 0);
   return w;
 }
@@ -519,18 +520,19 @@ static void _ui_init_panel_top(dt_ui_t *ui, GtkWidget *container)
   GtkWidget *widget;
 
   /* create the panel box */
+  // Warning: No spacing between lines !!!
   ui->panels[DT_UI_PANEL_TOP] = widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_name(ui->panels[DT_UI_PANEL_TOP], "top");
   gtk_widget_set_hexpand(GTK_WIDGET(widget), TRUE);
   gtk_grid_attach(GTK_GRID(container), widget, 1, 0, 3, 1);
 
   /* add container for top center */
-  ui->top_panel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  ui->top_panel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
   gtk_widget_set_name(ui->top_panel, "top-first-line");
   gtk_box_pack_start(GTK_BOX(widget), ui->top_panel, FALSE, FALSE,
                      DT_UI_PANEL_MODULE_SPACING);
 
-  ui->containers[DT_UI_CONTAINER_PANEL_TOP_SECOND_ROW] = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  ui->containers[DT_UI_CONTAINER_PANEL_TOP_SECOND_ROW] = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
   gtk_widget_set_name(ui->containers[DT_UI_CONTAINER_PANEL_TOP_SECOND_ROW], "top-second-line");
   gtk_box_pack_start(GTK_BOX(widget), ui->containers[DT_UI_CONTAINER_PANEL_TOP_SECOND_ROW], FALSE, FALSE,
                      DT_UI_PANEL_MODULE_SPACING);
@@ -586,11 +588,15 @@ void dt_ui_init_main_table(GtkWidget *parent, dt_ui_t *ui)
   gtk_box_pack_start(GTK_BOX(parent), container, TRUE, TRUE, 0);
   gtk_widget_show(container);
 
-  /* initialize the top container */
+  /* initialize toolboxes panels */
   _ui_init_panel_top(ui, container);
+  _ui_init_panel_bottom(ui, container);
+  _ui_init_panel_left(ui, container);
+  _ui_init_panel_right(ui, container);
 
-  /* initialize the center top/center/bottom */
-  widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  /* initialize the main drawing widget (center) */
+  widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
+  gtk_widget_set_name(widget, "main-widget");
   gtk_widget_set_hexpand(GTK_WIDGET(widget), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(widget), TRUE);
   gtk_grid_attach(GTK_GRID(container), widget, 2, 1, 1, 1);
@@ -625,11 +631,6 @@ void dt_ui_init_main_table(GtkWidget *parent, dt_ui_t *ui)
   /* center should redraw when signal redraw center is raised*/
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_CONTROL_REDRAW_CENTER,
                             G_CALLBACK(_ui_widget_redraw_callback), ui->center);
-
-  /* initialize panels */
-  _ui_init_panel_bottom(ui, container);
-  _ui_init_panel_left(ui, container);
-  _ui_init_panel_right(ui, container);
 
   gtk_widget_show_all(container);
 }
@@ -666,11 +667,11 @@ void dt_ui_init_titlebar(dt_ui_t *ui)
   // Gtk mandatorily adds an empty label that is still "visible" for the title.
   // Since it's centered, it can collide with the hinter width.
   // Plus it adds mandatory padding. AKA scrap that.
-  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
   gtk_header_bar_set_custom_title(GTK_HEADER_BAR(ui->header->titlebar), box);
   gtk_widget_set_no_show_all(box, TRUE);
 #else
-  ui->header->titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  ui->header->titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
 #endif
 
   gtk_widget_show(ui->header->titlebar);
@@ -779,7 +780,7 @@ void dt_ui_init_global_menu(dt_ui_t *ui)
   dt_ui_titlebar_pack_end(ui, ui->header->home);
   gtk_widget_show(ui->header->home);
 
-  GtkWidget *spacer = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  GtkWidget *spacer = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
   dt_ui_titlebar_pack_end(ui, spacer);
   gtk_widget_show(spacer);
 
@@ -793,7 +794,7 @@ void dt_ui_init_global_menu(dt_ui_t *ui)
   dt_ui_titlebar_pack_end(ui, ui->header->hinter);
   gtk_widget_show(ui->header->hinter);
 
-  spacer = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  spacer = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
   dt_ui_titlebar_pack_end(ui, spacer);
   gtk_widget_show(spacer);
 

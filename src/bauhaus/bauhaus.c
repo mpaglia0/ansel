@@ -226,11 +226,29 @@ static double _widget_get_main_height(struct dt_bauhaus_widget_t *w, GtkWidget *
   return allocation.height - w->margin->top - w->margin->bottom - w->padding->top - w->padding->bottom;
 }
 
+/**
+ * WARNING: keep bauhaus widget height consistent with native Gtk widgets.
+ * Widget spacing is handled by DT_GUI_BOX_SPACING so you shouldn't have to 
+ * use margins/padding in general.
+ * 
+ * To debug bauhaus widget allocation issue, paint a colored background in
+ * ansel.css, like:
+ * 
+    .dt_bauhaus,
+    checkbutton {
+      padding: 0;
+      margin: 0;
+      background-color: red;
+    }
+
+ * A combobox height should be consistent with a native Gtk checkbox height.
+ */
+
 static double _get_combobox_height(GtkWidget *widget)
 {
   struct dt_bauhaus_widget_t *w = (struct dt_bauhaus_widget_t *)widget;
   return w->margin->top + w->padding->top + w->margin->bottom + w->padding->bottom
-         + _bh_get_row_height(w);
+         + w->bauhaus->line_height;
 }
 
 static double _get_slider_height(GtkWidget *widget)
@@ -1251,7 +1269,7 @@ static void dt_bh_class_init(DtBauhausWidgetClass *class)
 
 void dt_bauhaus_load_theme(dt_bauhaus_t *bauhaus)
 {
-  bauhaus->line_height = 3;
+  bauhaus->line_height = 16;
   bauhaus->marker_size = 0.25f;
 
   GtkWidget *root_window = dt_ui_main_window(darktable.gui->ui);
@@ -1313,7 +1331,7 @@ void dt_bauhaus_load_theme(dt_bauhaus_t *bauhaus)
   
   PangoContext *context = gtk_widget_get_pango_context(ref);
   PangoLayout *layout = pango_layout_new(context);
-  pango_layout_set_text(layout, "XMp", -1);
+  pango_layout_set_text(layout, "em", -1);
   pango_layout_set_font_description(layout, bauhaus->pango_font_desc);
   //double dpi = pango_cairo_context_get_resolution(context);
   //double scale = gtk_widget_get_scale_factor(ref);
@@ -2370,7 +2388,7 @@ static void dt_bauhaus_draw_quad(struct dt_bauhaus_widget_t *w, cairo_t *cr, con
   else if(w->type == DT_BAUHAUS_COMBOBOX)
   {
     // draw combobox chevron
-    cairo_translate(cr, x + w->bauhaus->quad_width / 2., y + _bh_get_row_height(w) / 2.);
+    cairo_translate(cr, x + w->bauhaus->quad_width / 2. - INNER_PADDING, y + w->bauhaus->line_height / 2.);
     const float r = w->bauhaus->quad_width * .2f;
     cairo_move_to(cr, -r, -r * .5f);
     cairo_line_to(cr, 0, r * .5f);
@@ -2459,12 +2477,11 @@ static void dt_bauhaus_draw_baseline(struct dt_bauhaus_widget_t *w, cairo_t *cr,
   // a zero in periodic stuff has not much meaning so we skip it.
   if(d->hard_max != 360.0f && is_sensitive)
   {
-    const float graduation_top = baseline_top + w->bauhaus->marker_size + w->bauhaus->border_width;
     set_color(cr, w->bauhaus->color_fg);
 
     // If we are to put the 0 reference on the "left", this time we need to account for
     // actual leftmost resting position of the indicator, not the starting point of the baseline.
-    cairo_arc(cr, origin, graduation_top, w->bauhaus->border_width / 2., 0, 2 * M_PI);
+    cairo_arc(cr, origin, baseline_top + w->bauhaus->marker_size, w->bauhaus->border_width / 2., 0, 2 * M_PI);
     cairo_fill(cr);
   }
 
@@ -2854,6 +2871,7 @@ static float _get_combobox_max_width(GtkWidget *widget)
 static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
 {
   struct dt_bauhaus_widget_t *w = DT_BAUHAUS_WIDGET(widget);
+  GtkStyleContext *context = gtk_widget_get_style_context(widget);
 
   // Get current Gtk allocation
   GtkAllocation allocation;
@@ -2878,32 +2896,38 @@ static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
 
   cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, allocation.width, allocation.height);
   cairo_t *cr = cairo_create(cst);
-  GtkStyleContext *context = gtk_widget_get_style_context(widget);
 
-  GdkRGBA *bg_color = NULL;
   GdkRGBA *text_color = default_color_assign();
   GdkRGBA *value_color = default_color_assign();
   GdkRGBA *value_text_color = default_color_assign();
   GtkStateFlags state = gtk_widget_get_state_flags(widget);
   if(gtk_widget_has_focus(widget))
     state |= GTK_STATE_FLAG_FOCUSED;
+
   gtk_style_context_save(context);
   gtk_style_context_set_state(context, state);
   gtk_style_context_get_color(context, state, text_color);
-  gtk_style_context_get(context, state, "background-color", &bg_color, NULL);
+
   *value_color = gtk_widget_is_sensitive(widget) ? w->bauhaus->color_value : w->bauhaus->color_value_insensitive;
   *value_text_color = gtk_widget_is_sensitive(widget) ? w->bauhaus->color_value_text : w->bauhaus->color_value_text_insensitive;
+  
+  // Compute internal widget sizes, that is allocation minus margins
   _margins_retrieve(w);
+  // Note : box is the border box in CSS conventions
+  const float box_width = allocation.width - w->margin->left - w->margin->right;
+  const float box_height = allocation.height - w->margin->top - w->margin->bottom;
 
-  // Paint background first
-  gtk_render_background(context, cr, allocation.x, allocation.y, allocation.width, allocation.height);
+  // Paint background and borders first
+  gtk_render_background(context, crf, w->margin->left, w->margin->top, box_width, box_height);
+  gtk_render_frame(context, crf, w->margin->left, w->margin->top, box_width, box_height);
 
   // Translate Cairo coordinates to account for the widget spacing
-  const float available_width = _widget_get_main_width(w, NULL, NULL);
-  const float inner_height = _widget_get_main_height(w, NULL);
   cairo_translate(cr,
                   w->margin->left + w->padding->left,
                   w->margin->top + w->padding->top);
+
+  const float available_width = _widget_get_main_width(w, NULL, NULL);
+  const float inner_height = _widget_get_main_height(w, NULL);
 
   // draw type specific content:
   cairo_save(cr);
@@ -2915,7 +2939,7 @@ static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
     {
       // draw label and quad area at right end
       if(w->show_quad)
-        dt_bauhaus_draw_quad(w, cr, available_width + 2. * INNER_PADDING, 0.);
+        dt_bauhaus_draw_quad(w, cr, available_width + INTERNAL_PADDING, 0.);
 
       dt_bauhaus_combobox_data_t *d = &w->data.combobox;
       const PangoEllipsizeMode combo_ellipsis = d->entries_ellipsis;
@@ -3012,7 +3036,6 @@ static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
   gdk_rgba_free(text_color);
   gdk_rgba_free(value_color);
   gdk_rgba_free(value_text_color);
-  if(!IS_NULL_PTR(bg_color)) gdk_rgba_free(bg_color);
 
   return TRUE;
 }
