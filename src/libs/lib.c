@@ -566,7 +566,7 @@ static void dt_lib_presets_popup_menu_show(dt_lib_module_info_t *minfo)
       active_preset = cnt;
       selected_writeprotect = writeprotect;
       mi = gtk_check_menu_item_new_with_label(name);
-      dt_gui_add_class(mi, "dt_transparent_background");
+
       gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mi), TRUE);
       dt_gui_add_class(mi, "active_menu_item");
     }
@@ -1283,7 +1283,6 @@ GtkWidget *dt_lib_gui_get_expander(dt_lib_module_t *module)
   gchar *mname = g_markup_escape_text(module->name(module), -1);
   dt_capitalize_label(mname);
   gtk_label_set_markup(GTK_LABEL(label), mname);
-  gtk_widget_set_tooltip_text(label_evb, mname);
   dt_free(mname);
   gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
   g_object_set(G_OBJECT(label), "halign", GTK_ALIGN_START, "xalign", 0.0, (gchar *)0);
@@ -1554,13 +1553,22 @@ gboolean dt_handle_dialog_enter(GtkWidget *widget, GdkEventKey *event, gpointer 
 
 GtkWidget *dt_action_button_new(dt_lib_module_t *self, const gchar *label, gpointer callback, gpointer data, const gchar *tooltip, guint accel_key, GdkModifierType mods)
 {
-  gchar *label_copy = g_strdup(_(label));
+  gchar *label_copy = g_strdup(label);
   dt_capitalize_label(label_copy);
   GtkWidget *button = gtk_button_new_with_label(label_copy);
   dt_free(label_copy);
+
+  gtk_widget_set_valign(GTK_WIDGET(button), GTK_ALIGN_CENTER);
+  gtk_widget_set_halign(GTK_WIDGET(button), GTK_ALIGN_CENTER);
+  gtk_widget_set_vexpand(GTK_WIDGET(button), FALSE);
+  gtk_widget_set_hexpand(GTK_WIDGET(button), FALSE);
+
   gtk_label_set_ellipsize(GTK_LABEL(gtk_bin_get_child(GTK_BIN(button))), PANGO_ELLIPSIZE_END);
+
   if(tooltip) gtk_widget_set_tooltip_text(button, tooltip);
+
   g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(callback), data);
+
   return button;
 }
 

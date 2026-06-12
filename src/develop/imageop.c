@@ -2777,7 +2777,6 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
   snprintf(w_name, sizeof(w_name), "iop-panel-icon-%s", module->op);
   hw[IOP_MODULE_ICON] = gtk_label_new("");
   gtk_widget_set_name(GTK_WIDGET(hw[IOP_MODULE_ICON]), w_name);
-  gtk_widget_set_valign(GTK_WIDGET(hw[IOP_MODULE_ICON]), GTK_ALIGN_CENTER);
 
   /* add module label */
   hw[IOP_MODULE_LABEL] = gtk_event_box_new();
@@ -2796,7 +2795,7 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
 
   /* add mask preview button */
   hw[IOP_MODULE_MASK] = dtgtk_togglebutton_new(dtgtk_cairo_paint_showmask, 0, NULL);
-  dt_gui_add_class(hw[IOP_MODULE_MASK], "dt_transparent_background");
+
   g_signal_connect(G_OBJECT(hw[IOP_MODULE_MASK]), "toggled",
                     G_CALLBACK(_display_mask_indicator_callback), module);
   g_signal_connect(G_OBJECT(hw[IOP_MODULE_MASK]), "button-press-event",
@@ -2836,7 +2835,7 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
 
   /* add enabled button */
   hw[IOP_MODULE_SWITCH] = dtgtk_togglebutton_new(dtgtk_cairo_paint_module_switch, 0, module);
-  dt_gui_add_class(hw[IOP_MODULE_SWITCH], "dt_transparent_background");
+
   dt_gui_add_class(hw[IOP_MODULE_SWITCH], "dt_iop_enable_button");
   dt_iop_gui_set_enable_button_icon(hw[IOP_MODULE_SWITCH], module);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(hw[IOP_MODULE_SWITCH]), module->enabled);
@@ -2851,18 +2850,12 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
   for(int i = 0; i <= IOP_MODULE_LABEL; i++)
   {
     if(hw[i]) 
-    {
       gtk_box_pack_start(GTK_BOX(header), hw[i], FALSE, FALSE, 0);
-      gtk_widget_set_valign(hw[i], GTK_ALIGN_CENTER);
-    }
   }
   for(int i = IOP_MODULE_LAST - 1; i > IOP_MODULE_LABEL; i--)
   {
     if(hw[i]) 
-    {
       gtk_box_pack_end(GTK_BOX(header), hw[i], FALSE, FALSE, 0);
-      gtk_widget_set_valign(hw[i], GTK_ALIGN_CENTER);
-    }
   }
 
   dt_gui_add_help_link(header, dt_get_help_url("module_header"));
