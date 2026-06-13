@@ -348,7 +348,9 @@ static _bh_active_region_t _bh_get_active_region(GtkWidget *widget, double *x, d
     return BH_REGION_OUT;
 
   // Check where we are horizontally
-  if(*x <= main_width + INTERNAL_PADDING)
+  // The quad now begins exactly 2*INNER_PADDING past the main area for both
+  // sliders and comboboxes (see the quad draw sites), so use the same boundary.
+  if(*x <= main_width + 2. * INNER_PADDING)
     return BH_REGION_MAIN;
   else
     return BH_REGION_QUAD;
@@ -1554,8 +1556,8 @@ static void _bauhaus_widget_init(dt_bauhaus_t *bauhaus, dt_bauhaus_widget_t *w, 
                                        | darktable.gui->scroll_mask);
 
   gtk_widget_set_can_focus(GTK_WIDGET(w), TRUE);
-  gtk_widget_set_halign(GTK_WIDGET(w), GTK_ALIGN_START);
-  gtk_widget_set_hexpand(GTK_WIDGET(w), FALSE);
+  gtk_widget_set_halign(GTK_WIDGET(w), GTK_ALIGN_FILL);
+  gtk_widget_set_hexpand(GTK_WIDGET(w), TRUE);
   g_signal_connect(G_OBJECT(w), "focus-in-event", G_CALLBACK(dt_bauhaus_focus_in_callback), NULL);
   g_signal_connect(G_OBJECT(w), "focus-out-event", G_CALLBACK(dt_bauhaus_focus_out_callback), NULL);
   g_signal_connect(G_OBJECT(w), "focus", G_CALLBACK(dt_bauhaus_focus_callback), NULL);
@@ -2421,7 +2423,12 @@ static void dt_bauhaus_draw_quad(struct dt_bauhaus_widget_t *w, cairo_t *cr, con
   else if(w->type == DT_BAUHAUS_COMBOBOX)
   {
     // draw combobox chevron
-    cairo_translate(cr, x + w->bauhaus->quad_width / 2. - INNER_PADDING, y + w->bauhaus->line_height / 2.);
+    // Inset the chevron from the right edge of the (now flush) quad box so it
+    // doesn't crowd or overflow the widget border. The quad box itself is placed
+    // identically to the slider's, so this keeps the chevron in line with slider
+    // quad icons when widgets are stacked.
+    // FIXME: Why do we need an extra half-pixel shift to the left for pixel-correctness ?
+    cairo_translate(cr, x + w->bauhaus->quad_width / 2. - 0.5, y + w->bauhaus->line_height / 2.);
     const float r = w->bauhaus->quad_width * .2f;
     cairo_move_to(cr, -r, -r * .5f);
     cairo_line_to(cr, 0, r * .5f);
@@ -2454,9 +2461,14 @@ static void dt_bauhaus_draw_baseline(struct dt_bauhaus_widget_t *w, cairo_t *cr,
   // Issue is that leaves a dent on the baseline, so the trick
   // is to make it overlap back by a radius on the left.
   const double x_origin = -w->bauhaus->marker_size / 3.;
+  // The left edge was pushed by x_origin to overlap the indicator's leftmost
+  // resting position. Extend the width by the same amount so the right edge
+  // stays at `width` (flush with the right-aligned numeric value) instead of
+  // retreating by |x_origin| and letting the value overhang the baseline.
+  const double baseline_width = width - x_origin;
   // Make sure we use integer coordinates to limit anti-aliasing blur
   cairo_rectangle(cr, round(x_origin), round(baseline_top), 
-                      round(width), round(baseline_height));
+                      round(baseline_width), round(baseline_height));
 
   cairo_pattern_t *gradient = NULL;
   if(has_colored_background && is_sensitive)
@@ -2476,18 +2488,19 @@ static void dt_bauhaus_draw_baseline(struct dt_bauhaus_widget_t *w, cairo_t *cr,
     set_color(cr, w->bauhaus->color_bg);
   }
 
+  cairo_fill(cr);
+
+
   if(w->bauhaus->border_width > 0)
   {
-    // Draw the background and the border on top
-    cairo_fill_preserve(cr);
+    // Draw the border on top
+    // We need to recess the coordinates by half a line-width for perfect border matching
+    const double line_width = 1.;
+    cairo_rectangle(cr, round(x_origin) + line_width / 2., round(baseline_top) + line_width / 2., 
+                        round(baseline_width) - line_width, round(baseline_height) - line_width);
+    cairo_set_line_width(cr, line_width);
     set_color(cr, w->bauhaus->color_border);
-    cairo_set_line_width(cr, 1.);
     cairo_stroke(cr);
-  }
-  else
-  {
-    // Draw only the background
-    cairo_fill(cr);
   }
 
   if(gradient) cairo_pattern_destroy(gradient);
@@ -2502,9 +2515,6 @@ static void dt_bauhaus_draw_baseline(struct dt_bauhaus_widget_t *w, cairo_t *cr,
   // have a `fill ratio feel' from zero to current position
   if(!has_colored_background && d->fill_feedback && is_sensitive)
   {
-    // only brighten, useful for colored sliders to not get too faint:
-    cairo_save(cr);
-    cairo_set_operator(cr, CAIRO_OPERATOR_SCREEN);
     set_color(cr, w->bauhaus->color_value);
 
     const float position = d->pos * width;
@@ -2518,7 +2528,6 @@ static void dt_bauhaus_draw_baseline(struct dt_bauhaus_widget_t *w, cairo_t *cr,
       cairo_rectangle(cr, origin, baseline_top, delta, baseline_height);
 
     cairo_fill(cr);
-    cairo_restore(cr);
   }
 
   // draw the 0 reference graduation if it's different than the bounds of the slider
@@ -2987,8 +2996,11 @@ static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
     case DT_BAUHAUS_COMBOBOX:
     {
       // draw label and quad area at right end
+      // Gap must match the one reserved by _widget_get_main_width() (2*INNER_PADDING)
+      // and used by the slider, so combobox quads stay flush and vertically aligned
+      // with slider quad icons when stacked.
       if(w->show_quad)
-        dt_bauhaus_draw_quad(w, cr, available_width + INTERNAL_PADDING, 0.);
+        dt_bauhaus_draw_quad(w, cr, available_width + 2 * INNER_PADDING, 0.);
 
       dt_bauhaus_combobox_data_t *d = &w->data.combobox;
       const PangoEllipsizeMode combo_ellipsis = d->entries_ellipsis;
@@ -3037,6 +3049,7 @@ static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
       cairo_save(cr);
       if(!(w->quad_paint_flags & CPF_ACTIVE))
         cairo_set_source_rgba(cr, text_color->red, text_color->green, text_color->blue, text_color->alpha * 0.7);
+
       dt_bauhaus_draw_quad(w, cr, text_width + 2. * INNER_PADDING, 0.);
       cairo_restore(cr);
 
@@ -3093,6 +3106,12 @@ static void _get_preferred_width(GtkWidget *widget, gint *minimum_size, gint *na
 {
   // Nothing clever here : preferred size is the size of the container.
   // If user is not happy with that, it's his responsibility to resize sidebars.
+  // Minimum size is left at 0 so the widget can shrink with its parent;
+  // leaving it unset would read as uninitialized stack garbage and could
+  // clamp natural_size up to a stale value, preventing the widget from
+  // growing again when the parent grows.
+  *minimum_size = 0;
+
   if(dt_ui_panel_ancestor(darktable.gui->ui, DT_UI_PANEL_RIGHT, widget))
     *natural_size = dt_ui_panel_get_size(darktable.gui->ui, DT_UI_PANEL_RIGHT);
   else if(dt_ui_panel_ancestor(darktable.gui->ui, DT_UI_PANEL_LEFT, widget))

@@ -3255,17 +3255,14 @@ void dt_iop_gui_init_blendif(GtkBox *blendw, dt_iop_module_t *module, GtkWidget 
                                         dtgtk_cairo_paint_reset, blendif_header);
 
     GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
+    gtk_widget_set_name(header, "blendif-pickers");
 
     bd->tab = 0;
     bd->channel_tabs_csp = DEVELOP_BLEND_CS_NONE;
     bd->channel_tabs = GTK_NOTEBOOK(gtk_notebook_new());
-
     gtk_notebook_set_scrollable(bd->channel_tabs, TRUE);
-    gtk_box_pack_start(GTK_BOX(header), GTK_WIDGET(bd->channel_tabs), TRUE, TRUE, 0);
-
-    // a little padding between the notbook with all channels and the icons for pickers.
-    gtk_box_pack_start(GTK_BOX(header), gtk_label_new(""),
-                       FALSE, FALSE, DT_PIXEL_APPLY_DPI(10));
+    gtk_box_pack_start(GTK_BOX(bd->blendif_box), GTK_WIDGET(bd->channel_tabs), TRUE, TRUE, 0);
+    gtk_notebook_set_action_widget(GTK_NOTEBOOK(bd->channel_tabs), header, GTK_PACK_END);
 
     bd->colorpicker = dt_color_picker_new(module, DT_COLOR_PICKER_POINT_AREA, header);
     gtk_widget_set_tooltip_text(bd->colorpicker, _("pick GUI color from image\nctrl+click or right-click to select an area"));
@@ -3278,12 +3275,11 @@ void dt_iop_gui_init_blendif(GtkBox *blendw, dt_iop_module_t *module, GtkWidget 
                                                               "drag to use the input image\n"
                                                               "ctrl+drag to use the output image"));
 
-    GtkWidget *btn = dt_iop_togglebutton_new_no_register(module, "blend`tools", N_("invert all channel's polarities"), NULL,
+    dt_iop_togglebutton_new_no_register(module, "blend`tools", N_("invert all channel's polarities"), NULL,
                                                          G_CALLBACK(_blendop_blendif_invert), FALSE, 0, 0,
                                                          dtgtk_cairo_paint_invert, header);
-    dt_gui_add_class(btn, "dt_ignore_fg_state");
-
-    gtk_box_pack_start(GTK_BOX(bd->blendif_box), GTK_WIDGET(header), TRUE, FALSE, 0);
+    
+    gtk_widget_show_all(header);
 
     for(int in_out = 1; in_out >= 0; in_out--)
     {
@@ -3544,6 +3540,7 @@ void dt_iop_gui_init_masks(GtkBox *blendw, dt_iop_module_t *module)
 
     bd->group_shapes_sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_vexpand(bd->group_shapes_sw, TRUE);
+    dt_gui_add_class(bd->group_shapes_sw, "dt_recessed_scroll");
     gtk_container_add(GTK_CONTAINER(bd->group_shapes_sw), bd->masks_group_treeview);
     dt_gui_widget_init_auto_height(bd->masks_group_treeview, TREE_LIST_MIN_ROWS, TREE_LIST_MAX_ROWS);
 
@@ -3609,6 +3606,7 @@ void dt_iop_gui_init_masks(GtkBox *blendw, dt_iop_module_t *module)
 
     bd->all_shapes_sw = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_vexpand(bd->all_shapes_sw, TRUE);
+    dt_gui_add_class(bd->all_shapes_sw, "dt_recessed_scroll");
     gtk_container_add(GTK_CONTAINER(bd->all_shapes_sw), bd->masks_treeview);
     dt_gui_widget_init_auto_height(bd->masks_treeview, TREE_LIST_MIN_ROWS, TREE_LIST_MAX_ROWS);
 
