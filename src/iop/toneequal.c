@@ -2336,7 +2336,7 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
   pango_font_description_set_size (desc, (int)(old_size / zoom_scale));
   layout = pango_cairo_create_layout(cr);
   pango_layout_set_font_description(layout, desc);
-  pango_cairo_context_set_resolution(pango_layout_get_context(layout), darktable.gui->dpi);
+  dt_gui_set_pango_resolution(layout);
 
   // Build text object
   if(preview_entry && self->enabled)
@@ -2495,7 +2495,7 @@ static inline gboolean _init_drawing(dt_iop_module_t *const restrict self, GtkWi
   g->desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
 
   pango_layout_set_font_description(g->layout, g->desc);
-  pango_cairo_context_set_resolution(pango_layout_get_context(g->layout), darktable.gui->dpi);
+  dt_gui_set_pango_resolution(g->layout);
   g->context = gtk_widget_get_style_context(widget);
 
   char text[256];
@@ -3432,8 +3432,12 @@ void gui_init(struct dt_iop_module_t *self)
 
   self->widget = dt_ui_notebook_page(g->notebook, N_("graph"), NULL);
 
-  g->area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_aspect_ratio(1.));
-  gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->area), TRUE, TRUE, 0);
+  g->area = GTK_DRAWING_AREA(gtk_drawing_area_new());
+  gtk_widget_set_hexpand(GTK_WIDGET(g->area), TRUE);
+  gtk_box_pack_start(GTK_BOX(self->widget),
+                     dt_ui_resizable_drawing_area(GTK_WIDGET(g->area),
+                                                  "plugins/darkroom/toneequal/graphheight", 280, 120),
+                     FALSE, FALSE, 0);
   gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | darktable.gui->scroll_mask
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
