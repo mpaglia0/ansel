@@ -1153,12 +1153,6 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
   gui->styles_popup.window = NULL;
   gui->styles_popup.module = NULL;
 
-  // load the style / theme
-  GtkSettings *settings = gtk_settings_get_default();
-  g_object_set(G_OBJECT(settings), "gtk-application-prefer-dark-theme", TRUE, (gchar *)0);
-  g_object_set(G_OBJECT(settings), "gtk-theme-name", "Adwaita", (gchar *)0);
-  g_object_unref(settings);
-
   // smooth scrolling must be enabled to handle trackpad/touch events
   gui->scroll_mask = GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK;
 
@@ -1873,23 +1867,22 @@ gboolean dt_gui_show_standalone_yes_no_dialog(const char *title, const char *mar
   gtk_window_set_title(GTK_WINDOW(window), title);
   g_signal_connect(window, "destroy", G_CALLBACK(_gtk_main_quit_safe), NULL);
 
-  if(darktable.gui)
+  gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
+
+  if(!IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->ui)
+     && !IS_NULL_PTR(darktable.gui->ui->main_window))
   {
-    GtkWindow *win = GTK_WINDOW(dt_ui_main_window(darktable.gui->ui));
-    gtk_window_set_transient_for(GTK_WINDOW(window), win);
-    gtk_window_set_modal(GTK_WINDOW(window), TRUE);
-    if(gtk_widget_get_visible(GTK_WIDGET(win)))
+    GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
+    if(GTK_IS_WINDOW(main_window))
     {
-      gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER_ON_PARENT);
+      GtkWindow *win = GTK_WINDOW(main_window);
+      gtk_window_set_transient_for(GTK_WINDOW(window), win);
+      gtk_window_set_modal(GTK_WINDOW(window), TRUE);
+      if(gtk_widget_get_visible(GTK_WIDGET(win)))
+      {
+        gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER_ON_PARENT);
+      }
     }
-    else
-    {
-      gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
-    }
-  }
-  else
-  {
-    gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
   }
 
   GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
@@ -1955,22 +1948,21 @@ char *dt_gui_show_standalone_string_dialog(const char *title, const char *markup
   gtk_window_set_title(GTK_WINDOW(window), title);
   g_signal_connect(window, "destroy", G_CALLBACK(_gtk_main_quit_safe), NULL);
 
-  if(darktable.gui)
+  gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_MOUSE);
+
+  if(!IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->ui)
+     && !IS_NULL_PTR(darktable.gui->ui->main_window))
   {
-    GtkWindow *win = GTK_WINDOW(dt_ui_main_window(darktable.gui->ui));
-    gtk_window_set_transient_for(GTK_WINDOW(window), win);
-    if(gtk_widget_get_visible(GTK_WIDGET(win)))
+    GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
+    if(GTK_IS_WINDOW(main_window))
     {
-      gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER_ON_PARENT);
+      GtkWindow *win = GTK_WINDOW(main_window);
+      gtk_window_set_transient_for(GTK_WINDOW(window), win);
+      if(gtk_widget_get_visible(GTK_WIDGET(win)))
+      {
+        gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER_ON_PARENT);
+      }
     }
-    else
-    {
-      gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_MOUSE);
-    }
-  }
-  else
-  {
-    gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_MOUSE);
   }
 
   GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
