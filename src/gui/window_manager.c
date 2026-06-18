@@ -364,6 +364,9 @@ static GtkWidget *_ui_init_panel_container_center(GtkWidget *container, gboolean
 
   /* create the scrolled window */
   widget = gtk_scrolled_window_new(a[0], a[1]);
+  // Named so the theme can zero its "scrollbar-spacing" style property (a legacy GtkWidget style
+  // property, not a CSS box property), removing the 3px gutter between the modules and the scrollbar.
+  gtk_widget_set_name(widget, "panel-scroll");
   gtk_widget_set_can_focus(widget, TRUE);
   gtk_scrolled_window_set_placement(GTK_SCROLLED_WINDOW(widget),
                                     left ? GTK_CORNER_TOP_LEFT : GTK_CORNER_TOP_RIGHT);
@@ -532,7 +535,7 @@ void dt_ui_init_main_table(GtkWidget *parent, dt_ui_t *ui)
   _ui_init_panel_right(ui, container);
 
   /* initialize the main drawing widget (center) */
-  widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
+  widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_name(widget, "main-widget");
   gtk_widget_set_hexpand(GTK_WIDGET(widget), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(widget), TRUE);

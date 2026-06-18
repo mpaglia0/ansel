@@ -353,7 +353,8 @@ int dt_dev_history_item_from_source_history_item(dt_develop_t *dev_dest, dt_deve
 
 int dt_dev_merge_history_into_image(dt_develop_t *dev_src, int32_t dest_imgid, const GList *mod_list,
                                     gboolean merge_iop_order, const dt_history_merge_strategy_t mode,
-                                    const gboolean paste_instances, const char *source_label)
+                                    const gboolean paste_instances, const char *source_label,
+                                    dt_hm_batch_state_t *batch)
 {
   if(dest_imgid <= 0) return 1;
   if(IS_NULL_PTR(mod_list)) return 0;
@@ -385,7 +386,7 @@ int dt_dev_merge_history_into_image(dt_develop_t *dev_src, int32_t dest_imgid, c
    */
   const gboolean use_source_iop_order = merge_iop_order && !first_run;
   const int ret_val = dt_history_merge(&dev_dest, dev_src, dest_imgid, mod_list, use_source_iop_order, mode,
-                                       paste_instances, source_label);
+                                       paste_instances, source_label, batch);
 
   if(ret_val == 0)
   {
@@ -1225,13 +1226,11 @@ void dt_dev_history_notify_change(dt_develop_t *dev, const int32_t imgid)
                      imgid, states);
   }
 
-  // Remove all old images
-  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid, TRUE);
-
-  // Don't refresh the thumbnail if we are in darkroom
-  // Spawning another export thread will likely slow-down the current one.
-  if(darktable.gui)
-    dt_thumbtable_refresh_thumbnail(darktable.gui->ui->thumbtable_lighttable, imgid, TRUE);
+  // Reload metadata, drop the stale mipmap and refresh the lighttable thumbnail.
+  // refresh_filmstrip = FALSE: in darkroom the filmstrip is best-effort, spawning another export
+  // thread would slow down the current one and we want resources allocated to the realtime main
+  // preview, not diverted to cosmetic GUI refreshes.
+  dt_image_history_changed(imgid, FALSE);
 }
 
 

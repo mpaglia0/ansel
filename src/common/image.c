@@ -1027,6 +1027,33 @@ void dt_image_set_images_locations(const GList *imgs, const GArray *gloc, const 
   }
 }
 
+void dt_image_history_changed(const int32_t imgid, const gboolean refresh_filmstrip)
+{
+  if(imgid <= 0) return;
+
+  // Reload the cached image metadata from the DB. The caller has already persisted the new
+  // history there; this refreshes history_items (the count of history entries) in the shared
+  // image cache. history_items is the "altered" flag that the thumbnail regeneration uses to
+  // pick raw processing over the (unedited) embedded JPEG, so a stale count makes edits and
+  // rotations appear to have no effect on the thumbnail (issues #647, #861).
+  dt_image_t *image = dt_image_cache_get_reload(darktable.image_cache, imgid, 'w');
+  if(image)
+    dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_RELAXED);
+
+  // Drop the stale rendered thumbnail. The mipmap cache regenerates purely on explicit removal,
+  // never by comparing history hashes, so this is mandatory after any development change.
+  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid, TRUE);
+
+  if(!darktable.gui) return;
+
+  dt_thumbtable_refresh_thumbnail(darktable.gui->ui->thumbtable_lighttable, imgid, TRUE);
+
+  // The filmstrip is best-effort: refreshing it spawns an export thread that competes with the
+  // realtime darkroom main preview. Darkroom write paths pass FALSE; lighttable ops pass TRUE.
+  if(refresh_filmstrip)
+    dt_thumbtable_refresh_thumbnail(darktable.gui->ui->thumbtable_filmstrip, imgid, TRUE);
+}
+
 void dt_image_set_flip(const int32_t imgid, const dt_image_orientation_t orientation)
 {
   // push new orientation to sql via additional history entry:
@@ -1035,16 +1062,12 @@ void dt_image_set_flip(const int32_t imgid, const dt_image_orientation_t orienta
   dt_history_db_write_history_item(imgid, num, "flip", &orientation, sizeof(int32_t), iop_flip_MODVER, 1,
                                    NULL, 0, 0, 0, "");
   dt_history_set_end(imgid, num + 1);
-
-  dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'w');
-  if(image)
-  {
-    image->history_hash = UINT64_MAX;
-    dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_RELAXED);
-  }
-
-  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid, TRUE);
   dt_control_save_xmp(imgid);
+
+  // Refresh the cached metadata and thumbnail. Without this the stale history_items keeps the
+  // image flagged unedited, so the rotated raw keeps showing its (unrotated) embedded JPEG and
+  // the rotation appears to do nothing unless "never use embedded JPEG" is forced (issue #647).
+  dt_image_history_changed(imgid, TRUE);
 }
 
 dt_image_orientation_t dt_image_get_orientation(const int32_t imgid)
@@ -1128,16 +1151,14 @@ void dt_image_flip(const int32_t imgid, const int32_t cw)
   orientation ^= ORIENTATION_SWAP_XY;
 
   if(cw == 2) orientation = ORIENTATION_NULL;
+
+  // dt_image_set_flip() writes the new orientation history entry and notifies the caches/GUI
+  // (mipmap invalidation + thumbnail refresh) via dt_image_history_changed().
   dt_image_set_flip(imgid, orientation);
 
   dt_history_snapshot_undo_create(hist->imgid, &hist->after, &hist->after_history_end);
   dt_undo_record(darktable.undo, NULL, DT_UNDO_LT_HISTORY, (dt_undo_data_t)hist,
                  dt_history_snapshot_undo_pop, dt_history_snapshot_undo_lt_history_data_free);
-
-  dt_mipmap_cache_remove(darktable.mipmap_cache, imgid, TRUE);
-
-  // signal that the mipmap need to be updated
-  dt_thumbtable_refresh_thumbnail(darktable.gui->ui->thumbtable_lighttable, imgid, TRUE);
 }
 
 
@@ -2401,7 +2422,7 @@ int32_t dt_image_copy_rename(const int32_t imgid, const int32_t filmid, const gc
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
 
-        dt_history_copy_and_paste_on_image(imgid, newid, NULL, TRUE, DT_HISTORY_MERGE_REPLACE, FALSE);
+        dt_history_copy_and_paste_on_image(imgid, newid, NULL, TRUE, DT_HISTORY_MERGE_REPLACE, FALSE, NULL);
 
         dt_collection_update_query(darktable.collection, DT_COLLECTION_CHANGE_RELOAD, DT_COLLECTION_PROP_UNDEF,
                                    NULL);
