@@ -222,40 +222,61 @@ static void _change_pipe(dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_change_t fla
 }
 
 /**
- * @brief Update the current top history entry in place for realtime pipes.
+ * @brief Re-commit the focused module's piece in place from transient (or realtime) params.
  *
  * @details
- * Realtime editing keeps appending new top history items for the currently
- * focused module while the pipe is already instantiated. In that situation we
- * can refresh just that module piece from the newest top history item and
- * advance the pipe history fence without replaying the generic `synch_top()`
- * walk through the whole tail of the stack.
+ * Interactive editing (drawlayer realtime stroke, ashift/crop edit mode) keeps changing the focused
+ * module's params while the pipe is already instantiated. Rather than replaying the generic
+ * `synch_top()` walk, we refresh just that one piece and recompute the cumulative global hash, which
+ * naturally re-keys the focused piece and every downstream piece in the pixelpipe cache.
  *
- * This helper only replaces the history-tail replay. The rest of
- * `dt_dev_pixelpipe_change()` still needs to run afterwards so cache policy and
- * ROI contracts remain sealed for the next processing pass.
+ * The params come from the thread-safe **transient** channel when the focused module has published one
+ * (`dt_dev_transient_params_*`), otherwise from the module's history snapshot. We never read the
+ * GUI-owned `module->params` from this (pipeline) thread. The module's enable/blend state is taken from
+ * its history item, since transient edits change params only.
+ *
+ * This helper only replaces the history-tail replay. The rest of `dt_dev_pixelpipe_change()` still runs
+ * afterwards so cache policy and ROI contracts remain sealed for the next processing pass.
  */
-static gboolean _sync_realtime_top_history_in_place(dt_dev_pixelpipe_t *pipe)
+static gboolean _sync_focused_in_place(dt_dev_pixelpipe_t *pipe)
 {
-  if(!dt_dev_pixelpipe_get_realtime(pipe))
-    return FALSE;
+  if(IS_NULL_PTR(pipe) || IS_NULL_PTR(pipe->dev) || IS_NULL_PTR(pipe->dev->gui_module)) return FALSE;
+  dt_develop_t *dev = pipe->dev;
+  dt_iop_module_t *focus = dev->gui_module;
 
-  const uint32_t history_end = dt_dev_get_history_end_ext(pipe->dev);
-  if(history_end == 0 || IS_NULL_PTR(pipe->dev->gui_module)) return FALSE;
+  const gboolean transient = dt_dev_transient_params_active(dev, focus);
+  const gboolean realtime = dt_dev_pixelpipe_get_realtime(pipe);
+  if(!transient && !realtime) return FALSE;
 
-  GList *last_item = g_list_nth(pipe->dev->history, history_end - 1);
-  if(IS_NULL_PTR(last_item)) return FALSE;
+  const uint32_t history_end = dt_dev_get_history_end_ext(dev);
+  if(history_end == 0) return FALSE;
 
-  dt_dev_history_item_t *hist = (dt_dev_history_item_t *)last_item->data;
-  if(IS_NULL_PTR(hist) || IS_NULL_PTR(hist->module) || hist->module != pipe->dev->gui_module) return FALSE;
+  // Enable/blend state comes from the focused module's history item (transient edits are params-only).
+  dt_dev_history_item_t *hist = dt_dev_history_get_last_item_by_module(dev->history, focus, history_end);
+  if(IS_NULL_PTR(hist) || IS_NULL_PTR(hist->module) || IS_NULL_PTR(hist->params)) return FALSE;
 
-  dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)dt_dev_pixelpipe_get_module_piece(pipe, hist->module);
+  dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)dt_dev_pixelpipe_get_module_piece(pipe, focus);
   if(IS_NULL_PTR(piece)) return FALSE;
+
+  // Resolve params: thread-safe transient snapshot when published, else the history snapshot. A copy is
+  // taken so the slot lock is not held across commit_params(); never the live GUI module->params.
+  dt_iop_params_t *params = hist->params;
+  void *tbuf = NULL;
+  if(transient && focus->params_size > 0)
+  {
+    tbuf = g_malloc0(focus->params_size);
+    if(!IS_NULL_PTR(tbuf)
+       && dt_dev_transient_params_get(dev, focus, tbuf, (size_t)focus->params_size, NULL, 0, NULL))
+      params = (dt_iop_params_t *)tbuf;
+    else
+      dt_free(tbuf);
+  }
 
   const gboolean previous_want_detail_mask = (pipe->want_detail_mask != DT_DEV_DETAIL_MASK_NONE);
   piece->enabled = hist->enabled;
   piece->detail_mask = !IS_NULL_PTR(hist->blend_params) && hist->blend_params->details != 0.0f;
-  dt_iop_commit_params(hist->module, hist->params, hist->blend_params, pipe, piece);
+  dt_iop_commit_params(focus, params, hist->blend_params, pipe, piece);
+  dt_free(tbuf);
   _refresh_pipe_detail_mask_state(pipe);
   if(previous_want_detail_mask != (pipe->want_detail_mask != DT_DEV_DETAIL_MASK_NONE)) return FALSE;
 
@@ -264,8 +285,15 @@ static gboolean _sync_realtime_top_history_in_place(dt_dev_pixelpipe_t *pipe)
   dt_dev_pixelpipe_propagate_formats(pipe);
   dt_pixelpipe_get_global_hash(pipe);
 
-  pipe->last_history_hash = hist->hash;
-  pipe->last_history_item = hist;
+  // Only advance the synch_top fence when the focused module is the newest history item (the realtime
+  // drawlayer case, where each heartbeat appended a top item). For a transient edit of a non-top module
+  // no history item changed, so the fence must stay where the last real history sync left it.
+  GList *last_item = g_list_nth(dev->history, history_end - 1);
+  if(last_item && (dt_dev_history_item_t *)last_item->data == hist)
+  {
+    pipe->last_history_hash = hist->hash;
+    pipe->last_history_item = hist;
+  }
   return TRUE;
 }
 
@@ -667,10 +695,32 @@ gboolean dt_dev_pixelpipe_cache_peek_gui(dt_dev_pixelpipe_t *pipe, const dt_dev_
     return FALSE;
 
   const uint64_t hash = !IS_NULL_PTR(piece) ? piece->global_hash : dt_dev_pixelpipe_get_hash(pipe);
+
+  // For the final backbuffer (piece == NULL), GUI consumers display the last *published* frame,
+  // identified by pipe->backbuf.hash. The pipeline plans the next frame ahead of publishing it, so
+  // pipe->hash (the planned final hash) runs ahead of the backbuffer while a recompute is in flight.
+  // This is the normal steady state of realtime drawing: every heartbeat plans a new frame. Peeking
+  // the planned hash would then miss the perfectly valid published frame, the darkroom main-surface
+  // lock would fail, and the view would drop to the paused preview pipe (which lacks the in-progress
+  // stroke) — the flicker between "drawing applied" and "original". So look up the published backbuf
+  // hash for display, and keep the planned hash only to drive recompute on a genuine miss below.
+  uint64_t display_hash = hash;
+  if(IS_NULL_PTR(piece))
+  {
+    const uint64_t backbuf_hash = dt_dev_backbuf_get_hash(&pipe->backbuf);
+    if(backbuf_hash != DT_PIXELPIPE_CACHE_HASH_INVALID) display_hash = backbuf_hash;
+  }
+
   void *buffer = NULL;
   dt_pixel_cache_entry_t *entry = NULL;
-  if(hash != DT_PIXELPIPE_CACHE_HASH_INVALID
-     && dt_dev_pixelpipe_cache_peek(darktable.pixelpipe_cache, hash, &buffer, &entry, pipe->devid, NULL)
+  // GUI consumers run on the CPU and never own the OpenCL device lock, so we pass preferred_devid = -1:
+  // dt_dev_pixelpipe_cache_peek() then returns host-resident cachelines directly but refuses to
+  // materialize device-only ones from the GPU (which would enqueue hidden GPU work from the GUI thread,
+  // racing whichever pipeline thread currently owns the device — the clReleaseEvent crash). A device-only
+  // entry is reported as a miss, so the request below waits for the pipeline to publish a host copy
+  // (modules whose output the GUI samples, e.g. initialscale, already cache to RAM).
+  if(display_hash != DT_PIXELPIPE_CACHE_HASH_INVALID
+     && dt_dev_pixelpipe_cache_peek(darktable.pixelpipe_cache, display_hash, &buffer, &entry, -1, NULL)
      &&  !IS_NULL_PTR(buffer) && !IS_NULL_PTR(entry))
   {
     // These counters are only diagnostic; cache consumers should not wait for
@@ -972,7 +1022,7 @@ static void _commit_piece_contract(dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_io
   // never auto-disables a module on a possibly-stale upstream descriptor.
   _prepare_piece_input_contract(pipe, piece, upstream_dsc);
 
-  // This should run even if the module is disabled because 
+  // This should run even if the module is disabled because
   // some modules with no history self-enable based on runtime context
   dt_iop_commit_params(piece->module, params, blend_params, pipe, piece);
 
@@ -1471,13 +1521,14 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe)
       = (dt_dev_pixelpipe_change_t)dt_atomic_exch_int((dt_atomic_int *)&pipe->changed, DT_DEV_PIPE_UNCHANGED);
 
   gchar *type = _get_debug_pipe_name(pipe, pipe->dev);
-  char *status_str = g_strdup_printf("%s%s%s%s%s%s",
+  char *status_str = g_strdup_printf("%s%s%s%s%s%s%s",
                                   (status & DT_DEV_PIPE_UNCHANGED) ? "UNCHANGED " : "",
                                   (status & DT_DEV_PIPE_REMOVE) ? "REMOVE " : "",
                                   (status & DT_DEV_PIPE_TOP_CHANGED) ? "TOP_CHANGED " : "",
                                   (status & DT_DEV_PIPE_SYNCH) ? "SYNCH " : "",
                                   (status & DT_DEV_PIPE_ZOOMED) ? "ZOOMED " : "",
-                                  (status & DT_DEV_PIPE_CACHE_REQUEST) ? "CACHE_REQUEST " : "");
+                                  (status & DT_DEV_PIPE_CACHE_REQUEST) ? "CACHE_REQUEST " : "",
+                                  (status & DT_DEV_PIPE_REENTRY) ? "REENTRY " : "");
 
   dt_print(DT_DEBUG_DEV, "[dt_dev_pixelpipe_change] pipeline state changing for pipe %s, flag %s\n",
      type, status_str);
@@ -1521,8 +1572,8 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe)
   }
   else if(status & DT_DEV_PIPE_TOP_CHANGED)
   {
-    // only top history item(s) changed
-    if(_sync_realtime_top_history_in_place(pipe))
+    // only top history item(s) changed, or a focused module published transient/realtime params
+    if(_sync_focused_in_place(pipe))
     {
       formats_propagated = TRUE;
     }
@@ -1532,7 +1583,7 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe)
       dt_dev_pixelpipe_synch_top(pipe);
     }
   }
-  else // DT_DEV_PIPE_ZOOMED DT_DEV_PIPE_CACHE_REQUEST
+  else // DT_DEV_PIPE_ZOOMED DT_DEV_PIPE_CACHE_REQUEST DT_DEV_PIPE_REENTRY
   {
     // Finalscale will need to self-enable/disable depending on zoom level
     dt_dev_pixelpipe_sync_no_history(pipe);

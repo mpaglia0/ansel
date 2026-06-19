@@ -131,6 +131,7 @@ void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)
   dt_dev_set_history_hash(dev, DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_pthread_rwlock_init(&dev->history_mutex, NULL);
   dt_pthread_rwlock_init(&dev->masks_mutex, NULL);
+  dt_pthread_mutex_init(&dev->transient_params_mutex, NULL);
 
   dev->gui_attached = gui_attached;
   dev->roi.width = -1;
@@ -226,6 +227,16 @@ void dt_dev_cleanup(dt_develop_t *dev)
   g_list_free_full(dev->undo_history_before_iop_order_list, dt_free_gpointer);
   dev->undo_history_before_iop_order_list = NULL;
   dev->undo_history_before_end = 0;
+
+  // free the transient param channel
+  dt_pthread_mutex_lock(&dev->transient_params_mutex);
+  dt_free(dev->transient_params.params);
+  dev->transient_params.params = NULL;
+  dt_free(dev->transient_params.blend_params);
+  dev->transient_params.blend_params = NULL;
+  dev->transient_params.module = NULL;
+  dt_pthread_mutex_unlock(&dev->transient_params_mutex);
+  dt_pthread_mutex_destroy(&dev->transient_params_mutex);
 
   while(dev->iop)
   {
@@ -468,10 +479,13 @@ static void dt_dev_resync_mipmap_cache(dt_develop_t *dev, dt_dev_pixelpipe_t *pi
   // Get the mip size that is at most as big as our pipeline backbuf
   dt_mipmap_size_t mip = dt_mipmap_cache_get_fitting_size(cache, pipe->backbuf.width, pipe->backbuf.height, imgid);
   
-  // Flush backup to mipmap_cache
+  // Flush backup to mipmap_cache. This runs after dt_dev_pixelpipe_process() released the OpenCL device
+  // lock, so we must NOT pass pipe->devid (now stale/unlocked): a device-only payload would otherwise be
+  // materialized from the GPU without owning it. The final display backbuffer is always host-resident,
+  // so preferred_devid = -1 returns it directly; anything else is simply skipped.
   uint8_t *data = NULL;
   dt_pixel_cache_entry_t *entry = NULL;
-  if(dt_dev_pixelpipe_cache_peek(darktable.pixelpipe_cache, dt_dev_pixelpipe_get_hash(pipe), (void **)&data, &entry, pipe->devid, NULL))
+  if(dt_dev_pixelpipe_cache_peek(darktable.pixelpipe_cache, dt_dev_pixelpipe_get_hash(pipe), (void **)&data, &entry, -1, NULL))
   {
     dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, entry);
     dt_mipmap_cache_swap_at_size(cache, imgid, mip, data, pipe->backbuf.width, pipe->backbuf.height, darktable.color_profiles->display_type);
@@ -607,6 +621,9 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
 
       dev->progress.completed = 0;
       dev->progress.total = 0;
+      const dt_dev_pixelpipe_cache_request_t cache_request
+          = dt_dev_pixelpipe_get_cache_request(pipe);
+      const gboolean retrying_raster_mask = dt_dev_pixelpipe_has_reentry(pipe);
       const int ret = dt_dev_pixelpipe_process(pipe, roi);
       dev->progress.completed = 0;
       dev->progress.total = 0;
@@ -621,14 +638,52 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
 
       const gboolean processed = (!ret && !dt_atomic_get_int(&pipe->shutdown));
 
-      // Re-entry is designed for raster masks when we lose their reference: force a full rebuild
-      // and defer it to the resync stage of the next loop iteration. History resync now lives
-      // exclusively in the first block so the global hash stays advertised consistently.
       if(dt_dev_pixelpipe_has_reentry(pipe))
       {
-        dt_dev_pixelpipe_or_changed(pipe, DT_DEV_PIPE_REMOVE);
-        dt_dev_pixelpipe_cache_flush(darktable.pixelpipe_cache, pipe->type);
-        dt_dev_pixelpipe_reset_reentry(pipe);
+        /**
+         * A missing raster mask gets exactly one reconstruction pass. Keep the
+         * re-entry flag active for that pass so _bypass_cache() recomputes the
+         * provider instead of exact-hitting pixels without their side-band
+         * mask. If the retry still cannot provide it, release the flag and
+         * propagate the processing error without scheduling an infinite loop.
+         */
+        if(retrying_raster_mask)
+        {
+          dt_dev_pixelpipe_reset_reentry(pipe);
+        }
+        else
+        {
+          // The synchronized graph and its ROIs are still valid. The retry
+          // only needs another processing pass after targeted cache
+          // invalidation, not node destruction and history reconstruction.
+          dt_dev_pixelpipe_or_changed(pipe, DT_DEV_PIPE_REENTRY);
+        }
+      }
+
+      /**
+       * Module cache requests deliberately stop before the end of the pipe.
+       * DT_SIGNAL_CACHELINE_READY notifies their caller when the requested
+       * cache line is written, but the final backbuffer remains stale.
+       * Advertising PIPE_FINISHED for such a pass would wake preview
+       * consumers and schedule another otherwise unnecessary processing pass.
+       */
+      const gboolean published_backbuffer
+          = processed && dt_dev_pixelpipe_is_backbufer_valid(pipe);
+
+      /**
+       * A module cache request consumes the pipe change that started this
+       * worker pass, but intentionally stops before publishing the final
+       * backbuffer. Queue the full continuation explicitly instead of relying
+       * on a PIPE_FINISHED listener to notice the missing backbuffer. A newer
+       * GUI cache request may have arrived while processing; preserve it and
+       * only install the backbuffer request when no newer target is pending.
+       */
+      if(processed && cache_request == DT_DEV_PIXELPIPE_CACHE_REQUEST_MODULE
+         && !published_backbuffer)
+      {
+        if(dt_dev_pixelpipe_get_cache_request(pipe) == DT_DEV_PIXELPIPE_CACHE_REQUEST_NONE)
+          dt_dev_pixelpipe_set_cache_request(pipe, DT_DEV_PIXELPIPE_CACHE_REQUEST_BACKBUF, NULL);
+        dt_dev_pixelpipe_or_changed(pipe, DT_DEV_PIPE_CACHE_REQUEST);
       }
 
       pipe->processing = 0;
@@ -639,15 +694,16 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
 
       // Use the full-frame (uncropped) preview backbuffer to init the mipmap cache without extra computations
       // Note: this will resample non-linear uint8 at the end of the pipeline, so it is low-quality resampling.
-      if(processed && !dt_dev_pixelpipe_get_realtime(pipe) && pipe->type == DT_DEV_PIXELPIPE_PREVIEW)
+      if(published_backbuffer && !dt_dev_pixelpipe_get_realtime(pipe)
+         && pipe->type == DT_DEV_PIXELPIPE_PREVIEW)
         dt_dev_resync_mipmap_cache(dev, pipe, roi);
 
-      if(pipe->type == DT_DEV_PIXELPIPE_FULL)
+      if(published_backbuffer && pipe->type == DT_DEV_PIXELPIPE_FULL)
       {
         DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED);
         dt_control_queue_redraw_center();
       }
-      if(pipe->type == DT_DEV_PIXELPIPE_PREVIEW)
+      if(published_backbuffer && pipe->type == DT_DEV_PIXELPIPE_PREVIEW)
       {
         DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED);
         dt_control_queue_redraw();

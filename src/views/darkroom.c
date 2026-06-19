@@ -856,11 +856,6 @@ static gboolean _render_preview_fallback_surface(cairo_t *cr)
   return TRUE;
 }
 
-static inline gboolean _darkroom_gui_module_requests_uncropped_full_image(const dt_develop_t *dev)
-{
-  return dev && dev->gui_attached && dev->gui_module && dt_iop_get_cache_bypass(dev->gui_module);
-}
-
 static void _paint_all(cairo_t *cri, cairo_t *cr, cairo_surface_t *image_surface)
 {
   cairo_destroy(cr);
@@ -875,8 +870,8 @@ typedef struct darkroom_expose_state_t
   int image_surface_height;
   int32_t image_surface_imgid;
   gboolean image_surface_has_main;
+  uint64_t image_surface_hash;
   uint64_t main_zoom_hash;
-  uint64_t main_hash;
   /* Main backbuf hash for which we already asked for a retry redraw after failing
    * to lock/render it. Used to re-queue at most once per distinct main frame so a
    * permanently-unlockable main backbuf (e.g. evicted under memory pressure) does
@@ -910,8 +905,8 @@ static inline void _darkroom_reset_expose_state(darkroom_expose_state_t *state)
   if(IS_NULL_PTR(state)) return;
   state->image_surface_imgid = UNKNOWN_IMAGE;
   state->image_surface_has_main = FALSE;
+  state->image_surface_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
   state->main_zoom_hash = 0;
-  state->main_hash = 0;
   state->pending_main_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
 }
 
@@ -938,6 +933,7 @@ static void _darkroom_prepare_image_surface(dt_develop_t *dev, const int width, 
   dev->image_surface = dt_cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
   state->image_surface_imgid = UNKNOWN_IMAGE;
   state->image_surface_has_main = FALSE;
+  state->image_surface_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
   _release_preview_fallback_surface();
 }
 
@@ -974,12 +970,11 @@ void expose(
     .image_surface_height = 0,
     .image_surface_imgid = UNKNOWN_IMAGE,
     .image_surface_has_main = FALSE,
+    .image_surface_hash = DT_PIXELPIPE_CACHE_HASH_INVALID,
     .main_zoom_hash = 0,
-    .main_hash = 0,
     .pending_main_hash = DT_PIXELPIPE_CACHE_HASH_INVALID,
   };
   const uint64_t zoom_hash = dt_hash(5381, (char *)&dev->roi, sizeof(dev->roi));
-  const gboolean allow_uncropped_full_image = _darkroom_gui_module_requests_uncropped_full_image(dev);
   const gboolean roi_changed = !_darkroom_locked_main_valid_for_zoom(&expose_state, zoom_hash);
 
   _darkroom_prepare_image_surface(dev, width, height, &expose_state);
@@ -991,16 +986,18 @@ void expose(
   const uint64_t preview_backbuf_hash = dt_dev_backbuf_get_hash(&dev->preview_pipe->backbuf);
   const gboolean main_has_backbuf = main_backbuf_hash != DT_PIXELPIPE_CACHE_HASH_INVALID;
   const gboolean preview_has_backbuf = preview_backbuf_hash != DT_PIXELPIPE_CACHE_HASH_INVALID;
-  const gboolean main_backbuf_is_newer = main_has_backbuf && main_backbuf_hash != expose_state.main_hash;
+  // Compare main against the last main surface, not against the last source painted into
+  // image_surface. At fit the latter may be the preview pipe, whose different hash would make an
+  // old main backbuffer look new and briefly restore the previous zoom size.
+  const gboolean main_backbuf_is_newer
+      = main_has_backbuf && main_backbuf_hash != _darkroom_main_locked.hash;
   const gboolean main_ready_for_current_view
       = main_has_backbuf && (!roi_changed || main_backbuf_is_newer || !_darkroom_main_locked.surface);
-  const gboolean showing_full_image = allow_uncropped_full_image || fabsf(dev->roi.scaling - 1.0f) < 1e-6f;
   const gboolean preview_matches_full_image
-      = preview_has_backbuf && showing_full_image
-        && (allow_uncropped_full_image
-            || (full_width > 0 && full_height > 0
-                && dev->preview_pipe->backbuf.width == full_width
-                && dev->preview_pipe->backbuf.height == full_height));
+      = preview_has_backbuf && dt_dev_pipelines_share_preview_output(dev)
+        && full_width > 0 && full_height > 0
+        && dev->preview_pipe->backbuf.width == full_width
+        && dev->preview_pipe->backbuf.height == full_height;
   const gboolean full_image_backbuf_ready = main_ready_for_current_view || preview_matches_full_image;
 
   dt_aligned_pixel_t bg_color = { 0.0f };
@@ -1046,7 +1043,6 @@ void expose(
        && _darkroom_main_locked.surface
        && _render_main_locked_surface(cr, dev, &_darkroom_main_locked, width, height, border, bg_color))
     {
-      expose_state.main_hash = _darkroom_main_locked.hash;
       expose_state.main_zoom_hash = zoom_hash;
       expose_state.image_surface_imgid = dev->image_storage.id;
       expose_state.image_surface_has_main = TRUE;
@@ -1070,17 +1066,17 @@ void expose(
     }
   }
 
-  /* Rule 2: preview is directly equivalent to main only in full-image view
-   * (fit scale / uncropped edit modes). Otherwise it must go through the
-   * ROI-scaled fallback path below. */
+  /* Rule 2: preview is directly equivalent to main only when both pipes target
+   * the same ROI. An uncropped edit mode changes the module contract, not the
+   * current zoom: once zoomed, preview must use the scaled fallback below. */
   if(!drawn && preview_matches_full_image)
   {
     if(_lock_pipe_surface(dev, dev->preview_pipe, &_darkroom_preview_locked, FALSE, TRUE)
        && _darkroom_preview_locked.surface
        && _render_main_locked_surface(cr, dev, &_darkroom_preview_locked, width, height, border, bg_color))
     {
-      expose_state.main_hash = _darkroom_preview_locked.hash;
-      expose_state.main_zoom_hash = zoom_hash;
+      // This frame validates the composed image, not the locked main surface. Keep main_zoom_hash
+      // unchanged so the old main backbuffer cannot be reused as if it had been rendered at fit.
       expose_state.image_surface_imgid = dev->image_storage.id;
       expose_state.image_surface_has_main = TRUE;
       _release_preview_fallback_surface();
@@ -1143,6 +1139,7 @@ void expose(
     /* Persist the last composed frame so later exposes can reuse it if the
      * next requested source is temporarily unavailable. */
     expose_state.image_surface_has_main = drawn_from_main;
+    expose_state.image_surface_hash = draw_hash;
     _paint_all(cri, cr, dev->image_surface);
     dt_print(DT_DEBUG_DEV, "[darkroom] expose drew %s (backbuf hash=%" PRIu64 ")\n",
              draw_source, draw_hash);
@@ -1154,8 +1151,7 @@ void expose(
      * rather than clearing to background and waiting for another expose. */
     draw_source = expose_state.image_surface_has_main ? "reused last main surface"
                                                       : "reused last preview surface";
-    draw_hash = expose_state.image_surface_has_main ? expose_state.main_hash
-                                                    : _darkroom_preview_fallback_backbuf_hash;
+    draw_hash = expose_state.image_surface_hash;
     _paint_all(cri, cr, dev->image_surface);
     dt_print(DT_DEBUG_DEV, "[darkroom] expose drew %s (backbuf hash=%" PRIu64 ")\n",
              draw_source, draw_hash);
@@ -1288,27 +1284,6 @@ static void _darkroom_log_image_load_error(const int ret)
   }
 }
 
-static gboolean _darkroom_attach_missing_iop_guis(dt_develop_t *dev)
-{
-  if(IS_NULL_PTR(dev)) return FALSE;
-
-  gboolean attached = FALSE;
-
-  for(GList *modules = g_list_first(dev->iop); modules; modules = g_list_next(modules))
-  {
-    dt_iop_module_t *module = (dt_iop_module_t *)modules->data;
-
-    if(!module || dt_iop_is_hidden(module) || module->expander) continue;
-
-    if(!module->widget) dt_iop_gui_init(module);
-    dt_iop_gui_set_expander(module);
-    dt_iop_gui_update(module);
-    attached = TRUE;
-  }
-
-  return attached;
-}
-
 static void _darkroom_image_loaded_callback(gpointer instance, guint request_id, guint result, gpointer user_data)
 {
   dt_view_t *self = (dt_view_t *)user_data;
@@ -1330,8 +1305,6 @@ static void _darkroom_image_loaded_callback(gpointer instance, guint request_id,
   // locks history mutex internally
   dt_dev_pop_history_items(dev);
   dt_dev_history_gui_update(dev);
-  if(_darkroom_attach_missing_iop_guis(dev))
-    dt_dev_history_gui_update(dev);
 
   dt_dev_pixelpipe_rebuild_all(dev);
   dt_dev_get_thumbnail_size(dev);
@@ -1578,6 +1551,49 @@ static void display_borders_callback(GtkWidget *slider, gpointer user_data)
   _get_final_size_with_iso_12646(d);
   dt_dev_pixelpipe_change_zoom_main(d);
   DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DARKROOM_UI_CHANGED);
+}
+
+/**
+ * @brief Persist the global mask-preview appearance and resynchronize every node using it.
+ *
+ * The historical Color Balance key namespace is intentionally retained so existing
+ * checkerboard preferences survive moving these controls into the darkroom toolbox.
+ */
+static void display_mask_checker_1_callback(GtkColorButton *widget, gpointer user_data)
+{
+  dt_develop_t *d = (dt_develop_t *)user_data;
+  GdkRGBA color;
+  gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(widget), &color);
+  dt_conf_set_float("plugins/darkroom/colorbalancergb/checker1/red", color.red);
+  dt_conf_set_float("plugins/darkroom/colorbalancergb/checker1/green", color.green);
+  dt_conf_set_float("plugins/darkroom/colorbalancergb/checker1/blue", color.blue);
+  dt_dev_pixelpipe_resync_history_main(d);
+}
+
+static void display_mask_checker_2_callback(GtkColorButton *widget, gpointer user_data)
+{
+  dt_develop_t *d = (dt_develop_t *)user_data;
+  GdkRGBA color;
+  gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(widget), &color);
+  dt_conf_set_float("plugins/darkroom/colorbalancergb/checker2/red", color.red);
+  dt_conf_set_float("plugins/darkroom/colorbalancergb/checker2/green", color.green);
+  dt_conf_set_float("plugins/darkroom/colorbalancergb/checker2/blue", color.blue);
+  dt_dev_pixelpipe_resync_history_main(d);
+}
+
+static void display_mask_checker_size_callback(GtkWidget *slider, gpointer user_data)
+{
+  dt_develop_t *d = (dt_develop_t *)user_data;
+  dt_conf_set_int("plugins/darkroom/colorbalancergb/checker/size", (int)dt_bauhaus_slider_get(slider));
+  dt_dev_pixelpipe_resync_history_main(d);
+}
+
+static void display_mask_black_and_white_callback(GtkToggleButton *toggle, gpointer user_data)
+{
+  dt_develop_t *d = (dt_develop_t *)user_data;
+  dt_conf_set_bool("plugins/darkroom/colorbalancergb/mask_preview/greyscaled",
+                   gtk_toggle_button_get_active(toggle));
+  dt_dev_pixelpipe_resync_history_main(d);
 }
 
 static void _darkroom_change_rendering_size(GtkWidget *combobox, gpointer user_data)
@@ -2117,6 +2133,7 @@ void gui_init(dt_view_t *self)
                                   _("Shows the options popover"));
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
+    gtk_widget_set_margin_bottom(vbox, DT_PIXEL_APPLY_DPI(DT_GUI_BOX_SPACING));
     gtk_container_add(GTK_CONTAINER(dev->display.floating_window), vbox);
 
     /** let's fill the encapsulating widgets */
@@ -2148,6 +2165,57 @@ void gui_init(dt_view_t *self)
                                 N_("scaled (default)")
                               );
     gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(rendering), TRUE, TRUE, 0);
+
+    gtk_box_pack_start(GTK_BOX(vbox), dt_ui_section_label_new(_("Mask preview settings")), FALSE, FALSE, 0);
+
+    GtkWidget *checker_1_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
+    gtk_box_pack_start(GTK_BOX(checker_1_row), dt_ui_label_new(_("Checkerboard color 1")), TRUE, TRUE, 0);
+    GtkWidget *checker_1 = gtk_color_button_new();
+    GdkRGBA checker_color = {
+      .red = dt_conf_get_float("plugins/darkroom/colorbalancergb/checker1/red"),
+      .green = dt_conf_get_float("plugins/darkroom/colorbalancergb/checker1/green"),
+      .blue = dt_conf_get_float("plugins/darkroom/colorbalancergb/checker1/blue"),
+      .alpha = 1.0
+    };
+    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(checker_1), &checker_color);
+    gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(checker_1), FALSE);
+    gtk_color_button_set_title(GTK_COLOR_BUTTON(checker_1),
+                               _("Select color of the checkerboard from a swatch"));
+    g_signal_connect(G_OBJECT(checker_1), "color-set", G_CALLBACK(display_mask_checker_1_callback), dev);
+    gtk_box_pack_start(GTK_BOX(checker_1_row), checker_1, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), checker_1_row, FALSE, FALSE, 0);
+
+    GtkWidget *checker_2_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
+    gtk_box_pack_start(GTK_BOX(checker_2_row), dt_ui_label_new(_("Checkerboard color 2")), TRUE, TRUE, 0);
+    GtkWidget *checker_2 = gtk_color_button_new();
+    checker_color.red = dt_conf_get_float("plugins/darkroom/colorbalancergb/checker2/red");
+    checker_color.green = dt_conf_get_float("plugins/darkroom/colorbalancergb/checker2/green");
+    checker_color.blue = dt_conf_get_float("plugins/darkroom/colorbalancergb/checker2/blue");
+    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(checker_2), &checker_color);
+    gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(checker_2), FALSE);
+    gtk_color_button_set_title(GTK_COLOR_BUTTON(checker_2),
+                               _("Select color of the checkerboard from a swatch"));
+    g_signal_connect(G_OBJECT(checker_2), "color-set", G_CALLBACK(display_mask_checker_2_callback), dev);
+    gtk_box_pack_start(GTK_BOX(checker_2_row), checker_2, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), checker_2_row, FALSE, FALSE, 0);
+
+    GtkWidget *checker_size
+        = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL), 2., 32., 1., 8., 0);
+    dt_bauhaus_slider_set(checker_size,
+                          dt_conf_get_int("plugins/darkroom/colorbalancergb/checker/size"));
+    dt_bauhaus_slider_set_format(checker_size, " px");
+    dt_bauhaus_widget_set_label(checker_size, _("Checkerboard size"));
+    g_signal_connect(G_OBJECT(checker_size), "value-changed",
+                     G_CALLBACK(display_mask_checker_size_callback), dev);
+    gtk_box_pack_start(GTK_BOX(vbox), checker_size, TRUE, TRUE, 0);
+
+    GtkWidget *black_and_white = gtk_check_button_new_with_label(_("Show a greyscaled mask image"));
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(black_and_white),
+        dt_conf_get_bool("plugins/darkroom/colorbalancergb/mask_preview/greyscaled"));
+    g_signal_connect(G_OBJECT(black_and_white), "toggled",
+                     G_CALLBACK(display_mask_black_and_white_callback), dev);
+    gtk_box_pack_start(GTK_BOX(vbox), black_and_white, FALSE, FALSE, 0);
   }
 
   _darkroom_ioporder_button = dtgtk_button_new(dtgtk_cairo_paint_flowchart, 0, NULL);
