@@ -22,7 +22,9 @@ Stephan Hoek
 EdgarLux
 Luca Zulberti
 Matt Maguire
+ax006ho
 Nicolas Auffray
+Prof. Dr. Jobst Hoffmann
 bajdero
 mmardegan
 Guillaume Stutin
@@ -62,6 +64,7 @@ luzpaz
 solarer
 Luca Zulberti
 Philipp Lutz
+ax006ho
 Alban Gruin
 Apfelkraut
 EdgarLux
@@ -192,5 +195,99 @@ Volker Enderlein
 William Roy
 patricklaf
 pinchartl
+
+* Sub-module sentry-native contributors (at least 1 commit):
+Arpad Borsos
+J-P Nurmi
+Mischan Toosarani-Hausberger
+getsentry-bot
+Armin Ronacher
+Bruno Garcia
+JoshuaMoelans
+dependabot[bot]
+Anton Ovchinnikov
+Ivan Dlugos
+Jan Michael Auer
+relaxolotl
+Ivan Tustanivskyi
+Mikhail Paulyshka
+Amir Mujacic
+Markus Hintersteiner
+Stefan Jandl
+Sebastian Zivota
+sentry-release-bot[bot]
+Anonymous Maarten
+Chris Rudd
+pastdue
+Amphaal
+Sentry Bot
+Stephanie Anderson
+Floris Bruynooghe
+Ivan Blinkov
+Karl Heinz Struggl
+Cameron Royal
+Edwin
+Isaac Devine
+Jan Lupčík
+Michał Janiszewski
+MikeRumplerSentry
+Philipp Hofmann
+PlasmaDev
+R. Savchenko
+Tor Arne Vestbø
+Vitalii Koshura
+cnicolaescu
+4diekmann
+Aleks Kamko
+Alex Lorenz
+Anton Filimonov
+Burak Yigit Kaya
+Calvin Buckley
+Carlos Gomes Martinho
+Chad Whitacre
+Copilot
+Cyriuz
+Daniel Griesser
+Dmitrii Korzhimanov
+Dmytro Korchynskyi
+Greg Cotten
+Hanno J. Gödecke
+James Crosswell
+Janohmat
+Javier Blazquez
+Jeffrey Hung
+Joel Winarske
+Kfir Itzhak
+Ladislav
+Luke Street
+Manoel Aranda Neto
+Martin Delille
+Matt Johnson-Pint
+Michi Hoffmann
+Mike Allison
+Mike Detwiler
+Neil Manvar
+Roman Zavarnitsyn
+Roshan Padaki
+Serhii Snitsaruk
+Strive-Sun
+Thomas Guyard
+Uilian Ries
+Vadim Peretokin
+Wojciech Minko
+Yuriy Levchenko
+Zachary Danz
+andrei-mu
+bschatt
+daxpedda
+espkk
+fix-it-felix-sentry[bot]
+jkosberg
+joshuarli
+mjvankampen
+mwl4
+sappho
+xyz1001
+zhaowq32
 
 And all those of you that made previous releases possible

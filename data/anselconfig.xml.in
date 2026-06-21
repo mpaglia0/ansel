@@ -289,6 +289,13 @@
     <shortdescription>store xmp tags in compressed format</shortdescription>
     <longdescription>entries in xmp tags can get rather large and may exceed the available space to store the history stack in output files. this option allows xmp tags to be compressed and save space.</longdescription>
   </dtconfig>
+  <dtconfig prefs="storage" section="privacy">
+    <name>sentry/enabled</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>Send anonymous crash reports</shortdescription>
+    <longdescription>When Ansel crashes, automatically upload the backtrace, your operating system and hardware specs (CPU, RAM, GPU), the Ansel version and crash-free session statistics to the developers (via sentry.io) so the bug can be fixed. No images, file names or personal data are sent. Default off; you are asked once on first launch.</longdescription>
+  </dtconfig>
   <dtconfig>
     <name>history/paste_instances</name>
     <type>bool</type>
@@ -1657,12 +1664,12 @@
       <enum>
         <option>bilinear</option>
         <option>bicubic</option>
-        <option>lanczos2</option>
+        <option>mitchell</option>
       </enum>
     </type>
-    <default>bicubic</default>
+    <default>mitchell</default>
     <shortdescription>pixel interpolator (warp)</shortdescription>
-    <longdescription>pixel interpolator used in modules for rotation, lens correction, liquify, cropping and final scaling (bilinear, bicubic, lanczos2).</longdescription>
+    <longdescription>pixel interpolator used in modules for rotation, lens correction, liquify, cropping and final scaling. bilinear (soft, no overshoot), bicubic (Catmull-Rom, sharp but rings at edges), mitchell (Mitchell-Netravali, sharp and effectively halo-free).</longdescription>
   </dtconfig>
   <dtconfig prefs="processing" section="general">
     <name>plugins/lighttable/export/pixel_interpolator</name>
@@ -1670,13 +1677,12 @@
       <enum>
         <option>bilinear</option>
         <option>bicubic</option>
-        <option>lanczos2</option>
-        <option>lanczos3</option>
+        <option>mitchell</option>
       </enum>
     </type>
-    <default>lanczos3</default>
+    <default>mitchell</default>
     <shortdescription>pixel interpolator (scaling)</shortdescription>
-    <longdescription>pixel interpolator used for scaling (bilinear, bicubic, lanczos2, lanczos3).</longdescription>
+    <longdescription>pixel interpolator used for scaling. bilinear (soft, no overshoot), bicubic (Catmull-Rom, sharp but rings at edges), mitchell (Mitchell-Netravali, sharp and effectively halo-free).</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/lighttable/export/dimensions_type</name>
