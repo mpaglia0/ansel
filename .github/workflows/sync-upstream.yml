@@ -31,9 +31,13 @@ jobs:
           git fetch origin
           git fetch upstream
 
-      - name: Merge upstream/master into master
+      - name: Align with origin/master
         run: |
           git checkout master
+          git merge origin/master --ff-only
+
+      - name: Merge upstream/master into master
+        run: |
           git merge upstream/master --no-edit
 
       - name: Push to fork
