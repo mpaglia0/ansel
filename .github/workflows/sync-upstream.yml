@@ -44,5 +44,17 @@ jobs:
         run: |
           git merge upstream/master --no-edit
 
-      - name: Push to fork
-        run: git push origin master
+      - name: Push to fork (with retry)
+        run: |
+          for i in 1 2 3 4 5; do
+            if git push origin master; then
+              echo "Push riuscito al tentativo $i"
+              exit 0
+            fi
+            echo "Push rifiutato, ritento ($i)..."
+            git fetch origin
+            git merge origin/master --ff-only
+            sleep 5
+          done
+          echo "Push fallito dopo 5 tentativi"
+          exit 1
