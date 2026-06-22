@@ -26,8 +26,10 @@ jobs:
       - name: Add upstream remote
         run: git remote add upstream https://github.com/aurelienpierreeng/ansel.git
 
-      - name: Fetch upstream
-        run: git fetch upstream
+      - name: Fetch all
+        run: |
+          git fetch origin
+          git fetch upstream
 
       - name: Merge upstream/master into master
         run: |
