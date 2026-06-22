@@ -19,7 +19,7 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_PAT }}
           fetch-depth: 0
 
       - name: Configure git
@@ -47,7 +47,7 @@ jobs:
       - name: Push to fork (with retry)
         run: |
           for i in 1 2 3 4 5; do
-            if git push origin master; then
+            if git push https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/mpaglia0/ansel.git master; then
               echo "Push riuscito al tentativo $i"
               exit 0
             fi
