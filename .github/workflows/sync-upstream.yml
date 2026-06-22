@@ -27,15 +27,19 @@ jobs:
       - name: Add upstream remote
         run: git remote add upstream https://github.com/aurelienpierreeng/ansel.git || true
 
-      - name: Fetch upstream
-        run: git fetch upstream
+      - name: Fetch all remotes
+        run: |
+          git fetch origin
+          git fetch upstream
 
-      - name: Merge upstream/master into master (skip workflows)
+      - name: Sync master safely
         run: |
           git checkout master
-          git merge upstream/master --no-edit || true
-          git restore --source=HEAD --staged --worktree .github/workflows
 
-      - name: Push to fork
-        run: git push origin master
-``
+          echo "== Stato iniziale =="
+          git status
+
+          # 1. Allinea con origin (fix non-fast-forward)
+          git pull origin master --rebase || true
+
+          # 2. Merge upstream
