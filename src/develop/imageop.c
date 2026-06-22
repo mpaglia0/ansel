@@ -64,6 +64,8 @@
 */
 
 #include "common/darktable.h"
+#include "common/sentry.h"
+#include "common/telemetry.h"
 #include "develop/imageop.h"
 #include "bauhaus/bauhaus.h"
 #include "common/collection.h"
@@ -1082,6 +1084,8 @@ static void _gui_off_callback(GtkToggleButton *togglebutton, gpointer user_data)
     if(gtk_toggle_button_get_active(togglebutton))
     {
       module->enabled = 1;
+      dt_sentry_record_module_usage("iop", module->op);
+      dt_telemetry_record_module_usage("iop", module->op);
       dt_dev_add_history_item(module->dev, module, FALSE, TRUE);
     }
     else
@@ -2509,7 +2513,9 @@ static void _display_mask_indicator_callback(GtkToggleButton *bt, dt_iop_module_
   const gboolean is_active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(bt));
   const dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)module->blend_data;
 
-  module->request_mask_display &= ~(DT_DEV_PIXELPIPE_DISPLAY_MASK | DT_DEV_PIXELPIPE_DISPLAY_CHANNEL | DT_DEV_PIXELPIPE_DISPLAY_ANY);
+  module->request_mask_display
+      &= ~(DT_DEV_PIXELPIPE_DISPLAY_MASK | DT_DEV_PIXELPIPE_DISPLAY_CHANNEL
+           | DT_DEV_PIXELPIPE_DISPLAY_ANY | DT_DEV_PIXELPIPE_DISPLAY_STICKY);
 
   if(is_active)
     module->request_mask_display |= DT_DEV_PIXELPIPE_DISPLAY_MASK;
@@ -2519,6 +2525,13 @@ static void _display_mask_indicator_callback(GtkToggleButton *bt, dt_iop_module_
   // set the module show mask button too
   if(bd->showmask)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bd->showmask), is_active);
+
+  ++darktable.gui->reset;
+  if(GTK_IS_TOGGLE_BUTTON(bd->filter[0].channel_display))
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bd->filter[0].channel_display), FALSE);
+  if(GTK_IS_TOGGLE_BUTTON(bd->filter[1].channel_display))
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(bd->filter[1].channel_display), FALSE);
+  --darktable.gui->reset;
 
   dt_iop_request_focus(module);
   dt_dev_pixelpipe_update_history_main(module->dev);

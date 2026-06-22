@@ -48,14 +48,14 @@ jobs:
             xcode: 26.3, 
             deployment: 15.0, 
             tag: "arm64",
-            eco: "-DBINARY_PACKAGE_BUILD=ON -DUSE_GRAPHICSMAGICK=ON -DUSE_IMAGEMAGICK=OFF -DDT_APPLE_X86_TARGET_CLONES=0",
+            eco: "-DBINARY_PACKAGE_BUILD=ON -DBUILD_CHANNEL=nightly -DUSE_GRAPHICSMAGICK=ON -DUSE_IMAGEMAGICK=OFF -DDT_APPLE_X86_TARGET_CLONES=0",
             } # AppleClang 17, arm64
           - { 
             os: macos-15-intel, 
             xcode: 26.3, 
             deployment: 15.0, 
             tag: "intel64",
-            eco: "-DBINARY_PACKAGE_BUILD=ON -DUSE_GRAPHICSMAGICK=ON -DUSE_IMAGEMAGICK=OFF -DDT_APPLE_X86_TARGET_CLONES=1",
+            eco: "-DBINARY_PACKAGE_BUILD=ON -DBUILD_CHANNEL=nightly -DUSE_GRAPHICSMAGICK=ON -DUSE_IMAGEMAGICK=OFF -DDT_APPLE_X86_TARGET_CLONES=1",
              } # AppleClang 17, intel64
         btype:
           - RelWithDebInfo
@@ -103,6 +103,12 @@ jobs:
           cmake -E make_directory "${INSTALL_PREFIX}";
           cd ${SRC_DIR}
           .ci/ci-script-mac.sh;
+      - name: Upload debug symbols to Sentry
+        if: ${{ success() }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          bash "${SRC_DIR}/tools/sentry-upload-symbols.sh" "${BUILD_DIR}"
       - name: Check if it runs
         run: |
           ${INSTALL_PREFIX}/bin/ansel --version || true

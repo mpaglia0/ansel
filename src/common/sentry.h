@@ -24,6 +24,8 @@
 extern "C" {
 #endif
 
+struct dt_image_t;
+
 /** Initialize sentry.io crash reporting.
  *
  * On the very first launch (no consent decision recorded yet) and when a GUI is
@@ -42,6 +44,36 @@ void dt_sentry_init(const gboolean have_gui);
  * exit and increments the local clean-session counter. No-op if sentry was never
  * initialized. */
 void dt_sentry_shutdown(void);
+
+/** Whether sentry's crash handler has already captured a gdb backtrace for the
+ * current crash. The local signal handler uses this to avoid running gdb twice.
+ * Returns FALSE when built without sentry support. */
+gboolean dt_sentry_backtrace_captured(void);
+
+/** Record that a module was used during this session, e.g. a view was entered,
+ * an iop module was enabled, or a lib panel was opened. Per-module counts are
+ * attached to crash reports as the "module_usage" context, so a crash shows
+ * which modules were exercised beforehand.
+ *
+ * @param category short kind, e.g. "view", "iop", "lib".
+ * @param name     module identifier (view module_name, iop op, lib plugin_name).
+ *
+ * Must be called from the GUI thread. No-op without sentry, or before init /
+ * when the user has not opted in. */
+void dt_sentry_record_module_usage(const char *category, const char *name);
+
+/** Record the image currently being processed, so crash reports show what was
+ * on the pipeline at the time. Only the file extension and image type flags are
+ * recorded (no file name or path). Attached as the "processed_image" context.
+ *
+ * Cheap to call on every pipeline run: it is a no-op unless the image or
+ * pipeline actually changed. Safe to call from any pipeline thread.
+ *
+ * @param img      the image on the pipeline (its extension + type flags are read).
+ * @param pipeline short label of the pipeline, e.g. "darkroom"/"export".
+ *
+ * No-op without sentry, or before init / when the user has not opted in. */
+void dt_sentry_set_processed_image(const struct dt_image_t *img, const char *pipeline);
 
 #ifdef __cplusplus
 }

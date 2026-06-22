@@ -49,7 +49,7 @@ jobs:
           - RelWithDebInfo
         compiler:
           - { compiler: LLVM20, CC: clang, CXX: clang++, GCC_VER: "", LLVM_VER: "20" }
-        eco: [-DBINARY_PACKAGE_BUILD=ON -DUSE_XMLLINT=OFF]
+        eco: [-DBINARY_PACKAGE_BUILD=ON -DBUILD_CHANNEL=nightly -DUSE_XMLLINT=OFF]
         target:
           - skiptest
         generator:
@@ -100,6 +100,12 @@ jobs:
           cmake -E make_directory "${BUILD_DIR}"
           cmake -E make_directory "${INSTALL_PREFIX}"
           $(cygpath ${SRC_DIR})/.ci/ci-script.sh
+      - name: Upload debug symbols to Sentry
+        if: ${{ success() }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          $(cygpath ${SRC_DIR})/tools/sentry-upload-symbols.sh "$(cygpath ${BUILD_DIR})"
       - name: Check if it runs
         run: |
           $(cygpath ${INSTALL_PREFIX})/bin/ansel.exe --version || true
