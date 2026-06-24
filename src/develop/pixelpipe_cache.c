@@ -44,6 +44,7 @@
 #include "control/signal.h"
 #include "develop/pixelpipe_cache.h"
 #include "develop/pixelpipe.h"
+#include "develop/supervisor.h"
 #include "common/darktable.h"
 #include "common/debug.h"
 #include "common/opencl.h"
@@ -241,7 +242,12 @@ gboolean dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_dev_pixelpipe_cache_t *cach
   }
 
   const gboolean found = !IS_NULL_PTR(cache_entry) && !cache_entry->auto_destroy;
+  const size_t found_size = found ? cache_entry->size : 0;
   dt_pthread_mutex_unlock(&cache->lock);
+
+  if(found && dt_supervisor_active()) 
+    dt_supervisor_cacheline_read(hash, found_size);
+    
   return found;
 }
 
@@ -1785,6 +1791,10 @@ static void _free_cache_entry(dt_pixel_cache_entry_t *cache_entry)
 {
   _pixel_cache_message(cache_entry, "freed", FALSE);
 
+  if(dt_supervisor_active())
+    dt_supervisor_cacheline_delete(cache_entry->hash, cache_entry->size, cache_entry->id,
+                                   cache_entry->name);
+
   if(cache_entry->data)
   {
 #ifdef HAVE_OPENCL
@@ -1941,6 +1951,8 @@ static dt_pixel_cache_entry_t *_cache_try_rekey_reuse_locked(dt_dev_pixelpipe_ca
   cache_entry->hash = new_hash;
   g_hash_table_insert(cache->entries, stolen_key, cache_entry);
 
+  if(dt_supervisor_active()) dt_supervisor_rekey(old_hash, new_hash);
+
   dt_print(DT_DEBUG_PIPECACHE,
            "[pixelpipe_cache] writable rekey old=%" PRIu64 " new=%" PRIu64 " entry=%" PRIu64 "/%" PRIu64
            " refs=%i auto=%i data=%p module=%s\n",
@@ -1994,6 +2006,10 @@ int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t h
 
     _pixelpipe_cache_finalize_entry(cache_entry, data, "found");
     if(entry) *entry = cache_entry;
+    // existing output reused: a cache hit (entry pinned by the ref above, safe to read)
+    if(dt_supervisor_active()) 
+      dt_supervisor_cacheline_read(hash, cache_entry->size);
+      
     return 0;
   }
 
@@ -2091,7 +2107,9 @@ static dt_pixel_cache_entry_t *_cache_lookup_existing(dt_dev_pixelpipe_cache_t *
   cache->queries++;
   dt_pixel_cache_entry_t *cache_entry = _non_threadsafe_cache_get_entry(cache, cache->entries, hash);
 
-  if(!IS_NULL_PTR(cache_entry))
+  const gboolean hit = !IS_NULL_PTR(cache_entry);
+  const size_t hit_size = hit ? cache_entry->size : 0;
+  if(hit)
   {
     cache->hits++;
     cache_entry->hits++;
@@ -2099,6 +2117,10 @@ static dt_pixel_cache_entry_t *_cache_lookup_existing(dt_dev_pixelpipe_cache_t *
   }
 
   dt_pthread_mutex_unlock(&cache->lock);
+
+  if(hit && dt_supervisor_active()) 
+    dt_supervisor_cacheline_read(hash, hit_size);
+
   return cache_entry;
 }
 
@@ -2557,6 +2579,8 @@ int dt_dev_pixelpipe_cache_rekey(dt_dev_pixelpipe_cache_t *cache, const uint64_t
            entry->auto_destroy, entry->data, _cache_debug_module_name());
 
   dt_pthread_mutex_unlock(&cache->lock);
+
+  if(dt_supervisor_active()) dt_supervisor_rekey(old_hash, new_hash);
   return 0;
 }
 
@@ -2567,8 +2591,74 @@ void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache)
 
   dt_print(DT_DEBUG_PIPECACHE, "[pixelpipe] cache hit rate so far: %.3f%% - size: %" G_GSIZE_FORMAT " MiB over %" G_GSIZE_FORMAT " MiB - %i items\n", 
     100. * (cache->hits) / (float)cache->queries, cache->current_memory / (1024 * 1024), 
-    cache->max_memory / (1024 * 1024), 
+    cache->max_memory / (1024 * 1024),
     g_hash_table_size(cache->entries));
+}
+
+void dt_dev_pixelpipe_cache_get_usage(dt_dev_pixelpipe_cache_t *cache, size_t *current, size_t *max)
+{
+  if(current) *current = 0;
+  if(max) *max = 0;
+  if(IS_NULL_PTR(cache)) return;
+  dt_pthread_mutex_lock(&cache->lock);
+  if(current) *current = cache->current_memory;
+  if(max) *max = cache->max_memory;
+  dt_pthread_mutex_unlock(&cache->lock);
+}
+
+GArray *dt_dev_pixelpipe_cache_get_entries_stats(dt_dev_pixelpipe_cache_t *cache)
+{
+  GArray *out = g_array_new(FALSE, FALSE, sizeof(dt_pixel_cache_stats_entry_t));
+  if(IS_NULL_PTR(cache)) return out;
+
+  dt_pthread_mutex_lock(&cache->lock);
+  GHashTableIter it;
+  gpointer key, value;
+  g_hash_table_iter_init(&it, cache->entries);
+  while(g_hash_table_iter_next(&it, &key, &value))
+  {
+    dt_pixel_cache_entry_t *e = (dt_pixel_cache_entry_t *)value;
+    if(IS_NULL_PTR(e)) continue;
+    dt_pixel_cache_stats_entry_t s = { 0 };
+    s.hash = e->hash;
+    s.size = e->size;
+    s.refcount = dt_atomic_get_int((dt_atomic_int *)&e->refcount);
+    s.hits = e->hits;
+    if(e->name) g_strlcpy(s.name, e->name, sizeof(s.name));
+
+#ifdef HAVE_OPENCL
+    // Account the OpenCL device buffers attached to this entry. trylock avoids
+    // both deadlock and racing the list against concurrent clmem mutation.
+    if(dt_pthread_mutex_trylock(&e->cl_mem_lock) == 0)
+    {
+      for(GList *l = e->cl_mem_list; l; l = g_list_next(l))
+      {
+        const dt_cache_clmem_t *c = (const dt_cache_clmem_t *)l->data;
+        if(IS_NULL_PTR(c) || IS_NULL_PTR(c->mem)) continue;
+        s.cl_count++;
+        s.cl_bytes += dt_opencl_get_mem_object_size((cl_mem)c->mem);
+      }
+      dt_pthread_mutex_unlock(&e->cl_mem_lock);
+    }
+#endif
+
+    g_array_append_val(out, s);
+  }
+  dt_pthread_mutex_unlock(&cache->lock);
+  return out;
+}
+
+size_t dt_dev_pixelpipe_cache_get_vram_total(void)
+{
+#ifdef HAVE_OPENCL
+  if(!dt_opencl_is_enabled() || IS_NULL_PTR(darktable.opencl)) return 0;
+  size_t total = 0;
+  for(int i = 0; i < darktable.opencl->num_devs; i++)
+    total += (size_t)darktable.opencl->dev[i].max_global_mem;
+  return total;
+#else
+  return 0;
+#endif
 }
 
 // clang-format off
