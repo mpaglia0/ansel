@@ -1605,20 +1605,24 @@ static void _thumbtable_drag_set_icon(dt_thumbtable_t *table, GdkDragContext *co
 {
   if(IS_NULL_PTR(table) || !table->drag_list) return;
 
-  const int32_t imgid = GPOINTER_TO_INT(table->drag_list->data);
+  const int32_t imgid = dt_control_get_mouse_over_id();
   dt_thumbnail_t *thumb = _find_thumb_by_imgid(table, imgid);
   if(IS_NULL_PTR(thumb)) return;
 
   cairo_surface_t *surface = NULL;
   int hotspot_x = 0;
   int hotspot_y = 0;
+  int width = 0;
+  int height = 0;
 
   dt_pthread_mutex_lock(&thumb->lock);
   if(thumb->img_surf && cairo_surface_get_reference_count(thumb->img_surf) > 0)
   {
     surface = cairo_surface_reference(thumb->img_surf);
-    hotspot_x = thumb->img_width / 2;
-    hotspot_y = thumb->img_height / 2;
+    width = thumb->img_width;
+    height = thumb->img_height;
+    hotspot_x = width / 2;
+    hotspot_y = height / 2;
   }
   dt_pthread_mutex_unlock(&thumb->lock);
 
@@ -1626,6 +1630,12 @@ static void _thumbtable_drag_set_icon(dt_thumbtable_t *table, GdkDragContext *co
 
   GtkWidget *image = gtk_image_new_from_surface(surface);
   cairo_surface_destroy(surface);
+  // thumb->img_width/img_height are already in logical (CSS) pixels, but GtkImage sizes itself
+  // from the surface's raw physical pixel count, ignoring its device scale: on HiDPI screens
+  // (PPD > 1) that makes the drag icon balloon to PPD× the intended size. Pin the widget to the
+  // correct logical size explicitly; the surface still paints crisply since cairo itself honors
+  // the device scale when compositing.
+  gtk_widget_set_size_request(image, width, height);
 
   gtk_widget_show(image);
   gtk_drag_set_icon_widget(context, image, hotspot_x, hotspot_y);
@@ -1636,11 +1646,16 @@ static void _event_dnd_begin(GtkWidget *widget, GdkDragContext *context, gpointe
   dt_thumbtable_t *table = (dt_thumbtable_t *)user_data;
   const int32_t imgid = dt_control_get_mouse_over_id();
 
-  if(table->mode == DT_THUMBTABLE_MODE_FILMSTRIP && imgid > 0)
+  if(table->mode == DT_THUMBTABLE_MODE_FILMSTRIP && imgid > UNKNOWN_IMAGE)
   {
     /* Views that need drags to commit the hovered image must do it before
      * dt_act_on_get_images() snapshots the payload. */
     DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_VIEWMANAGER_FILMSTRIP_DRAG_BEGIN, imgid);
+  }
+  else if(imgid > UNKNOWN_IMAGE)
+  {
+    // Ensure the image that collects the drag event is properly part of the selection
+    dt_selection_select(darktable.selection, imgid);
   }
 
   table->drag_list = dt_act_on_get_images();
@@ -2362,20 +2377,38 @@ void dt_thumbtable_set_parent(dt_thumbtable_t *table, dt_thumbtable_mode_t mode)
 {
   table->mode = mode;
   table->parent_overlay = gtk_overlay_new();
-  gtk_overlay_add_overlay(GTK_OVERLAY(table->parent_overlay), table->scroll_window);
   g_signal_connect(G_OBJECT(table->parent_overlay), "size-allocate", G_CALLBACK(_parent_overlay_size_allocate), table);
 
   if(mode == DT_THUMBTABLE_MODE_FILEMANAGER)
   {
+    // The filemanager grid overlays the center canvas and floats as an OVERLAY child so its size
+    // request stays decoupled from the panel (the outer GtkOverlay drives its allocation). It is
+    // not affected by the Wayland blank-until-hover issue below because it is the focused content
+    // of the lighttable view, not a static sibling of a continuously repainted surface.
+    gtk_overlay_add_overlay(GTK_OVERLAY(table->parent_overlay), table->scroll_window);
     gtk_widget_set_name(table->grid, "thumbtable-filemanager");
     dt_gui_add_help_link(table->grid, dt_get_help_url("lighttable_filemanager"));
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(table->scroll_window), GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
   }
   else if(mode == DT_THUMBTABLE_MODE_FILMSTRIP)
   {
+    // The filmstrip is a static sibling of the heavily, continuously repainted darkroom center.
+    // As an overlay child its own offscreen GdkWindow goes stale/blank on Wayland until a pointer
+    // event invalidates it (thumbnails only appear on hover, issue #877). Make scroll_window the
+    // overlay's MAIN child so it draws into the overlay's own window and stays painted.
+    //
+    // The main child drives the overlay's size request, which would pin the panel height to the
+    // grid and break the resize-handle shrink + _parent_overlay_size_allocate reconfigure flow
+    // (the regression seen when the grid couldn't be downsized). Counter that with the vertical
+    // EXTERNAL policy + min_content_height(1) + propagate_natural_height(FALSE) recipe so the
+    // panel can still be freely shrunk; filmstrip thumb height is derived from the panel's
+    // allocation (see dt_thumbtable_configure), not from the scrolled window's own height request.
+    gtk_container_add(GTK_CONTAINER(table->parent_overlay), table->scroll_window);
     gtk_widget_set_name(table->grid, "thumbtable-filmstrip");
     dt_gui_add_help_link(table->grid, dt_get_help_url("filmstrip"));
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(table->scroll_window), GTK_POLICY_ALWAYS, GTK_POLICY_NEVER);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(table->scroll_window), GTK_POLICY_ALWAYS, GTK_POLICY_EXTERNAL);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(table->scroll_window), 1);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(table->scroll_window), FALSE);
   }
 }
 
