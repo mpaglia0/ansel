@@ -297,11 +297,13 @@ method; the rest is somebody's taste frozen into code.
      the working profile;
   7. clamp the resulting chroma so it never exceeds the original (bleaching is
      allowed, spontaneous saturation boosts are not);
-  8. **color recovery**: blend the result's hue and chroma back toward the
-     step-3 reference by the user-controlled amount β. Hue is stored as a
-     (cos, sin) pair, so the blend is a cheap vector interpolation with no
-     trigonometry — for the small angles involved it is equivalent to walking
-     the shortest way around the color wheel;
+  8. **color recovery**: blend the result's color back toward the step-3
+     reference by the user-controlled amount β. The blend interpolates the
+     *chromaticity vectors* — each hue weighted by its own chroma — not the
+     hue angles: a bleached pixel whose output hue is numerically meaningless
+     (near-zero chroma) then contributes no direction to the mix, and opposing
+     hues mix through gray. See the note at the end of the slider section for
+     the bug that taught us this;
   9. hand the pixel to the existing filmic gamut mapping (working + export
      profiles), which fits the chosen hue into what the display can show.
 
@@ -432,6 +434,24 @@ The slider value `s ∈ [−100, +100]` (hard limits ±200, clamped) maps to:
 So `s = +100` → norm-like color fidelity; `s = 0` → **an equal mix, the
 default** (deliberately the same convention as the v7 slider, whose zero also
 means "equal mix"); `s = −100` → full film character.
+
+**The mix must be chroma-weighted** (bug found in visual testing, 2026-07: a
+blue gradient swept from −10 to +15 EV turned magenta at the default slider
+position, while both slider extremes were fine). The first implementation
+blended the two *hue angles* as unit vectors and the two chromas separately.
+But a pixel fully converged by the curve leaves it with (near-)zero chroma and
+therefore no meaningful hue — exactly achromatic pixels even get a placeholder
+hue pointing at the red axis from `pipe_RGB_to_Ych`. The unit-vector blend
+weighted that placeholder as much as the pixel's real original hue (blue +
+red placeholder → magenta), and the chroma half of the recovery then restored
+half of the original chroma *onto the wrong hue* — a saturated magenta out of
+nowhere. Endpoints never showed it: at β = 0 the garbage hue carries no chroma
+(invisible), at β = 1 it is ignored entirely. The fix blends the chromaticity
+vectors, i.e. each hue enters the mix scaled by its own chroma: meaningless
+hues carry zero weight by construction, near-antipodal hues mix through gray
+instead of through the perpendicular hue, and the aligned-hue behavior (and
+both endpoints) are numerically unchanged. Validated in the harness: bright
+blue at +6…+15 EV keeps hue 235° through the mix instead of drifting to 256°.
 
 ## Anchor constants and what the fit taught us
 

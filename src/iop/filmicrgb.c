@@ -337,8 +337,10 @@ typedef struct dt_iop_filmicrgb_data_t
   int version;
   int spline_version;
   int high_quality_reconstruction;
-  float agx_beta;   // AgX-like: hue fidelity mix [0, 1] (0 = designed drift, 1 = original hue held)
-  float agx_purity; // AgX-like: inset strength multiplier t [1, 2] along the fitted anchor ray
+  float agx_beta;     // AgX-like: chroma fidelity mix [0, 1] (0 = bleached, 1 = original chroma)
+  float agx_beta_hue; // AgX-like: hue fidelity mix [0, 1] — saturates to 1 at the slider center,
+                      // so hue recovers fully before chroma does (see commit_params)
+  float agx_purity;   // AgX-like: inset strength multiplier t [1, 2] along the fitted anchor ray
   struct dt_iop_filmic_rgb_spline_t spline DT_ALIGNED_ARRAY;
   dt_noise_distribution_t noise_distribution;
 } dt_iop_filmicrgb_data_t;
@@ -2440,6 +2442,7 @@ static inline void filmic_agx(const float *const restrict in, float *const restr
   const dt_aligned_pixel_simd_t luma_coeffs = { work_profile->matrix_in[1][0], work_profile->matrix_in[1][1],
                                                 work_profile->matrix_in[1][2], 0.f };
   const float beta = data->agx_beta;
+  const float beta_hue = data->agx_beta_hue;
 
   __OMP_PARALLEL_FOR__()
   for(size_t k = 0; k < height * width * ch; k += ch)
@@ -2459,29 +2462,37 @@ static inline void filmic_agx(const float *const restrict in, float *const restr
 
     dt_aligned_pixel_simd_t Ych_final = pipe_RGB_to_Ych_simd(pix_out, simd_matrices.input[0],
                                                              simd_matrices.input[1], simd_matrices.input[2]);
-    Ych_final[1] = fminf(Ych_original[1], Ych_final[1]);
+    // bleaching is allowed, spontaneous chroma boosts are not
+    const float chroma_final = fminf(Ych_original[1], Ych_final[1]);
 
-    // Parametric color recovery, chroma half : Ych chroma is luminance-normalized,
-    // so restoring the original c at the tone-mapped Y is saturation-invariant,
-    // i.e. norm-like (ratio-preserving) color. beta therefore spans a continuum
-    // from full per-channel character (bleach + skew, beta = 0) to norm-like
-    // color fidelity (beta = 1) while the *luminance* stays per-channel — which
-    // avoids the flattened lightness gradients of actual norm-based tone mapping.
+    // Parametric color recovery : Ych chroma is luminance-normalized, so restoring
+    // the original chromaticity at the tone-mapped Y is saturation-invariant, i.e.
+    // norm-like (ratio-preserving) color. beta therefore spans a continuum from
+    // full per-channel character (bleach + skew, beta = 0) to norm-like color
+    // fidelity (beta = 1) while the *luminance* stays per-channel — which avoids
+    // the flattened lightness gradients of actual norm-based tone mapping.
     // Overshoot near display white is clipped by the gamut mapping below, so max
     // display emission remains reachable.
-    Ych_final[1] += beta * (Ych_original[1] - Ych_final[1]);
-
-    // Parametric color recovery, hue half : gamut_mapping_simd forces the final
-    // hue to the reference one, so pre-mix the reference between the skewed hue
-    // (beta = 0, full character) and the original hue (beta = 1, full fidelity).
-    // Hue lives as a (cos, sin) pair : a renormalized lerp is a shortest-arc mix
-    // for the small angles at play here, with no trigonometry.
+    //
+    // The hue mix MUST blend the chromaticity VECTORS (chroma-weighted), not the
+    // hue angles : heavily bleached or clipped pixels leave the curve with
+    // near-zero chroma and a meaningless hue (exactly achromatic ones get the
+    // red-axis placeholder from pipe_RGB_to_Ych), and a unit-vector hue mix
+    // weights that garbage as much as the real original hue — mid-slider, a
+    // bright blue gradient swung through magenta this way. Weighted by chroma,
+    // an achromatic result contributes no direction at all.
+    // The hue and chroma use SEPARATE weights (beta_hue saturates to 1 at the
+    // slider center) : restored chroma must never arrive on a drifted hue, or
+    // the drift x chroma product peaks mid-slider as a purple band.
+    const float r_mix = beta_hue * Ych_original[1] * Ych_original[2]
+                        + (1.f - beta_hue) * chroma_final * Ych_final[2];
+    const float g_mix = beta_hue * Ych_original[1] * Ych_original[3]
+                        + (1.f - beta_hue) * chroma_final * Ych_final[3];
+    const float norm_mix = dt_fast_hypotf(g_mix, r_mix);
     dt_aligned_pixel_simd_t Ych_reference = Ych_original;
-    const float cos_mix = beta * Ych_original[2] + (1.f - beta) * Ych_final[2];
-    const float sin_mix = beta * Ych_original[3] + (1.f - beta) * Ych_final[3];
-    const float norm_mix = dt_fast_hypotf(sin_mix, cos_mix);
-    Ych_reference[2] = (norm_mix > 1e-6f) ? cos_mix / norm_mix : Ych_final[2];
-    Ych_reference[3] = (norm_mix > 1e-6f) ? sin_mix / norm_mix : Ych_final[3];
+    Ych_reference[2] = (norm_mix > 1e-9f) ? r_mix / norm_mix : Ych_original[2];
+    Ych_reference[3] = (norm_mix > 1e-9f) ? g_mix / norm_mix : Ych_original[3];
+    Ych_final[1] = beta * Ych_original[1] + (1.f - beta) * chroma_final;
 
     dt_store_simd_nontemporal(out + k,
                               gamut_mapping_simd(Ych_final, Ych_reference, output_matrix,
@@ -3256,6 +3267,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 37, sizeof(cl_mem), (void *)&outset_matrix_cl);
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 38, 4 * sizeof(float), (void *)&luma_coeffs);
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 39, sizeof(float), (void *)&d->agx_beta);
+    dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 40, sizeof(float), (void *)&d->agx_beta_hue);
 
     err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_filmic_rgb_chroma, sizes);
     if(err != CL_SUCCESS) goto error;
@@ -3914,6 +3926,15 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   // bracket — so the recovery mix, not the anchors, is the fidelity control.
   const float agx_axis = CLAMPF(p->saturation / 100.0f, -1.f, 1.f);
   d->agx_beta = 0.5f * (agx_axis + 1.f);
+  // Hue recovers FULLY by the slider center while chroma is only half-restored.
+  // The visible error is hue-drift x chroma, and the two are anti-correlated
+  // along the slider (character end : full drift but bleached ; fidelity end :
+  // full chroma but no drift), so any blend coupling them peaks mid-slider —
+  // seen as a purple band on blue gradients at the default position (visual
+  // testing, 2026-07). Decoupled, the right half of the slider is drift-free by
+  // construction and the drift character fades in only on the left half,
+  // together with the stronger bleaching it belongs to.
+  d->agx_beta_hue = CLAMPF(agx_axis + 1.f, 0.f, 1.f);
   d->agx_purity = 1.f + fmaxf(0.f, -agx_axis);
 
   d->sigma_toe = powf(d->spline.latitude_min / 3.0f, 2.0f);
@@ -5567,12 +5588,13 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
     {
       dt_bauhaus_widget_set_label(g->saturation, N_("color preservation"));
       gtk_widget_set_tooltip_text(g->saturation, _("balance between chromatic character and color fidelity.\n"
-                                                   "negative values increase the per-channel bleaching and\n"
-                                                   "hue drift (stronger 'film' character).\n"
-                                                   "positive values progressively restore the original chroma\n"
-                                                   "and hue (ratio-preserving color at per-channel lightness),\n"
+                                                   "negative values fade in the per-channel hue drifts and\n"
+                                                   "increase the bleaching (stronger 'film' character).\n"
+                                                   "positive values restore the original chroma\n"
+                                                   "(ratio-preserving color at per-channel lightness),\n"
                                                    "keeping bright legitimate colors like sunsets saturated.\n"
-                                                   "zero is an equal mix of both strategies."));
+                                                   "from zero upward, hues are already fully preserved;\n"
+                                                   "zero restores half of the original chroma."));
       gtk_widget_set_visible(GTK_WIDGET(g->preserve_color), FALSE);
     }
     else if(p->version == DT_FILMIC_COLORSCIENCE_V1 || p->version == DT_FILMIC_COLORSCIENCE_V4)
