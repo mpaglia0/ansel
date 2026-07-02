@@ -79,9 +79,16 @@ gboolean dt_datetime_exif_to_numbers(dt_datetime_t *dt, const char *exif)
   }
 
   // fallback for EXIF-like formats (YYYY:MM:DD HH:MM:SS[.sss])
-  // convert date separators to ISO form before parsing
+  // convert date separators to ISO form before parsing. Partial inputs (e.g. a bare
+  // "YYYY:MM:DD" with no time part) are padded from the origin template so the missing
+  // components default to the start of the period — g_date_time_new_from_iso8601 rejects
+  // a date without a time. We memcpy (not g_strlcpy) so the copy does NOT drop a null
+  // terminator over the template tail, which would defeat the padding. See #924 and the
+  // matching logic in dt_string_to_datetime().
   char sdt[DT_DATETIME_LENGTH] = DT_DATETIME_ORIGIN;
-  g_strlcpy(sdt, exif, sizeof(sdt));
+  size_t len = strlen(exif);
+  if(len > sizeof(sdt) - 1) len = sizeof(sdt) - 1;
+  memcpy(sdt, exif, len);
   sdt[4] = sdt[7] = '-';
   gdt = g_date_time_new_from_iso8601(sdt, darktable.utc_tz);
   if(gdt)
