@@ -355,7 +355,136 @@ restart(): peek_gui() ── hit ──▶ copy buffer, do the work
 Note: ashift (section 6) does **not** follow this lifecycle anymore; it captures its input in its own
 `process()` and resumes from `PREVIEW_PIPE_FINISHED`. The diagram describes the histogram/picker path.
 
-## 8. Known limitations / TODO
+## 8. Failure mode: a wait that is never served (issues #955, #957)
+
+Two field reports converge here: the color picker eye-dropper produces no value on
+some modules (filmicrgb, colorcalibration) while working on others (exposure, tone
+EQ) — issue #955 — and the scopes/histogram stay blank — issue #957. Both are the
+same defect: **a cache-wait whose awaited hash the pipeline never publishes**, so
+`DT_SIGNAL_CACHELINE_READY` never matches the pending record and the request "is
+never processed and never finishes." (Neither reproduces on the maintainer's
+machine, which is why the diagnosis lives in instrumentation — see below.)
+
+### The invariant the protocol depends on
+
+The retry protocol is correct **only if the hash the GUI awaits equals the hash the
+worker publishes**. Those two hashes are computed at different times, on different
+threads, by different code:
+
+- **GUI (`peek_gui`)** reads `piece->global_hash` from the *currently synchronized*
+  node graph — call it `H_gui`. It registers a pending record keyed on `H_gui` and
+  emits a `CACHE_REQUEST`.
+- **Worker (`dt_dev_pixelpipe_process`)** calls `dt_pixelpipe_get_global_hash(pipe)`,
+  which **recomputes** every piece's `global_hash` from the pipe's *current* state
+  (module params, blend/mask params, ROI, buffer descriptors, GUI states — mask
+  preview, cache bypass, color-picker request — and `runtime_data_hash()` blobs),
+  runs up to the requested piece, and publishes under that recomputed hash `H_pipe`.
+
+If any hash input changed between the GUI capture and the worker recompute,
+`H_pipe ≠ H_gui`. The worker raises `CACHELINE_READY(H_pipe)`; the manager scans the
+pending list for `hash == H_pipe`, finds only the record holding `H_gui`, and serves
+nobody. The wait stays queued; the `request_cacheline` dedup then correctly
+suppresses re-emission on every subsequent expose (to avoid a request storm), so the
+pipe is never re-asked either. Queued forever, busy cursor stuck, no cacheline.
+
+### Why it is module- and picture-dependent
+
+Enabling the eye-dropper sets `module->request_color_pick` and flags the pipe
+changed — which triggers exactly the recompute that re-derives the hashes. Whether
+that perturbs the *target module's own* `global_hash`, and whether the picker samples
+the module's **output** (needs the module's own cacheline) or only its **input**
+(needs the previous, already-stable module's cacheline), differs per module. A module
+whose picker-request or mask-preview state folds into its own `global_hash` between
+capture and publish is inherently exposed to the race; one that samples only an
+upstream cacheline is not. `runtime_data_hash()` modules (colorbalancergb,
+colorcalibration's committed data, and the filmic family's) widen the window further,
+because `piece->hash` folds committed `piece->data` the GUI thread has not committed
+yet at capture time. This is the same family as the #710 "acting crazy on some
+pictures" defects (§6): a *geometry* input to the hash (the round-vs-truncate 1px ROI
+disagreement, the portrait `flip` swap) that the two sides compute differently is
+just another way to make `H_gui ≠ H_pipe`.
+
+The scopes (issue #957) are the same failure one hop downstream: they read the
+preview backbuffer via `peek_gui(piece == NULL)`, keyed on the published
+`backbuf.hash`. If the preview pipe is itself wedged in the never-served loop (the
+picker keeps re-dirtying it, or the awaited module hash never publishes), the
+backbuffer is never refreshed and the scopes stay blank.
+
+A **secondary** way the same wait never settles, even when `H_gui == H_pipe`: an
+OpenCL device-only publish. If the worker writes the output only to vRAM and keeps it
+device-only, `peek_gui` (`preferred_devid = -1`) reports a miss on restart,
+re-requests, the pipe republishes device-only, and the loop never converges. The
+reporters saw the bug with OpenCL both on and off, so this is not the primary cause
+here, but it is the same symptom and the same instrumentation catches it (a
+served → re-queued → served cycle on one hash, the cacheline present but device-only).
+
+### Confirming it with the supervisor
+
+The cache-wait manager is now instrumented as its own supervisor domain
+(`cache-wait`, see `supervisor.md`). Each queued wait carries an `awaits` edge to the
+cacheline hash it is blocked on, so the invisible hang becomes a one-click diagnosis:
+
+1. *Help → Event supervisor*, enable **Record**, trigger the eye-dropper on the
+   stuck module.
+2. In **Timeline**, find the `cache-wait` `create` for owner `color-picker-input` /
+   `color-picker-output`; note its `awaits` hash. A run of `read` (`dedup-poll`)
+   events with no matching `delete` (`served`) is the stuck signature.
+3. Click / search the `awaits` hash. If there is **no** cacheline `create` under it,
+   but there **is** a `node` `update` + cacheline `create` for the same module under
+   a *different* hash, that is the mismatch — compare the two hashes' `params` / `roi`
+   facets to find which input diverged. The `comm -23` recipe in `supervisor.md`
+   lists every orphaned awaited hash in one shot.
+
+### Structural fix in place: serve waiters by producing node, not just by hash
+
+The exact-hash match is a fragile *primary* signal, not a safe *only* signal. The
+cache-wait manager (`dev_pixelpipe.c`) now serves a pending waiter on **either** an
+exact hash match **or** a producing-node match — which fixes every consumer that goes
+through the manager at once (color picker `input_wait`/`output_wait`, histogram
+`scope_wait`/`module_wait`/`picker_wait`, autoset `input_wait`):
+
+- Every cacheline is stamped at publish with the identity of the node that produced
+  it — `dt_pixel_cache_entry_t.producer_node_key`, a
+  `dt_supervisor_node_key(pipe_type, op, multi_priority)`. When the write lock is
+  released, `DT_SIGNAL_CACHELINE_READY` now carries **both** the published hash *and*
+  that producer key (the key is computed on the worker thread and value-copied through
+  the async signal, so no live object or evictable entry is dereferenced on the GUI
+  thread).
+- Each waiter records the producer key of the output it wants
+  (`wait->target_node_key`, set in `peek_gui()`; `INVALID` for a backbuf target, which
+  has no single producing node and therefore keeps to exact-hash).
+- `_dt_dev_pixelpipe_cache_wait_ready_callback()` serves a waiter when
+  `wait->hash == published_hash` **or** `wait->target_node_key == producer_node_key`.
+  The drift case is exactly "the awaited hash never published but the target module
+  did": the node match then serves the right consumer, and its restart re-reads the
+  module's *current* output hash and hits. The exact-hash match is kept as the fast
+  path *and* because it is a pure value comparison independent of the just-published
+  entry (which may already be evicted by the time the GUI-thread callback runs), so the
+  existing served-then-re-miss self-healing is preserved. A node-key serve is logged /
+  supervised as `served (drift: node-key)`.
+
+The color picker additionally re-samples on `DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED`
+(`_iop_color_picker_pipe_finished_callback`) as belt-and-suspenders: it also covers
+the case where the pipe finds the requested hash already cached and returns *without*
+republishing (so no `CACHELINE_READY` fires at all), because a module-only
+`CACHE_REQUEST` still queues the backbuffer continuation in `develop.c`, guaranteeing a
+`PREVIEW_PIPE_FINISHED`. It is gated on the picker still being `update_pending`, so it
+is a no-op once a sample has landed.
+
+### Remaining fix direction (design, not yet implemented)
+
+The node-key serve makes the drift *recover* rather than removing it. A backbuf waiter
+still relies on exact hash, and consumers that subscribe to `CACHELINE_READY` directly
+(the histogram's `initialscale`/`colorout` backbuf refresh triggers, toneequal,
+colorequal) still match their own captured hash and could adopt the same producer-node
+match if they prove fragile. The cleaner long-term fix removes the GUI-precomputed hash
+entirely: (a) have the worker report the actually-published hash for a given
+`CACHE_REQUEST` and match waiters on **request identity**; or (b) capture `H_gui` from
+the same synchronized graph state the worker will use, i.e. after the pending
+pipe-change is synchronized. Either breaks the strict `H_gui == H_pipe` dependency at
+the source.
+
+## 9. Known limitations / TODO
 
 - The wait manager is a process-wide singleton with a single pending list. It scales with the small
   number of concurrent GUI consumers (pickers, histogram), but there is no per-pipe partitioning;
