@@ -298,12 +298,13 @@ method; the rest is somebody's taste frozen into code.
   7. clamp the resulting chroma so it never exceeds the original (bleaching is
      allowed, spontaneous saturation boosts are not);
   8. **color recovery**: blend the result's color back toward the step-3
-     reference by the user-controlled amount β. The blend interpolates the
-     *chromaticity vectors* — each hue weighted by its own chroma — not the
-     hue angles: a bleached pixel whose output hue is numerically meaningless
-     (near-zero chroma) then contributes no direction to the mix, and opposing
-     hues mix through gray. See the note at the end of the slider section for
-     the bug that taught us this;
+     reference, with *separate* user-driven weights for hue and chroma (hue
+     recovers first — fully restored from the slider center upward). The hue
+     blend interpolates the *chromaticity vectors* — each hue weighted by its
+     own chroma — not the hue angles: a bleached pixel whose output hue is
+     numerically meaningless (near-zero chroma) then contributes no direction
+     to the mix. See the two bug notes at the end of the slider section for
+     what taught us both rules;
   9. hand the pixel to the existing filmic gamut mapping (working + export
      profiles), which fits the chosen hue into what the display can show.
 
@@ -426,14 +427,18 @@ brightness stays reachable.
 
 The slider value `s ∈ [−100, +100]` (hard limits ±200, clamped) maps to:
 
-- `β = (s + 100) / 200` — how much of the original color (chroma + hue) is
-  restored: 0 = none (full character), 1 = all of it (full fidelity);
+- `β_chroma = (s + 100) / 200` — how much of the original chroma is restored:
+  0 = none (full bleach), 1 = all of it;
+- `β_hue = clamp(s/100 + 1, 0, 1)` — how much of the original hue is restored.
+  Note it **saturates at the slider center**: from `s = 0` upward the hues are
+  already fully the original ones, and only the chroma keeps blending. The hue
+  drifts fade in on the left half only (see the second bug note below for why);
 - `t = 1 + max(0, −s)/100` — on the left half only, the inset/rotation
   strength grows up to 2× the fitted anchors (stronger bleach and drift).
 
-So `s = +100` → norm-like color fidelity; `s = 0` → **an equal mix, the
-default** (deliberately the same convention as the v7 slider, whose zero also
-means "equal mix"); `s = −100` → full film character.
+So `s = +100` → norm-like color fidelity; `s = 0` → **the default: original
+hues everywhere, half the original chroma restored** (chroma-wise the same
+"equal mix" convention as the v7 slider); `s = −100` → full film character.
 
 **The mix must be chroma-weighted** (bug found in visual testing, 2026-07: a
 blue gradient swept from −10 to +15 EV turned magenta at the default slider
@@ -452,6 +457,23 @@ hues carry zero weight by construction, near-antipodal hues mix through gray
 instead of through the perpendicular hue, and the aligned-hue behavior (and
 both endpoints) are numerically unchanged. Validated in the harness: bright
 blue at +6…+15 EV keeps hue 235° through the mix instead of drifting to 256°.
+
+**And hue must recover before chroma** (second half of the same bug, 2026-07:
+a fainter purple cast remained at the slider center after the vector-mix fix,
+still absent at both extremes). The residual mechanism is not a degenerate
+value but a property of *any* blend that couples hue and chroma recovery: the
+visible error is hue-drift × chroma, and the two are anti-correlated along the
+slider — at the character end the drift is maximal but the color is bleached
+away (pale, reads as the look); at the fidelity end the chroma is full but the
+drift is zero. Their product therefore peaks mid-slider. Measured on a true
+sRGB blue: the per-channel skew reaches +29.6° toward violet around +4…+6 EV
+while 34–84% of the chroma survives, and the coupled mix at the center left a
++8…+11° violet cast on 0.27–0.37 chroma — a visible purple band. The fix
+splits the weights: the hue weight saturates to 1 at the slider center
+(restored chroma never arrives on a drifted hue, by construction), while the
+chroma weight keeps blending linearly. Endpoints unchanged; drift on the
+fidelity half is now 0.0° by construction; the drift character fades in only
+on the left half, together with the stronger bleaching it belongs to.
 
 ## Anchor constants and what the fit taught us
 
