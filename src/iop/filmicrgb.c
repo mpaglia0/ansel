@@ -137,14 +137,12 @@ typedef enum dt_iop_filmicrgb_curve_type_t
   DT_FILMIC_CURVE_POLY_4 = 0, // $DESCRIPTION: "hard"
   DT_FILMIC_CURVE_POLY_3 = 1,  // $DESCRIPTION: "soft"
   DT_FILMIC_CURVE_RATIONAL = 2, // $DESCRIPTION: "safe"
+  // Generalized-sigmoid toe/shoulder : monotone for any setting, C1 at the
+  // transitions, exact endpoints, slope-matched power fallback on a degenerate
+  // S. Its single power per side is the CIECAM16-J appearance match (see
+  // dt_iop_filmic_rgb_compute_spline). Selectable per side like the others.
+  DT_FILMIC_CURVE_SIGMOID = 3, // $DESCRIPTION: "perceptual"
 } dt_iop_filmicrgb_curve_type_t;
-
-// Internal curve family marker for the sigmoid spline (spline v4).
-// Deliberately kept out of dt_iop_filmicrgb_curve_type_t: that enum feeds the
-// shadows/highlights comboboxes through introspection, and the sigmoid family
-// is selected through spline_version, not per side. Only ever stored in the
-// runtime dt_iop_filmic_rgb_spline_t, never in params.
-#define DT_FILMIC_CURVE_SIGMOID 3
 
 
 typedef enum dt_iop_filmicrgb_colorscience_type_t
@@ -162,7 +160,12 @@ typedef enum dt_iop_filmicrgb_spline_version_type_t
   DT_FILMIC_SPLINE_VERSION_V1 = 0, // $DESCRIPTION: "v1 (2019)"
   DT_FILMIC_SPLINE_VERSION_V2 = 1, // $DESCRIPTION: "v2 (2020)"
   DT_FILMIC_SPLINE_VERSION_V3 = 2, // $DESCRIPTION: "v3 (2021)"
-  DT_FILMIC_SPLINE_VERSION_V4 = 3, // $DESCRIPTION: "v4 (2026)"
+  // NB : the enclosed enum only sets the node GEOMETRY (how latitude/balance/
+  // contrast place the toe/shoulder nodes). The segment SHAPE between the nodes
+  // is dt_iop_filmicrgb_curve_type_t (shadows/highlights), sigmoid included.
+  // A short-lived v4 (2026) conflated the two ; a history that stored it (enum
+  // value 3, ~24h in production) falls back to v3 geometry silently — no
+  // migration, see dt_iop_filmic_rgb_compute_spline.
 } dt_iop_filmicrgb_spline_version_type_t;
 
 typedef enum dt_iop_filmicrgb_reconstruction_type_t
@@ -226,10 +229,10 @@ typedef struct dt_iop_filmicrgb_params_t
   gboolean custom_grey;                         // $DEFAULT: FALSE $DESCRIPTION: "use custom middle-gray values"
   int high_quality_reconstruction;       // $MIN: 0 $MAX: 10 $DEFAULT: 1 $DESCRIPTION: "iterations of color inpainting"
   dt_iop_filmic_noise_distribution_t noise_distribution; // $DEFAULT: DT_NOISE_POISSONIAN $DESCRIPTION: "type of noise"
-  dt_iop_filmicrgb_curve_type_t shadows; // $DEFAULT: DT_FILMIC_CURVE_RATIONAL $DESCRIPTION: "contrast in shadows"
-  dt_iop_filmicrgb_curve_type_t highlights; // $DEFAULT: DT_FILMIC_CURVE_RATIONAL $DESCRIPTION: "contrast in highlights"
+  dt_iop_filmicrgb_curve_type_t shadows; // $DEFAULT: DT_FILMIC_CURVE_SIGMOID $DESCRIPTION: "contrast in shadows"
+  dt_iop_filmicrgb_curve_type_t highlights; // $DEFAULT: DT_FILMIC_CURVE_SIGMOID $DESCRIPTION: "contrast in highlights"
   gboolean compensate_icc_black; // $DEFAULT: FALSE $DESCRIPTION: "compensate output ICC profile black point"
-  dt_iop_filmicrgb_spline_version_type_t spline_version; // $DEFAULT: DT_FILMIC_SPLINE_VERSION_V4 $DESCRIPTION: "spline handling"
+  dt_iop_filmicrgb_spline_version_type_t spline_version; // $DEFAULT: DT_FILMIC_SPLINE_VERSION_V3 $DESCRIPTION: "spline handling"
 } dt_iop_filmicrgb_params_t;
 // clang-format on
 
@@ -339,7 +342,7 @@ typedef struct dt_iop_filmicrgb_data_t
   int high_quality_reconstruction;
   float agx_beta_hue; // AgX: hue recovery mix [0, 1] — 0 at -100% (full AgX drift),
                       // 1 at +100% (original hue). Chroma is NOT user-controlled : it
-                      // follows the bracket's own kappa recovery + clamp only, because
+                      // follows the bracket's own outset recovery + clamp only, because
                       // mixing any original chroma back kinks highlight gradients.
   struct dt_iop_filmic_rgb_spline_t spline DT_ALIGNED_ARRAY;
   dt_noise_distribution_t noise_distribution;
@@ -2336,60 +2339,49 @@ static gboolean _filmic_agx_build_displaced(const dt_iop_order_iccprofile_info_t
 static void filmic_agx_prepare_bracket(const dt_iop_order_iccprofile_info_t *const work_profile,
                                        dt_colormatrix_t inset, dt_colormatrix_t outset)
 {
-  // All constants from tools/derive_filmic_agx_primaries.py, fitted against the
-  // appearance-matched default curve (contrast 1.18, latitude 10%, safe powers
-  // 1.5/9.0), drift target 0 : neutral, hue-stable character — no warm bias.
+  // All 12 constants from tools/derive_filmic_agx_primaries.py --fit-priority :
+  // a joint Nelder-Mead fine-tune of the whole bracket (per-primary inset chroma
+  // + rotation, per-primary outset chroma + rotation) started from the earlier
+  // uniform-0.25 / kappa=2 config, minimizing hue drift over the PRIORITY set
+  // (skin database + diffuse reflectances, over their tonal placements) at
+  // preserved chroma. Fitted against the appearance-matched default curve
+  // (contrast 1.18, latitude 10%, toe 1.5 / slope-matched shoulder).
   //
-  // Insets : uniform, chosen at the knee of bleach effectiveness on boundary /
-  // clipped colors (their actual job — measured irrelevant for legitimate bright
-  // colors, whose bleaching comes from the per-channel shoulder convergence).
-  static const float inset_anchor[3] = { 0.25f, 0.25f, 0.25f };
-  // Rotations : re-fitted (2026-07) for the RECOVERED-CHROMA regime. The old
-  // minimax fit drove the blue inset rotation to +24° (positivity-bound) to
-  // counter the blue->purple drift of BLEACHED pixels ; once the kappa recovery
-  // keeps those pixels saturated, that same rotation was measured to CAUSE most
-  // of the visible purple on saturated blues at +3.5..+4.5 EV (isolation probe :
-  // +13.7° with it, +1.5° without, at ~95% retained chroma). Blue is now +1°,
-  // fitted for the recovered regime : blue @+4 EV drift -0.3° (96%), green +0.5°,
-  // skin red-ward capped at -1.5° (asymmetric constraint : yellow-ward drift is
-  // acceptable on skin/sunsets, red-ward is not — visual testing), sunsets all
-  // yellow-ward. Red/green keep their production values, which protect the
-  // sunset/skin region (removing all rotations wrecks green to -25° and sunsets
-  // to +37°). Static matrices trade regions against each other — see
-  // doc/filmic-agx.md for the whack-a-mole analysis.
-  static const float rotation_anchor[3] = { -0.0436910f, +0.1621254f, +0.0189867f }; // -2.50°, +9.29°, +1.09°
-  // Outset : the inverse of the bracket built with KAPPA-scaled insets (same
-  // rotations, so they are exactly undone). An exact inverse (kappa = 1) would
-  // mandatorily bleach every color the curve touches — with the low-latitude
-  // sigmoid default that is the whole tonal range, washing out valid midtone
-  // colors (skin tones : a racial-bias issue, see doc/filmic-agx.md). kappa > 1
-  // over-expands so that priority colors (skin database + diffuse reflectances)
-  // REACH the output-chroma <= input-chroma clamp of the pixel path : the clamp
-  // then trims the recovery to exactly 1.0 per pixel, tone-adaptively, which is
-  // what makes one fixed kappa portable (post-clamp p5 >= 0.97, median = 1.000,
-  // verified over 6.5-16 EV curves by --fit-outset). Hue drift is insensitive
-  // to kappa (measured), so this stage is independent of the rotations fit.
-  // Bleaching survives where convergence dominates : specular/clipped colors
-  // (boundary endpoint ratio 0.59) and the gamut mapper near display white.
-  static const float kappa = 1.51f;
-  // Outset rotations : the inset rotations plus fitted deltas (--fit-outset).
-  // The kappa recovery re-exposes the per-channel hue drifts that bleaching used
-  // to hide, so the outset gets its own rotation set — and unlike the inset's,
-  // it is NOT bound by the log-positivity budget (it acts after the curve, where
-  // negatives are the gamut mapper's business). Fitted by chroma-weighted minimax
-  // over the sRGB gamut boundary (the priority region : legitimate diffuse and
-  // emissive content), with skin drift capped at 3° (active constraint) and the
-  // kappa recovery preserved (p5 >= 1). Peak visible skew (model, without the
-  // gamut mapper's near-white crush) : sRGB blue +17.6° -> +13.7° at +4 EV ;
-  // the residual is structural — drift is EV-dependent, static matrices cannot
-  // cancel a direction that changes along the tone axis.
-  static const float outset_rotation[3] = { -0.0355958f, +0.2275760f, +0.1084553f }; // -2.04°, +13.04°, +6.21°
+  // Hard constraints the optimizer cannot cross : skin red-ward drift <= -1.5°
+  // (asymmetric — yellow-ward is acceptable on skin/sunsets, red-ward is not, a
+  // racial-bias concern ; see doc/filmic-agx.md), skin chroma >= 92%, diffuse
+  // recovery p5 >= 0.97 (so accuracy can NOT be gamed by bleaching), inset
+  // positivity >= 0.004, conditioning <= 6.5. Result on the priority set : skin
+  // |mean| drift 2.7° -> 2.2° (worst +7.7° -> +6.6°), reflective mean 2.6° -> 2.3°
+  // — everything comfortably below the ~2-3° hue JND, with rendering character
+  // preserved (highlight chroma ~98%, unchanged greens).
+  //
+  // The inset is capped near 0.35 on purpose : the unconstrained optimum ran the
+  // bracket at ~0.55, which buys a further (sub-JND) 2.2° -> 1.4° on skin but at
+  // a VISIBLE cost — stronger highlight desaturation and the pure-green primary
+  // to +9°. Not worth an invisible accuracy gain.
+  //
+  // sRGB blue at very high EV (+5..+6, above the white point) is deliberately
+  // NOT targeted : the linear bracket cannot hold it without sacrificing skin or
+  // bleaching (both hard-vetoed above), a structural DoF limit proven by a full
+  // 12-parameter global fit — see doc/filmic-agx.md. It is left to the per-pixel
+  // Ych hue recovery, which is exact at full strength.
+  static const float inset_anchor[3]    = { 0.349959f, 0.349946f, 0.344980f };
+  static const float rotation_anchor[3] = { -0.0437436f, +0.1580839f, +0.0177711f }; // -2.51°, +9.06°, +1.02°
+  // Outset : now a PER-PRIMARY expansion, no longer a single kappa multiple of the
+  // inset. The fit found kappa-equivalent ratios { 1.31, 1.78, 1.01 } — green
+  // over-expands most (its inset pulled it furthest), blue barely recovers. Still
+  // an over-expansion (> inset) so priority colors REACH the output-chroma <=
+  // input-chroma clamp of the pixel path, which trims recovery to exactly 1.0 per
+  // pixel, tone-adaptively (what keeps it portable across dynamic ranges). Acts
+  // after the curve, so unlike the inset it is not bound by the log-positivity
+  // budget (negatives are the gamut mapper's business).
+  static const float outset_anchor[3]   = { 0.457525f, 0.621106f, 0.349832f };
+  static const float outset_rotation[3] = { -0.0346110f, +0.2086015f, +0.0753169f }; // -1.98°, +11.95°, +4.32°
 
-  const float inset_recovery[3] = { kappa * inset_anchor[0], kappa * inset_anchor[1],
-                                    kappa * inset_anchor[2] };
   dt_colormatrix_t M_recovery = { { 0.f } };
   if(!_filmic_agx_build_displaced(work_profile, inset_anchor, rotation_anchor, inset)
-     || !_filmic_agx_build_displaced(work_profile, inset_recovery, outset_rotation, M_recovery)
+     || !_filmic_agx_build_displaced(work_profile, outset_anchor, outset_rotation, M_recovery)
      || mat3SSEinv(outset, M_recovery))
   {
     // degenerate primaries : neutral bracket
@@ -2490,8 +2482,8 @@ static inline void filmic_agx(const float *const restrict in, float *const restr
     // bleaching is allowed, spontaneous chroma boosts are not
     const float chroma_final = fminf(Ych_original[1], Ych_final[1]);
 
-    // Chroma is bracket-driven ONLY : chroma_final is the outset's kappa recovery
-    // (valid diffuse colors reach the clamp = original chroma) then bleached where
+    // Chroma is bracket-driven ONLY : chroma_final is the outset's over-expansion
+    // recovery (valid diffuse colors reach the clamp = original chroma) then bleached where
     // the curve converges. The user slider does NOT recover chroma — mixing any
     // original chroma back in kinks highlight gradients (the recovered value fights
     // the bracket's smooth bleach roll-off at the min() clamp), so it was removed.
@@ -3703,71 +3695,50 @@ inline static gboolean dt_iop_filmic_rgb_compute_spline(const dt_iop_filmicrgb_p
   spline->M4[2] = 0.f;                                         // * x³
   spline->M5[2] = 0.f;                                         // * x⁴
 
-  if(p->spline_version >= DT_FILMIC_SPLINE_VERSION_V4)
+  // The "perceptual" toe and shoulder are grounded on DIFFERENT physical limits,
+  // so they are shaped differently :
+  //  - SHOULDER : slope-matched power roll-off, exponent computed at RUNTIME from
+  //    the geometry (below). Highlights have no perceptual floor, and the
+  //    lightness match is indifferent to the shoulder power (its RMS is flat, so
+  //    fitting it just rails against whatever bound you give it — an earlier fixed
+  //    7.8/9.0 sat on the JND ceiling and over-compressed the top highlight stop).
+  //    Matching the latitude slope instead is neutral and adaptive : q ~ 1 for a
+  //    low-DR studio curve (barely any roll-off), ~2.5 for a 14 EV ETTR curve
+  //    (more compression), never the "hold-then-crush" of a fixed high power.
+  //  - TOE : fixed exponent 1.5, from the CIECAM16-J appearance match with a local
+  //    JND tolerance. Shadows DO have a perceptual floor (veiling flare hides
+  //    detail below ~0.1% output), and 1.5 is the value that keeps *visible*
+  //    shadow gradients open there (the hardness power alone imposes slope 4.0 at
+  //    -6.5 EV, so the toe's job is counteracting it). Derivation :
+  //    tools/derive_filmic_default_curve.py.
+  const float sigmoid_toe_power = 1.5f;
+  const float sigmoid_slope = spline->M2[2];
+  if(p->shadows == DT_FILMIC_CURVE_SIGMOID || p->highlights == DT_FILMIC_CURVE_SIGMOID)
   {
-    // Generalized-sigmoid toe and shoulder : monotonic for any setting, C1 at the
-    // transitions, exact interpolation of the black/white endpoints, and a slope-matched
-    // power-curve fallback when the S shape degenerates (instead of a broken fit).
-    // hard/soft/safe select fixed powers per side : higher power holds the latitude
-    // slope longer then drops faster near the endpoint. Under this spline the latitude
-    // is a *tension* control (small latitude = the sigmoids own the whole transition),
-    // so preset x latitude tiles the range of contrast-transition strengths.
-    // "safe" is the CIECAM16 appearance match fitted with the latitude free and a
-    // LOCAL JND tolerance (the rendering may not turn sharper than the match does
-    // at the same exposure), for DEMANDING viewing conditions (0.1% veiling flare,
-    // dim room) : office-flare fits (0.5%) let the toe crush near-blacks because
-    // shadow differences below the flare floor are invisible to the model — caught
-    // twice in visual testing. Under 0.1% flare the fit converges to toe ~1.5
-    // (the AgX heritage value recovered from first principles) with latitude ~10%
-    // genuinely identified. "soft" halves the peak perceptual shoulder sharpness
-    // of safe, "hard" is the usable ceiling (~1.4x) ; toe powers follow the same
-    // power ratios. Shadow log-log slopes at -7 EV : soft 1.42, safe 1.19,
-    // hard 0.92 — the gamma/hardness function alone imposes slope 4.0 at -6.5 EV,
-    // so the toe's actual job is counteracting it.
-    // Derivation : tools/derive_filmic_default_curve.py (2026-07).
-    const float toe_powers[3] = { 2.1f, 1.1f, 1.5f };       // hard, soft, safe
-    const float shoulder_powers[3] = { 12.7f, 4.5f, 9.0f }; // hard, soft, safe
-    const float toe_power = toe_powers[CLAMP((int)p->shadows, 0, 2)];
-    const float shoulder_power = shoulder_powers[CLAMP((int)p->highlights, 0, 2)];
-    const float slope = spline->M2[2];
-
-    // toe : from (toe_log, toe_display) down to (0, black_display).
-    // Mirror the geometry through (0.5, 0.5) so the shoulder solver applies, then negate.
-    {
-      const float tx = spline->x[1];
-      const float ty = spline->y[1];
-      const float y0 = spline->y[0];
-      const float dx = fmaxf(1e-6f, tx);
-      const float dy = fmaxf(1e-6f, ty - y0);
-      spline->M1[0] = -filmic_sigmoid_scale(1.f, 1.f - y0, 1.f - tx, 1.f - ty, slope, toe_power);
-      spline->M2[0] = toe_power;
-      spline->M4[0] = slope * dx / dy;                // fallback power, matches slope at transition
-      spline->M3[0] = dy / powf(dx, spline->M4[0]);   // fallback coefficient
-      spline->M5[0] = (dy / dx > slope) ? 1.f : 0.f;  // chord steeper than slope : no S shape
-    }
-
-    // shoulder : from (shoulder_log, shoulder_display) up to (1, white_display)
-    {
-      const float sx = spline->x[3];
-      const float sy = spline->y[3];
-      const float y4 = spline->y[4];
-      const float dx = fmaxf(1e-6f, 1.f - sx);
-      const float dy = fmaxf(1e-6f, y4 - sy);
-      spline->M1[1] = filmic_sigmoid_scale(1.f, y4, sx, sy, slope, shoulder_power);
-      spline->M2[1] = shoulder_power;
-      spline->M4[1] = slope * dx / dy;
-      spline->M3[1] = dy / powf(dx, spline->M4[1]);
-      spline->M5[1] = (dy / dx > slope) ? 1.f : 0.f;
-    }
-
-    spline->M3[2] = spline->y[0]; // target black, used by the toe fallback
-    spline->M4[2] = spline->y[4]; // target white, used by the shoulder fallback
-    spline->type[0] = spline->type[1] = (dt_iop_filmicrgb_curve_type_t)DT_FILMIC_CURVE_SIGMOID;
-    return clamping;
+    // fallback targets, read only by the sigmoid branches of filmic_spline ; the
+    // linear-segment evaluator ignores M3[2]/M4[2], so this is harmless when the
+    // opposite side is a polynomial/rational curve.
+    spline->M3[2] = spline->y[0]; // target black
+    spline->M4[2] = spline->y[4]; // target white
   }
 
   // solve the toe part
-  if(p->shadows == DT_FILMIC_CURVE_POLY_4)
+  if(p->shadows == DT_FILMIC_CURVE_SIGMOID)
+  {
+    // from (toe_log, toe_display) down to (0, black_display) ; mirror through
+    // (0.5, 0.5) so the shoulder scale solver applies, then negate.
+    const float tx = spline->x[1];
+    const float ty = spline->y[1];
+    const float y0 = spline->y[0];
+    const float dx = fmaxf(1e-6f, tx);
+    const float dy = fmaxf(1e-6f, ty - y0);
+    spline->M1[0] = -filmic_sigmoid_scale(1.f, 1.f - y0, 1.f - tx, 1.f - ty, sigmoid_slope, sigmoid_toe_power);
+    spline->M2[0] = sigmoid_toe_power;
+    spline->M4[0] = sigmoid_slope * dx / dy;          // fallback power, matches slope at transition
+    spline->M3[0] = dy / powf(dx, spline->M4[0]);     // fallback coefficient
+    spline->M5[0] = (dy / dx > sigmoid_slope) ? 1.f : 0.f; // chord steeper than slope : no S shape
+  }
+  else if(p->shadows == DT_FILMIC_CURVE_POLY_4)
   {
     // fourth order polynom - only mode in darktable 3.0.0
     double A0[ORDER_4 * ORDER_4] = { 0.,        0.,       0.,      0., 1.,   // position in 0
@@ -3821,7 +3792,25 @@ inline static gboolean dt_iop_filmic_rgb_compute_spline(const dt_iop_filmicrgb_p
   }
 
   // solve the shoulder part
-  if(p->highlights == DT_FILMIC_CURVE_POLY_3)
+  if(p->highlights == DT_FILMIC_CURVE_SIGMOID)
+  {
+    // "perceptual" shoulder = slope-matched power roll-off from (shoulder_log,
+    // shoulder_display) to (1, white_display). y = white - c*(1-x)^q with the
+    // exponent q = slope*dx/dy chosen so the curve leaves the latitude node at
+    // *exactly* the latitude slope, then glides to white (slope -> 0 there for
+    // q > 1, which holds whenever the shoulder actually rolls off). No fixed
+    // exponent : q is the geometry, adapting to how much range is compressed.
+    // Evaluated by the sigmoid branch's power-curve path (M5[1] = 1).
+    const float sx = spline->x[3];
+    const float sy = spline->y[3];
+    const float y4 = spline->y[4];
+    const float dx = fmaxf(1e-6f, 1.f - sx);
+    const float dy = fmaxf(1e-6f, y4 - sy);
+    spline->M4[1] = sigmoid_slope * dx / dy;        // exponent q, matches latitude slope at the node
+    spline->M3[1] = dy / powf(dx, spline->M4[1]);   // coefficient so it passes through white
+    spline->M5[1] = 1.f;                            // always the slope-matched power curve
+  }
+  else if(p->highlights == DT_FILMIC_CURVE_POLY_3)
   {
     // 3rd order polynom - only mode in darktable 3.0.0
     double A1[ORDER_3 * ORDER_3] = { 1.,       1.,      1., 1.,   // position in 1
@@ -3937,7 +3926,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 
   // AgX color science : the saturation slider is a bipolar character/fidelity axis.
   // The slider recovers HUE ONLY. Chroma is never user-controlled : it is entirely
-  // the bracket's own kappa recovery + clamp (valid diffuse colors — skin tones,
+  // the bracket's own outset recovery + clamp (valid diffuse colors — skin tones,
   // product colors — reach the output <= input chroma clamp, so they keep their
   // saturation ; strongly compressed colors bleach smoothly). Mixing any original
   // chroma back on top of that kinks highlight gradients where the recovered value
@@ -5462,14 +5451,18 @@ void gui_init(dt_iop_module_t *self)
 
   // Curve type
   g->highlights = dt_bauhaus_combobox_from_params(self, "highlights");
-  gtk_widget_set_tooltip_text(g->highlights, _("choose the desired curvature of the filmic spline in highlights.\n"
-                                               "hard uses a high curvature resulting in more tonal compression.\n"
-                                               "soft uses a low curvature resulting in less tonal compression."));
+  gtk_widget_set_tooltip_text(g->highlights, _("shape of the highlights roll-off of the curve.\n"
+                                               "perceptual (default) is a generalized sigmoid derived from a\n"
+                                               "perceptual appearance model: always smooth and monotonic.\n"
+                                               "hard/soft/safe are the legacy polynomial/rational segments;\n"
+                                               "hard compresses highlights more, soft less."));
 
   g->shadows = dt_bauhaus_combobox_from_params(self, "shadows");
-  gtk_widget_set_tooltip_text(g->shadows, _("choose the desired curvature of the filmic spline in shadows.\n"
-                                            "hard uses a high curvature resulting in more tonal compression.\n"
-                                            "soft uses a low curvature resulting in less tonal compression."));
+  gtk_widget_set_tooltip_text(g->shadows, _("shape of the shadows roll-off of the curve.\n"
+                                            "perceptual (default) is a generalized sigmoid derived from a\n"
+                                            "perceptual appearance model: always smooth and monotonic.\n"
+                                            "hard/soft/safe are the legacy polynomial/rational segments;\n"
+                                            "hard compresses shadows more, soft less."));
 
   label = dt_ui_section_label_new(_("color mapping"));
   gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
@@ -5498,15 +5491,14 @@ void gui_init(dt_iop_module_t *self)
                                 "highlights bleach toward white and hues drift as tonal compression\n"
                                 "increases, with a parametric hue recovery on the saturation slider."));
 
-  // Spline family
+  // Spline node geometry (v1-v3). The segment SHAPE, including the sigmoid, is the
+  // shadows/highlights curve type, not this control.
   g->spline_version = dt_bauhaus_combobox_from_params(self, "spline_version");
   gtk_widget_set_tooltip_text(g->spline_version,
-                              _("v1 to v3 solve polynomial or rational toe and shoulder segments;\n"
-                                "polynomial curves can oscillate and lose monotonicity at high\n"
-                                "contrast or latitude.\n"
-                                "v4 uses generalized sigmoids: always monotonic, exact black and\n"
-                                "white endpoints, and a well-defined fallback when the S shape\n"
-                                "degenerates. hard/soft/safe then select the roll-off steepness."));
+                              _("how the latitude, balance and contrast place the toe and\n"
+                                "shoulder nodes of the curve (not the shape between them —\n"
+                                "that is 'contrast in shadows/highlights').\n"
+                                "v3 (2021) is recommended; v1/v2 are kept for older edits."));
 
 
   g->auto_hardness = dt_bauhaus_toggle_from_params(self, "auto_hardness");

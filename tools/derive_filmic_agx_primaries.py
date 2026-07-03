@@ -60,12 +60,12 @@ REC2020_TO_XYZ_D50 = np.array([
 
 # filmic defaults the anchors are fitted against — keep in sync with the C
 # $DEFAULT values. The curve model is shared with the appearance-match harness
-# (C-exact v3 geometry + spline v4 sigmoid).
+# (C-exact v3 node geometry + perceptual-sigmoid segments).
 from derive_filmic_default_curve import curve_factory, GREY  # noqa: E402
 
 BLACK_EV, WHITE_EV = -8.0, 4.0
-CURVE_DEFAULTS = (1.18, 10.0, 0.0, 1.5, 9.0)  # contrast, latitude %, balance %, "safe" powers
-CURVE = curve_factory(BLACK_EV, WHITE_EV, *CURVE_DEFAULTS)
+CURVE_DEFAULTS = (1.18, 10.0, 0.0, 1.5, 1.5)  # contrast, latitude %, balance %, toe power, (shoulder is slope-matched)
+CURVE = curve_factory(BLACK_EV, WHITE_EV, *CURVE_DEFAULTS, shoulder_slope_matched=True)
 
 # ---------------------------------------------------------------- color helpers
 
@@ -270,7 +270,95 @@ def main():
                          "no constant matrix pair can serve on both sides. SUPERSEDED by "
                          "--fit-outset : minimax was fit for the bleached exact-inverse regime "
                          "and its blue rotation now CAUSES purple on recovered blues.")
+    ap.add_argument("--fit-priority", action="store_true",
+                    help="CURRENT production fit. Joint Nelder-Mead fine-tune of the whole "
+                         "bracket (per-primary inset chroma + rotation, per-primary outset "
+                         "chroma + rotation = 12 params) started from the uniform-0.25 / "
+                         "kappa=2 config, minimizing hue drift over the PRIORITY set (skin "
+                         "database + diffuse reflectances) at preserved chroma. Supersedes "
+                         "--fit-outset : the outset is now a per-primary expansion, not a "
+                         "scalar kappa. Hard constraints (barriers the optimizer cannot "
+                         "cross) : skin red-ward drift <= -1.5 deg, skin chroma >= 92%, "
+                         "diffuse recovery p5 >= 0.97 (bleaching cannot game accuracy), inset "
+                         "positivity >= 0.004, conditioning <= 6.5. Inset capped at 0.35 to "
+                         "keep rendering character (the free optimum runs 0.55 for a sub-JND "
+                         "gain at a visible highlight-desaturation cost). sRGB blue at high EV "
+                         "is not targeted — a structural DoF limit, left to the Ych recovery.")
     args = ap.parse_args()
+
+    if args.fit_priority:
+        from scipy.optimize import minimize
+        y_row = REC2020_TO_XYZ_D50[1]
+
+        def place(rgb, evs):
+            lum = y_row @ rgb
+            return [rgb * (GREY * 2.0 ** e / lum) for e in evs]
+
+        # PRIORITY set : reflective/memory colors (already EV-spread) + skin database
+        refl = priority_samples()
+        skin_base = [_lab_d65_to_work(L, a + da * As, b + db * Bs)
+                     for (L, Ls, a, As, b, Bs) in _SKIN_LAB
+                     for da in (-1, 1) for db in (-1, 1)]
+        skin_base = [s for s in skin_base if s.min() > 0]
+        skin = [s for w in skin_base for s in place(w, (-1.5, -0.5, 0.5, 1.5))]
+
+        def brk(p):
+            M, _ = bracket_matrices(p[0:3], p[3:6])
+            Mo, _ = bracket_matrices(p[6:9], p[9:12])
+            return M, np.linalg.inv(Mo)
+
+        def meas(rgb, M, Mo):
+            c_o, h_o = chroma_hue(rgb_work_to_Yrg(rgb))
+            x = (np.log2(np.maximum(M @ rgb, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+            o = Mo @ np.array([CURVE(v) for v in x])
+            c_f, h_f = chroma_hue(rgb_work_to_Yrg(np.maximum(o, 1e-10)))
+            return min(c_f / max(c_o, 1e-9), 1.0), np.rad2deg(np.remainder(h_f - h_o + np.pi, 2 * np.pi) - np.pi)
+
+        BIG = 1e5
+
+        def objective(p):
+            if any(p[i] < 0.20 or p[i] > 0.35 for i in range(3)):  # inset cap : keep character
+                return BIG
+            M, Mo = brk(p)
+            if M.min() < 0.004:
+                return BIG - M.min() * 1e4
+            if max(np.linalg.cond(M), np.linalg.cond(Mo)) > 6.5:
+                return BIG
+            sdh = []
+            for s in skin:
+                cr, dh = meas(s, M, Mo)
+                if dh < -1.5 or cr < 0.92:            # skin red-ward veto + chroma floor
+                    return BIG + abs(dh) + (1 - cr) * 100
+                sdh.append(abs(dh))
+            rd = [meas(s, M, Mo) for s in refl]
+            if np.percentile([c for c, d in rd], 5) < 0.97:   # no bleaching
+                return BIG
+            rdh = [abs(d) for c, d in rd if c > 0.5]
+            return np.mean(rdh) + 0.2 * np.max(rdh) + 1.5 * np.mean(sdh)
+
+        p0 = [0.25, 0.25, 0.25, np.deg2rad(-2.50), np.deg2rad(9.29), np.deg2rad(3.11),
+              0.50, 0.50, 0.50, np.deg2rad(-2.00), np.deg2rad(11.93), np.deg2rad(5.20)]
+        res = minimize(objective, p0, method="Nelder-Mead",
+                       options={"xatol": 2e-5, "fatol": 2e-4, "maxiter": 8000, "maxfev": 12000})
+        p = res.x
+        M, Mo = brk(p)
+        sd = [meas(s, M, Mo) for s in skin]
+        rd = [meas(s, M, Mo) for s in refl]
+        sdh = [d for c, d in sd]
+        rdh = [abs(d) for c, d in rd if c > 0.5]
+        print("// fitted by tools/derive_filmic_agx_primaries.py --fit-priority (obj %.3f)" % res.fun)
+        print("// priority set : skin |mean| %.1f deg [%+.1f..%+.1f] ; reflective mean %.1f max %.1f ; cond %.1f/%.1f"
+              % (np.mean(np.abs(sdh)), min(sdh), max(sdh), np.mean(rdh), np.max(rdh),
+                 np.linalg.cond(M), np.linalg.cond(Mo)))
+        print("static const float inset_anchor[3]    = { %.6ff, %.6ff, %.6ff };" % (p[0], p[1], p[2]))
+        print("static const float rotation_anchor[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+              % (p[3], p[4], p[5], *np.rad2deg(p[3:6])))
+        print("static const float outset_anchor[3]   = { %.6ff, %.6ff, %.6ff };" % (p[6], p[7], p[8]))
+        print("static const float outset_rotation[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+              % (p[9], p[10], p[11], *np.rad2deg(p[9:12])))
+        print("// kappa-equivalent per-primary outset/inset ratios : %.3f %.3f %.3f"
+              % (p[6] / p[0], p[7] / p[1], p[8] / p[2]))
+        return
 
     insets0 = np.full(3, args.inset)
     rot0 = np.zeros(3)
@@ -384,7 +472,7 @@ def main():
               % (b4[1], 100 * b4[0], min(skd), max(skd), min(snd), max(snd)))
         print("// inset positivity min %.4f ; portability (post-clamp p5) :" % M_in.min())
         for (bl, wh, name) in ((-4.0, 2.5, "studio 6.5EV"), (-8.0, 4.0, "default 12EV"), (-10.0, 6.0, "HDR 16EV")):
-            c = curve_factory(bl, wh, *CURVE_DEFAULTS)
+            c = curve_factory(bl, wh, *CURVE_DEFAULTS, shoulder_slope_matched=True)
             ratios = []
             for s in samples:
                 c_o, _ = chroma_hue(rgb_work_to_Yrg(s))
