@@ -1825,8 +1825,24 @@ static void _free_cache_entry(dt_pixel_cache_entry_t *cache_entry)
       /* Host-backed OpenCL images may still dereference `cache_entry->data` asynchronously until their
         * queued work completes. We therefore wait for the owning device before releasing the host arena slot,
         * otherwise an auto-destroyed intermediate can be recycled into another module output while the GPU
-        * is still reading the previous pixels. */
-      dt_opencl_finish(dt_opencl_get_mem_context_id((cl_mem)c->mem));
+        * is still reading the previous pixels.
+        *
+        * dt_opencl_finish() flushes that device's event list, which is only thread-safe while we hold
+        * darktable.opencl->dev[devid].lock. Touching it without that lock races the eventlist/cl_mem
+        * bookkeeping of whichever pixelpipe is currently running on that device and crashes inside
+        * clWaitForEvents (issues #859, #864, #131742439 -- the 3-min GUI garbage collection timeout
+        * dt_dev_pixelpipe_cache_flush_old() owns no device lock). _free_cache_entry() also runs from LRU
+        * eviction under a live pipe that already holds this very lock, so we can neither assume we hold it
+        * nor block on it: trylock. If we acquire the device it is idle and we drain it safely; if we don't,
+        * the owner is draining it itself at the end of its run and this refcount==0 entry is not one of its
+        * live borrows, so skipping the finish is safe. */
+      const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
+      if(mem_devid >= 0 && !IS_NULL_PTR(darktable.opencl) && darktable.opencl->inited
+         && !dt_pthread_mutex_BAD_trylock(&darktable.opencl->dev[mem_devid].lock))
+      {
+        dt_opencl_finish(mem_devid);
+        dt_pthread_mutex_BAD_unlock(&darktable.opencl->dev[mem_devid].lock);
+      }
     }
     dt_pthread_mutex_unlock(&cache_entry->cl_mem_lock);
 #endif

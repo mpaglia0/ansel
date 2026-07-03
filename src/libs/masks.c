@@ -100,6 +100,11 @@ uint32_t container(dt_lib_module_t *self)
   return DT_UI_CONTAINER_PANEL_LEFT_CENTER;
 }
 
+int expandable(dt_lib_module_t *self)
+{
+  return 1;
+}
+
 int position()
 {
   return 850;
@@ -204,7 +209,9 @@ static void _lib_masks_show_blending_message(dt_lib_module_t *self, gchar *marku
   gtk_widget_set_margin_bottom(label, DT_PIXEL_APPLY_DPI(16));
   gtk_widget_set_sensitive(label, FALSE);
   gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, FALSE, 0);
-  gtk_widget_show_all(self->widget);
+  // self->widget is the expander body: its own visibility encodes the
+  // expanded/collapsed state persisted in conf, so show only the child.
+  gtk_widget_show_all(label);
 }
 
 static void _lib_masks_blending_gui_changed_callback(gpointer instance, dt_lib_module_t *self)
@@ -249,9 +256,11 @@ static void _lib_masks_blending_gui_changed_callback(gpointer instance, dt_lib_m
 
   if(!lm->hosted_module) _lib_masks_clear_blending_box(self);
 
+  // dt_iop_gui_init_blending_body() shows the children it packs; don't show
+  // self->widget itself, it is the expander body whose visibility encodes the
+  // expanded/collapsed state persisted in conf.
   dt_iop_gui_init_blending_body(self->widget, module);
   lm->hosted_module = module;
-  gtk_widget_show(self->widget);
 
   dt_iop_gui_update_blending(module);
 }

@@ -1571,7 +1571,9 @@ static gchar *get_query_string(const dt_collection_properties_t property, const 
       else if((strcmp(operator, "=") == 0 || strcmp(operator, "") == 0) && number1 && number2)
         query = g_strdup_printf("((%s >= %" G_GINT64_FORMAT ") AND (%s <= %" G_GINT64_FORMAT "))", colname, nb1, colname, nb2);
       else if(strcmp(operator, "<>") == 0 && number1 && number2)
-        query = g_strdup_printf("((%s < %" G_GINT64_FORMAT ") AND (%s > %" G_GINT64_FORMAT "))", colname, nb1, colname, nb2);
+        // a date/period spans the range [nb1;nb2]; "not equal" means anything OUTSIDE it
+        // (before its start OR after its end). AND here would be unsatisfiable (nb1 < nb2).
+        query = g_strdup_printf("((%s < %" G_GINT64_FORMAT ") OR (%s > %" G_GINT64_FORMAT "))", colname, nb1, colname, nb2);
       else if(number1)
         query = g_strdup_printf("(%s %s %" G_GINT64_FORMAT ")", colname, operator, nb1);
       else

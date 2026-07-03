@@ -139,6 +139,13 @@ typedef enum dt_iop_filmicrgb_curve_type_t
   DT_FILMIC_CURVE_RATIONAL = 2, // $DESCRIPTION: "safe"
 } dt_iop_filmicrgb_curve_type_t;
 
+// Internal curve family marker for the sigmoid spline (spline v4).
+// Deliberately kept out of dt_iop_filmicrgb_curve_type_t: that enum feeds the
+// shadows/highlights comboboxes through introspection, and the sigmoid family
+// is selected through spline_version, not per side. Only ever stored in the
+// runtime dt_iop_filmic_rgb_spline_t, never in params.
+#define DT_FILMIC_CURVE_SIGMOID 3
+
 
 typedef enum dt_iop_filmicrgb_colorscience_type_t
 {
@@ -147,6 +154,7 @@ typedef enum dt_iop_filmicrgb_colorscience_type_t
   DT_FILMIC_COLORSCIENCE_V3 = 2, // $DESCRIPTION: "v5 (2021)"
   DT_FILMIC_COLORSCIENCE_V4 = 3, // $DESCRIPTION: "v6 (2022)"
   DT_FILMIC_COLORSCIENCE_V5 = 4, // $DESCRIPTION: "v7 (2023)"
+  DT_FILMIC_COLORSCIENCE_V6 = 5, // $DESCRIPTION: "v8 (AgX-like)"
 } dt_iop_filmicrgb_colorscience_type_t;
 
 typedef enum dt_iop_filmicrgb_spline_version_type_t
@@ -154,6 +162,7 @@ typedef enum dt_iop_filmicrgb_spline_version_type_t
   DT_FILMIC_SPLINE_VERSION_V1 = 0, // $DESCRIPTION: "v1 (2019)"
   DT_FILMIC_SPLINE_VERSION_V2 = 1, // $DESCRIPTION: "v2 (2020)"
   DT_FILMIC_SPLINE_VERSION_V3 = 2, // $DESCRIPTION: "v3 (2021)"
+  DT_FILMIC_SPLINE_VERSION_V4 = 3, // $DESCRIPTION: "v4 (2026)"
 } dt_iop_filmicrgb_spline_version_type_t;
 
 typedef enum dt_iop_filmicrgb_reconstruction_type_t
@@ -206,7 +215,7 @@ typedef struct dt_iop_filmicrgb_params_t
   float black_point_target; // $MIN: 0.000 $MAX: 20.000 $DEFAULT: 0.01517634 $DESCRIPTION: "target black luminance"
   float white_point_target; // $MIN: 0 $MAX: 1600 $DEFAULT: 100 $DESCRIPTION: "target white luminance"
   float output_power;       // $MIN: 1 $MAX: 10 $DEFAULT: 4.0 $DESCRIPTION: "hardness"
-  float latitude;           // $MIN: 0.01 $MAX: 99 $DEFAULT: 33.0
+  float latitude;           // $MIN: 0.01 $MAX: 99 $DEFAULT: 10.0
   float contrast;           // $MIN: 0 $MAX: 5 $DEFAULT: 1.18
   float saturation;         // $MIN: -200 $MAX: 200 $DEFAULT: 0 $DESCRIPTION: "extreme luminance saturation"
   float balance;            // $MIN: -50 $MAX: 50 $DEFAULT: 0.0 $DESCRIPTION: "shadows \342\206\224 highlights balance"
@@ -220,7 +229,7 @@ typedef struct dt_iop_filmicrgb_params_t
   dt_iop_filmicrgb_curve_type_t shadows; // $DEFAULT: DT_FILMIC_CURVE_RATIONAL $DESCRIPTION: "contrast in shadows"
   dt_iop_filmicrgb_curve_type_t highlights; // $DEFAULT: DT_FILMIC_CURVE_RATIONAL $DESCRIPTION: "contrast in highlights"
   gboolean compensate_icc_black; // $DEFAULT: FALSE $DESCRIPTION: "compensate output ICC profile black point"
-  dt_iop_filmicrgb_spline_version_type_t spline_version; // $DEFAULT: DT_FILMIC_SPLINE_VERSION_V3 $DESCRIPTION: "spline handling"
+  dt_iop_filmicrgb_spline_version_type_t spline_version; // $DEFAULT: DT_FILMIC_SPLINE_VERSION_V4 $DESCRIPTION: "spline handling"
 } dt_iop_filmicrgb_params_t;
 // clang-format on
 
@@ -276,6 +285,7 @@ typedef struct dt_iop_filmicrgb_gui_data_t
   GtkWidget *autoset_display_gamma;
   GtkWidget *shadows, *highlights;
   GtkWidget *version;
+  GtkWidget *spline_version;
   GtkWidget *auto_hardness;
   GtkWidget *custom_grey;
   GtkWidget *high_quality_reconstruction;
@@ -327,6 +337,10 @@ typedef struct dt_iop_filmicrgb_data_t
   int version;
   int spline_version;
   int high_quality_reconstruction;
+  float agx_beta;     // AgX-like: chroma fidelity mix [0, 1] (0 = bleached, 1 = original chroma)
+  float agx_beta_hue; // AgX-like: hue fidelity mix [0, 1] — saturates to 1 at the slider center,
+                      // so hue recovers fully before chroma does (see commit_params)
+  float agx_purity;   // AgX-like: inset strength multiplier t [1, 2] along the fitted anchor ray
   struct dt_iop_filmic_rgb_spline_t spline DT_ALIGNED_ARRAY;
   dt_noise_distribution_t noise_distribution;
 } dt_iop_filmicrgb_data_t;
@@ -1009,7 +1023,26 @@ filmic_spline(const float x, const dt_aligned_pixel_t M1, const dt_aligned_pixel
   if(x < latitude_min)
   {
     // toe
-    if(type[0] == DT_FILMIC_CURVE_POLY_4)
+    if(type[0] == DT_FILMIC_CURVE_SIGMOID)
+    {
+      // sigmoid packing : M1 = scale (negative), M2 = power,
+      // M3/M4 = slope-matched power-curve fallback coeff/power, M5 = fallback flag,
+      // M3[2]/M4[2] = target black/white.
+      if(M5[0] != 0.f)
+      {
+        // the S shape is degenerate (chord to black steeper than the latitude slope) :
+        // use a convex, slope-matched power curve down to target black
+        result = M3[2] + fmaxf(0.f, M3[0] * powf(fmaxf(x, 0.f), M4[0]));
+      }
+      else
+      {
+        // generalized sigmoid u/(1 + u^p)^(1/p), C1 at the transition, exact at (0, target black)
+        const float ty = latitude_min * M2[2] + M1[2];
+        const float u = M2[2] * (x - latitude_min) / M1[0]; // M1[0] < 0 so u >= 0
+        result = M1[0] * (u / powf(1.f + powf(u, M2[0]), 1.f / M2[0])) + ty;
+      }
+    }
+    else if(type[0] == DT_FILMIC_CURVE_POLY_4)
     {
       // polynomial toe, 4th order
       result = M1[0] + x * (M2[0] + x * (M3[0] + x * (M4[0] + x * M5[0])));
@@ -1030,7 +1063,22 @@ filmic_spline(const float x, const dt_aligned_pixel_t M1, const dt_aligned_pixel
   else if(x > latitude_max)
   {
     // shoulder
-    if(type[1] == DT_FILMIC_CURVE_POLY_4)
+    if(type[1] == DT_FILMIC_CURVE_SIGMOID)
+    {
+      if(M5[1] != 0.f)
+      {
+        // degenerate S shape : concave, slope-matched power curve up to target white
+        result = M4[2] - fmaxf(0.f, M3[1] * powf(fmaxf(1.f - x, 0.f), M4[1]));
+      }
+      else
+      {
+        // generalized sigmoid, C1 at the transition, exact at (1, target white)
+        const float ty = latitude_max * M2[2] + M1[2];
+        const float u = M2[2] * (x - latitude_max) / M1[1];
+        result = M1[1] * (u / powf(1.f + powf(u, M2[1]), 1.f / M2[1])) + ty;
+      }
+    }
+    else if(type[1] == DT_FILMIC_CURVE_POLY_4)
     {
       // polynomial shoulder, 4th order
       result = M1[1] + x * (M2[1] + x * (M3[1] + x * (M4[1] + x * M5[1])));
@@ -2197,6 +2245,268 @@ static inline void filmic_v5(const float *const restrict in, float *const restri
 }
 
 
+/* AgX-like rendering : per-channel tone mapping in an inset rendering space.
+ *
+ * The working-space primaries are compressed toward the white point ("inset") and
+ * rotated in the Kirk/Filmlight Yrg chromaticity plane, the filmic curve is applied
+ * per channel in that space, then the exact inverse matrix re-expands the result.
+ * The bracket couples desaturation to tonal compression (path-to-white in the
+ * shoulder, path-to-black in the toe) while being exactly transparent for pixels
+ * whose channels stay in the latitude. Hue fidelity is recovered parametrically
+ * in Ych afterwards. See doc/filmic-agx.md for the design rationale and the
+ * documented deviations from Blender/darktable AgX. */
+
+
+static inline void _filmic_agx_xyz_D50_to_Yrg(const dt_aligned_pixel_t xyz_D50, dt_aligned_pixel_t Yrg)
+{
+  dt_aligned_pixel_t xyz_D65 = { 0.f };
+  dt_aligned_pixel_t lms = { 0.f };
+  dot_product(xyz_D50, XYZ_D50_to_D65_CAT16, xyz_D65);
+  XYZ_to_LMS(xyz_D65, lms);
+  LMS_to_Yrg(lms, Yrg);
+}
+
+static inline void _filmic_agx_Yrg_to_xyz_D50(const dt_aligned_pixel_t Yrg, dt_aligned_pixel_t xyz_D50)
+{
+  dt_aligned_pixel_t lms = { 0.f };
+  dt_aligned_pixel_t xyz_D65 = { 0.f };
+  Yrg_to_LMS(Yrg, lms);
+  LMS_to_XYZ(lms, xyz_D65);
+  dot_product(xyz_D65, XYZ_D65_to_D50_CAT16, xyz_D50);
+}
+
+static inline void _mat3_identity(dt_colormatrix_t M)
+{
+  for(size_t r = 0; r < 4; r++)
+    for(size_t c = 0; c < 4; c++) M[r][c] = (r == c && r < 3) ? 1.f : 0.f;
+}
+
+static void filmic_agx_prepare_bracket(const dt_iop_order_iccprofile_info_t *const work_profile,
+                                       const float purity, dt_colormatrix_t inset, dt_colormatrix_t outset)
+{
+  // Anchor constants of the rendering space : per-primary chroma compression ("inset")
+  // and hue rotation, expressed in the Kirk/Filmlight Yrg chromaticity plane so one
+  // degree of rotation means the same perceptual hue shift for every primary.
+  // The purity param walks the ray t * anchors, t in [1, 2] : positivity and
+  // conditioning were verified over the whole ray by the fit harness.
+  // Values from tools/derive_filmic_agx_primaries.py (drift target 0 = neutral,
+  // hue-stable character — no warm bias baked in), fitted against the
+  // appearance-matched default curve (contrast 1.18, latitude 33%, safe powers
+  // 4.0/6.5) : insets are uniform at the knee of the bleach-depth curve (deeper
+  // insets saturate because the exact-inverse outset re-expands what the curve
+  // did not equalize, and the Yrg gamut mapper owns the very endpoint) ;
+  // rotations are least-squares fitted for zero-mean hue drift per EV of
+  // compression — blue sits at the +15° positivity-budget bound and counters the
+  // classic blue-toward-purple per-channel skew (worst-case drift 65° -> 48°).
+  static const float inset_anchor[3] = { 0.25f, 0.25f, 0.25f };
+  // minimax rotation refit (tools/derive_filmic_agx_primaries.py --minimax) against
+  // the appearance-matched default curve (contrast 1.18, latitude 10%, safe powers
+  // 1.5/9.0, 0.1% flare) : minimizes the WORST-CASE hue drift (23.8° floor over
+  // EV <= +3.5) instead of the mean. Minimax retained after the 2026-07
+  // unanchored-hue visual test : even with the parametric hue recovery restored on
+  // top, bounding the worst case is the better base behavior at the character end
+  // of the slider (beta -> 0). Ray positivity (t in [1, 2]) is enforced inside the
+  // fit residuals and is the active constraint on the blue rotation ; the minimax
+  // landscape is a plateau, so refits land on different but equivalent solutions.
+  static const float rotation_anchor[3] = { -0.0436910f, +0.1621254f, +0.4199733f }; // -2.50°, +9.29°, +24.06°
+
+  // working-space primaries and white point in XYZ D50 : columns of the RGB->XYZ matrix
+  dt_aligned_pixel_t white_xyz = { 0.f };
+  dt_aligned_pixel_t white_Yrg = { 0.f };
+  for(size_t r = 0; r < 3; r++)
+    for(size_t c = 0; c < 3; c++) white_xyz[r] += work_profile->matrix_in[r][c];
+  _filmic_agx_xyz_D50_to_Yrg(white_xyz, white_Yrg);
+
+  dt_colormatrix_t P_prime = { { 0.f } };
+  for(size_t i = 0; i < 3; i++)
+  {
+    const dt_aligned_pixel_t primary_xyz = { work_profile->matrix_in[0][i], work_profile->matrix_in[1][i],
+                                             work_profile->matrix_in[2][i], 0.f };
+    dt_aligned_pixel_t primary_Yrg = { 0.f };
+    _filmic_agx_xyz_D50_to_Yrg(primary_xyz, primary_Yrg);
+
+    // compress chroma toward the white point and rotate hue, at constant luminance
+    const float dr = primary_Yrg[1] - white_Yrg[1];
+    const float dg = primary_Yrg[2] - white_Yrg[2];
+    const float scale = 1.f - CLAMPF(purity * inset_anchor[i], 0.f, 0.9f);
+    const float angle = purity * rotation_anchor[i];
+    const float cos_a = cosf(angle);
+    const float sin_a = sinf(angle);
+    const dt_aligned_pixel_t displaced_Yrg = { primary_Yrg[0],
+                                               white_Yrg[1] + scale * (cos_a * dr - sin_a * dg),
+                                               white_Yrg[2] + scale * (sin_a * dr + cos_a * dg), 0.f };
+    dt_aligned_pixel_t displaced_xyz = { 0.f };
+    _filmic_agx_Yrg_to_xyz_D50(displaced_Yrg, displaced_xyz);
+    for(size_t r = 0; r < 3; r++) P_prime[r][i] = displaced_xyz[r];
+  }
+
+  // Rescale the displaced primaries so they share the working white point :
+  // solve P_prime · s = white_xyz then scale the columns by s. The bracket is then
+  // white-point preserving (rows of inset sum to 1) hence exactly transparent for
+  // achromatic pixels and, with the exact-inverse outset, for any pixel whose three
+  // channels sit in the latitude.
+  dt_colormatrix_t P_prime_inv = { { 0.f } };
+  if(mat3SSEinv(P_prime_inv, P_prime))
+  {
+    // degenerate displaced primaries : neutral bracket
+    _mat3_identity(inset);
+    _mat3_identity(outset);
+    return;
+  }
+  dt_aligned_pixel_t s = { 0.f };
+  dot_product(white_xyz, P_prime_inv, s);
+  for(size_t r = 0; r < 3; r++)
+    for(size_t c = 0; c < 3; c++) P_prime[r][c] *= s[c];
+
+  // inset = work XYZ->RGB × P_inset : its columns are the displaced primaries
+  // expressed in work RGB, i.e. a conservative (row-stochastic) channel mixer.
+  dt_colormatrix_mul(inset, work_profile->matrix_out, P_prime);
+
+  // Exact inverse : residual desaturation/drift is then strictly a function of the
+  // curve non-linearity. Baked-in midtone purity changes (Blender's partial outset)
+  // are a grading decision that belongs to color balance RGB, not the view transform.
+  if(mat3SSEinv(outset, inset))
+  {
+    _mat3_identity(inset);
+    _mat3_identity(outset);
+  }
+}
+
+static inline __attribute__((always_inline)) dt_aligned_pixel_simd_t
+filmic_agx_compress_negatives(const dt_aligned_pixel_simd_t pix, const dt_aligned_pixel_simd_t luma_coeffs)
+{
+  // Out-of-gamut or clipped input can carry negative channels that the per-channel
+  // log encoding cannot represent. Offset them to zero and rescale to preserve the
+  // working-profile luminance, compensated with the opponent color's luminance.
+  // Port of the Blender AgX luminance compensation, generalized to the working
+  // profile coefficients instead of hardcoded Rec2020.
+  const float input_y = pix[0] * luma_coeffs[0] + pix[1] * luma_coeffs[1] + pix[2] * luma_coeffs[2];
+  const float max_rgb = fmaxf(fmaxf(pix[0], pix[1]), pix[2]);
+  const float min_rgb = fminf(fminf(pix[0], pix[1]), pix[2]);
+
+  const dt_aligned_pixel_simd_t opponent = dt_simd_set1(max_rgb) - pix;
+  const float opponent_y = opponent[0] * luma_coeffs[0] + opponent[1] * luma_coeffs[1] + opponent[2] * luma_coeffs[2];
+  const float max_opponent = fmaxf(fmaxf(opponent[0], opponent[1]), opponent[2]);
+  const float y_compensated = max_opponent - opponent_y + input_y;
+
+  const float offset = fmaxf(-min_rgb, 0.f);
+  const dt_aligned_pixel_simd_t shifted = pix + dt_simd_set1(offset);
+  const float max_shifted = fmaxf(fmaxf(shifted[0], shifted[1]), shifted[2]);
+  const dt_aligned_pixel_simd_t opponent_shifted = dt_simd_set1(max_shifted) - shifted;
+  const float max_opponent_shifted
+      = fmaxf(fmaxf(opponent_shifted[0], opponent_shifted[1]), opponent_shifted[2]);
+  const float y_opponent_shifted = opponent_shifted[0] * luma_coeffs[0] + opponent_shifted[1] * luma_coeffs[1]
+                                   + opponent_shifted[2] * luma_coeffs[2];
+  float y_new
+      = shifted[0] * luma_coeffs[0] + shifted[1] * luma_coeffs[1] + shifted[2] * luma_coeffs[2];
+  y_new += max_opponent_shifted - y_opponent_shifted;
+
+  const float ratio = (y_new > y_compensated && y_new > 1e-6f) ? y_compensated / y_new : 1.f;
+  return shifted * dt_simd_set1(ratio);
+}
+
+__DT_CLONE_TARGETS__
+static inline void filmic_agx(const float *const restrict in, float *const restrict out,
+                              const dt_iop_order_iccprofile_info_t *const work_profile,
+                              const dt_iop_order_iccprofile_info_t *const export_profile,
+                              const dt_iop_filmicrgb_data_t *const data,
+                              const dt_iop_filmic_rgb_spline_t spline, const size_t width,
+                              const size_t height, const size_t ch, const float display_black,
+                              const float display_white)
+{
+  // See colorbalancergb.c for details
+  dt_colormatrix_t input_matrix;         // pipeline RGB -> LMS 2006
+  dt_colormatrix_t output_matrix;        // LMS 2006 -> pipeline RGB
+  dt_colormatrix_t export_input_matrix = { { 0.f } };  // output RGB -> LMS 2006
+  dt_colormatrix_t export_output_matrix = { { 0.f } }; // LMS 2006 -> output RGB
+
+  const int use_output_profile = filmic_v4_prepare_matrices(input_matrix, output_matrix, export_input_matrix,
+                                                            export_output_matrix, work_profile, export_profile);
+  dt_iop_filmicrgb_simd_matrices_t simd_matrices;
+  filmic_prepare_simd_matrices(input_matrix, output_matrix, export_input_matrix, export_output_matrix, &simd_matrices);
+
+  // rendering-space bracket : work RGB -> inset rendering space -> work RGB
+  dt_colormatrix_t inset = { { 0.f } };
+  dt_colormatrix_t outset = { { 0.f } };
+  filmic_agx_prepare_bracket(work_profile, data->agx_purity, inset, outset);
+  dt_colormatrix_t inset_t, outset_t;
+  transpose_3xSSE(inset, inset_t);
+  transpose_3xSSE(outset, outset_t);
+  const dt_aligned_pixel_simd_t inset0 = dt_colormatrix_row_to_simd(inset_t, 0);
+  const dt_aligned_pixel_simd_t inset1 = dt_colormatrix_row_to_simd(inset_t, 1);
+  const dt_aligned_pixel_simd_t inset2 = dt_colormatrix_row_to_simd(inset_t, 2);
+  const dt_aligned_pixel_simd_t outset0 = dt_colormatrix_row_to_simd(outset_t, 0);
+  const dt_aligned_pixel_simd_t outset1 = dt_colormatrix_row_to_simd(outset_t, 1);
+  const dt_aligned_pixel_simd_t outset2 = dt_colormatrix_row_to_simd(outset_t, 2);
+
+  const dt_aligned_pixel_simd_t luma_coeffs = { work_profile->matrix_in[1][0], work_profile->matrix_in[1][1],
+                                                work_profile->matrix_in[1][2], 0.f };
+  const float beta = data->agx_beta;
+  const float beta_hue = data->agx_beta_hue;
+
+  __OMP_PARALLEL_FOR__()
+  for(size_t k = 0; k < height * width * ch; k += ch)
+  {
+    dt_aligned_pixel_simd_t pix_in = dt_load_simd_aligned(in + k);
+    for(size_t c = 0; c < 3; c++) pix_in[c] = isnan(pix_in[c]) ? 0.f : CLAMPF(pix_in[c], -1e6f, 1e6f);
+    const dt_aligned_pixel_simd_t compressed = filmic_agx_compress_negatives(pix_in, luma_coeffs);
+
+    // the hue reference is measured after the negatives compression : before it,
+    // out-of-gamut pixels have no meaningful chromaticity
+    const dt_aligned_pixel_simd_t Ych_original = pipe_RGB_to_Ych_simd(compressed, simd_matrices.input[0],
+                                                                      simd_matrices.input[1], simd_matrices.input[2]);
+
+    dt_aligned_pixel_simd_t rendering = dt_mat3x4_mul_vec4(compressed, inset0, inset1, inset2);
+    rendering = RGB_tone_mapping_v4_simd(rendering, data, spline);
+    const dt_aligned_pixel_simd_t pix_out = dt_mat3x4_mul_vec4(rendering, outset0, outset1, outset2);
+
+    dt_aligned_pixel_simd_t Ych_final = pipe_RGB_to_Ych_simd(pix_out, simd_matrices.input[0],
+                                                             simd_matrices.input[1], simd_matrices.input[2]);
+    // bleaching is allowed, spontaneous chroma boosts are not
+    const float chroma_final = fminf(Ych_original[1], Ych_final[1]);
+
+    // Parametric color recovery : Ych chroma is luminance-normalized, so restoring
+    // the original chromaticity at the tone-mapped Y is saturation-invariant, i.e.
+    // norm-like (ratio-preserving) color. beta therefore spans a continuum from
+    // full per-channel character (bleach + skew, beta = 0) to norm-like color
+    // fidelity (beta = 1) while the *luminance* stays per-channel — which avoids
+    // the flattened lightness gradients of actual norm-based tone mapping.
+    // Overshoot near display white is clipped by the gamut mapping below, so max
+    // display emission remains reachable.
+    //
+    // The hue mix MUST blend the chromaticity VECTORS (chroma-weighted), not the
+    // hue angles : heavily bleached or clipped pixels leave the curve with
+    // near-zero chroma and a meaningless hue (exactly achromatic ones get the
+    // red-axis placeholder from pipe_RGB_to_Ych), and a unit-vector hue mix
+    // weights that garbage as much as the real original hue — mid-slider, a
+    // bright blue gradient swung through magenta this way. Weighted by chroma,
+    // an achromatic result contributes no direction at all.
+    // The hue and chroma use SEPARATE weights (beta_hue saturates to 1 at the
+    // slider center) : restored chroma must never arrive on a drifted hue, or
+    // the drift x chroma product peaks mid-slider as a purple band.
+    const float r_mix = beta_hue * Ych_original[1] * Ych_original[2]
+                        + (1.f - beta_hue) * chroma_final * Ych_final[2];
+    const float g_mix = beta_hue * Ych_original[1] * Ych_original[3]
+                        + (1.f - beta_hue) * chroma_final * Ych_final[3];
+    const float norm_mix = dt_fast_hypotf(g_mix, r_mix);
+    dt_aligned_pixel_simd_t Ych_reference = Ych_original;
+    Ych_reference[2] = (norm_mix > 1e-9f) ? r_mix / norm_mix : Ych_original[2];
+    Ych_reference[3] = (norm_mix > 1e-9f) ? g_mix / norm_mix : Ych_original[3];
+    Ych_final[1] = beta * Ych_original[1] + (1.f - beta) * chroma_final;
+
+    dt_store_simd_nontemporal(out + k,
+                              gamut_mapping_simd(Ych_final, Ych_reference, output_matrix,
+                                                 simd_matrices.input[0], simd_matrices.input[1], simd_matrices.input[2],
+                                                 simd_matrices.output[0], simd_matrices.output[1], simd_matrices.output[2],
+                                                 export_output_matrix,
+                                                 simd_matrices.export_input[0], simd_matrices.export_input[1], simd_matrices.export_input[2],
+                                                 simd_matrices.export_output[0], simd_matrices.export_output[1], simd_matrices.export_output[2],
+                                                 display_black, display_white, 0.f, use_output_profile));
+  }
+  dt_omploop_sfence();  // ensure that nontemporal writes complete before we attempt to read output
+}
+
+
 __DT_CLONE_TARGETS__
 static inline void display_mask(const float *const restrict mask, float *const restrict out,
                                 const size_t width, const size_t height)
@@ -2395,7 +2705,14 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
   const float white_display = powf(data->spline.y[4], data->output_power);
   const float black_display = powf(data->spline.y[0], data->output_power);
 
-  if(data->version == DT_FILMIC_COLORSCIENCE_V5)
+  if(data->version == DT_FILMIC_COLORSCIENCE_V6)
+  {
+    // AgX-like color science : per-channel curve in an inset rendering space with
+    // parametric Ych hue recovery. Ignores preserve_color, like v7.
+    filmic_agx(in, out, work_profile, export_profile, data, data->spline, roi_out->width,
+               roi_out->height, ch, black_display, white_display);
+  }
+  else if(data->version == DT_FILMIC_COLORSCIENCE_V5)
   {
     filmic_v5(in, out, work_profile, export_profile, data, data->spline, roi_out->width,
               roi_out->height, ch, black_display, white_display);
@@ -2705,6 +3022,24 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   cl_mem export_input_matrix_cl = NULL;
   cl_mem export_output_matrix_cl = NULL;
 
+  // AgX-like rendering-space bracket (v8 only)
+  cl_mem inset_matrix_cl = NULL;
+  cl_mem outset_matrix_cl = NULL;
+  float luma_coeffs[4] = { work_profile->matrix_in[1][0], work_profile->matrix_in[1][1],
+                           work_profile->matrix_in[1][2], 0.f };
+  if(d->version == DT_FILMIC_COLORSCIENCE_V6)
+  {
+    dt_colormatrix_t inset = { { 0.f } };
+    dt_colormatrix_t outset = { { 0.f } };
+    filmic_agx_prepare_bracket(work_profile, d->agx_purity, inset, outset);
+    float inset_3x4[12];
+    float outset_3x4[12];
+    pack_3xSSE_to_3x4(inset, inset_3x4);
+    pack_3xSSE_to_3x4(outset, outset_3x4);
+    inset_matrix_cl = dt_opencl_copy_host_to_device_constant(devid, sizeof(inset_3x4), inset_3x4);
+    outset_matrix_cl = dt_opencl_copy_host_to_device_constant(devid, sizeof(outset_3x4), outset_3x4);
+  }
+
   cl_mem dev_profile_info = NULL;
   cl_mem dev_profile_lut = NULL;
   dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;
@@ -2766,6 +3101,12 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
       err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_filmic_show_mask, sizes);
       dt_opencl_release_mem_object(mask);
       dt_ioppr_free_iccprofile_params_cl(&profile_info_cl, &profile_lut_cl, &dev_profile_info, &dev_profile_lut);
+      dt_opencl_release_mem_object(input_matrix_cl);
+      dt_opencl_release_mem_object(output_matrix_cl);
+      dt_opencl_release_mem_object(export_input_matrix_cl);
+      dt_opencl_release_mem_object(export_output_matrix_cl);
+      dt_opencl_release_mem_object(inset_matrix_cl);
+      dt_opencl_release_mem_object(outset_matrix_cl);
       return TRUE;
     }
   }
@@ -2844,7 +3185,8 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   const float white_display = powf(spline.y[4], d->output_power);
   const float black_display = powf(spline.y[0], d->output_power);
 
-  if(d->preserve_color == DT_FILMIC_METHOD_NONE && d->version != DT_FILMIC_COLORSCIENCE_V5)
+  if(d->preserve_color == DT_FILMIC_METHOD_NONE && d->version != DT_FILMIC_COLORSCIENCE_V5
+     && d->version != DT_FILMIC_COLORSCIENCE_V6)
   {
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_split, 0, sizeof(cl_mem), (void *)&in);
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_split, 1, sizeof(cl_mem), (void *)&dev_out);
@@ -2921,6 +3263,11 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 33, sizeof(float), (void *)&norm_max);
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 34, sizeof(float), (void *)&spline.y[0]);
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 35, sizeof(float), (void *)&spline.y[4]);
+    dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 36, sizeof(cl_mem), (void *)&inset_matrix_cl);
+    dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 37, sizeof(cl_mem), (void *)&outset_matrix_cl);
+    dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 38, 4 * sizeof(float), (void *)&luma_coeffs);
+    dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 39, sizeof(float), (void *)&d->agx_beta);
+    dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_chroma, 40, sizeof(float), (void *)&d->agx_beta_hue);
 
     err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_filmic_rgb_chroma, sizes);
     if(err != CL_SUCCESS) goto error;
@@ -2932,6 +3279,8 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   dt_opencl_release_mem_object(output_matrix_cl);
   dt_opencl_release_mem_object(export_input_matrix_cl);
   dt_opencl_release_mem_object(export_output_matrix_cl);
+  dt_opencl_release_mem_object(inset_matrix_cl);
+  dt_opencl_release_mem_object(outset_matrix_cl);
   return TRUE;
 
 error:
@@ -2945,6 +3294,8 @@ error:
   dt_opencl_release_mem_object(output_matrix_cl);
   dt_opencl_release_mem_object(export_input_matrix_cl);
   dt_opencl_release_mem_object(export_output_matrix_cl);
+  dt_opencl_release_mem_object(inset_matrix_cl);
+  dt_opencl_release_mem_object(outset_matrix_cl);
   dt_opencl_release_mem_object(clipped);
   dt_print(DT_DEBUG_OPENCL, "[opencl_filmicrgb] couldn't enqueue kernel! %d\n", err);
   return FALSE;
@@ -3166,6 +3517,22 @@ static void show_mask_callback(GtkToggleButton *button, GdkEventButton *event, g
 #define ORDER_4 5
 #define ORDER_3 4
 
+
+/* Solve the scale of the generalized sigmoid u / (1 + u^p)^(1/p) so the segment
+ * runs from the latitude transition point (value + slope continuity, since the
+ * sigmoid derivative is 1 at 0) and passes exactly through (limit_x, limit_y).
+ * Simplified from the AgX formulation : scale = (dy^-p - (m*dx)^-p)^(-1/p).
+ * Monotonic for any power > 0, which is the whole point of the sigmoid spline. */
+static inline float filmic_sigmoid_scale(const float limit_x, const float limit_y,
+                                         const float transition_x, const float transition_y,
+                                         const float slope, const float power)
+{
+  const float projected_rise = slope * fmaxf(1e-6f, limit_x - transition_x);
+  const float actual_rise = fmaxf(1e-6f, limit_y - transition_y);
+  const float base = fmaxf(1e-6f, powf(actual_rise, -power) - powf(projected_rise, -power));
+  return fminf(1e9f, powf(base, -1.f / power));
+}
+
 // returns true if contrast was clamped, false otherwise
 // used in GUI, to show user when contrast clamping is happening
 inline static gboolean dt_iop_filmic_rgb_compute_spline(const dt_iop_filmicrgb_params_t *const p,
@@ -3316,6 +3683,69 @@ inline static gboolean dt_iop_filmic_rgb_compute_spline(const dt_iop_filmicrgb_p
   spline->M3[2] = 0.f;                                         // * x²
   spline->M4[2] = 0.f;                                         // * x³
   spline->M5[2] = 0.f;                                         // * x⁴
+
+  if(p->spline_version >= DT_FILMIC_SPLINE_VERSION_V4)
+  {
+    // Generalized-sigmoid toe and shoulder : monotonic for any setting, C1 at the
+    // transitions, exact interpolation of the black/white endpoints, and a slope-matched
+    // power-curve fallback when the S shape degenerates (instead of a broken fit).
+    // hard/soft/safe select fixed powers per side : higher power holds the latitude
+    // slope longer then drops faster near the endpoint. Under this spline the latitude
+    // is a *tension* control (small latitude = the sigmoids own the whole transition),
+    // so preset x latitude tiles the range of contrast-transition strengths.
+    // "safe" is the CIECAM16 appearance match fitted with the latitude free and a
+    // LOCAL JND tolerance (the rendering may not turn sharper than the match does
+    // at the same exposure), for DEMANDING viewing conditions (0.1% veiling flare,
+    // dim room) : office-flare fits (0.5%) let the toe crush near-blacks because
+    // shadow differences below the flare floor are invisible to the model — caught
+    // twice in visual testing. Under 0.1% flare the fit converges to toe ~1.5
+    // (the AgX heritage value recovered from first principles) with latitude ~10%
+    // genuinely identified. "soft" halves the peak perceptual shoulder sharpness
+    // of safe, "hard" is the usable ceiling (~1.4x) ; toe powers follow the same
+    // power ratios. Shadow log-log slopes at -7 EV : soft 1.42, safe 1.19,
+    // hard 0.92 — the gamma/hardness function alone imposes slope 4.0 at -6.5 EV,
+    // so the toe's actual job is counteracting it.
+    // Derivation : tools/derive_filmic_default_curve.py (2026-07).
+    const float toe_powers[3] = { 2.1f, 1.1f, 1.5f };       // hard, soft, safe
+    const float shoulder_powers[3] = { 12.7f, 4.5f, 9.0f }; // hard, soft, safe
+    const float toe_power = toe_powers[CLAMP((int)p->shadows, 0, 2)];
+    const float shoulder_power = shoulder_powers[CLAMP((int)p->highlights, 0, 2)];
+    const float slope = spline->M2[2];
+
+    // toe : from (toe_log, toe_display) down to (0, black_display).
+    // Mirror the geometry through (0.5, 0.5) so the shoulder solver applies, then negate.
+    {
+      const float tx = spline->x[1];
+      const float ty = spline->y[1];
+      const float y0 = spline->y[0];
+      const float dx = fmaxf(1e-6f, tx);
+      const float dy = fmaxf(1e-6f, ty - y0);
+      spline->M1[0] = -filmic_sigmoid_scale(1.f, 1.f - y0, 1.f - tx, 1.f - ty, slope, toe_power);
+      spline->M2[0] = toe_power;
+      spline->M4[0] = slope * dx / dy;                // fallback power, matches slope at transition
+      spline->M3[0] = dy / powf(dx, spline->M4[0]);   // fallback coefficient
+      spline->M5[0] = (dy / dx > slope) ? 1.f : 0.f;  // chord steeper than slope : no S shape
+    }
+
+    // shoulder : from (shoulder_log, shoulder_display) up to (1, white_display)
+    {
+      const float sx = spline->x[3];
+      const float sy = spline->y[3];
+      const float y4 = spline->y[4];
+      const float dx = fmaxf(1e-6f, 1.f - sx);
+      const float dy = fmaxf(1e-6f, y4 - sy);
+      spline->M1[1] = filmic_sigmoid_scale(1.f, y4, sx, sy, slope, shoulder_power);
+      spline->M2[1] = shoulder_power;
+      spline->M4[1] = slope * dx / dy;
+      spline->M3[1] = dy / powf(dx, spline->M4[1]);
+      spline->M5[1] = (dy / dx > slope) ? 1.f : 0.f;
+    }
+
+    spline->M3[2] = spline->y[0]; // target black, used by the toe fallback
+    spline->M4[2] = spline->y[4]; // target white, used by the shoulder fallback
+    spline->type[0] = spline->type[1] = (dt_iop_filmicrgb_curve_type_t)DT_FILMIC_CURVE_SIGMOID;
+    return clamping;
+  }
 
   // solve the toe part
   if(p->shadows == DT_FILMIC_CURVE_POLY_4)
@@ -3485,6 +3915,27 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
     d->saturation = p->saturation / 100.0f;
   else
     d->saturation = (2.0f * p->saturation / 100.0f + 1.0f);
+
+  // AgX-like color science : the saturation slider becomes a bipolar character/fidelity axis
+  // with the same shape as the v7 slider (zero = equal mix of both strategies).
+  // beta mixes the color (chroma + hue in Ych) between the per-channel result (0, full
+  // bleach and drift) and the original (1, norm-like color at per-channel lightness) ;
+  // the negative half additionally scales the inset/rotation anchors up along their
+  // fitted ray for a stronger character. Bright legitimate colors (sunsets) wash through
+  // the per-channel shoulder convergence itself — measured to be independent of the
+  // bracket — so the recovery mix, not the anchors, is the fidelity control.
+  const float agx_axis = CLAMPF(p->saturation / 100.0f, -1.f, 1.f);
+  d->agx_beta = 0.5f * (agx_axis + 1.f);
+  // Hue recovers FULLY by the slider center while chroma is only half-restored.
+  // The visible error is hue-drift x chroma, and the two are anti-correlated
+  // along the slider (character end : full drift but bleached ; fidelity end :
+  // full chroma but no drift), so any blend coupling them peaks mid-slider —
+  // seen as a purple band on blue gradients at the default position (visual
+  // testing, 2026-07). Decoupled, the right half of the slider is drift-free by
+  // construction and the drift character fades in only on the left half,
+  // together with the stronger bleaching it belongs to.
+  d->agx_beta_hue = CLAMPF(agx_axis + 1.f, 0.f, 1.f);
+  d->agx_purity = 1.f + fmaxf(0.f, -agx_axis);
 
   d->sigma_toe = powf(d->spline.latitude_min / 3.0f, 2.0f);
   d->sigma_shoulder = powf((1.0f - d->spline.latitude_max) / 3.0f, 2.0f);
@@ -4970,7 +5421,10 @@ void gui_init(dt_iop_module_t *self)
                                                  "increase to make highlights brighter and less compressed.\n"
                                                  "decrease to mute highlights."));
 
-  g->toe = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(self), 0.0f, 100.0f, 0.0f, 33.0f, 2);
+  // default = latitude default (with balance 0, each direct slider equals the latitude
+  // fraction — see filmic_v3_legacy_to_direct), so double-click reset stays consistent
+  // with the params defaults (which keep latitude/balance for compatibility)
+  g->toe = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(self), 0.0f, 100.0f, 0.0f, 10.0f, 2);
   gtk_box_pack_start(GTK_BOX(self->widget), g->toe, FALSE, FALSE, 0);
   dt_bauhaus_widget_set_label(g->toe, N_("shadows"));
   dt_bauhaus_slider_set_soft_range(g->toe, 0.1f, 90.0f);
@@ -4981,7 +5435,7 @@ void gui_init(dt_iop_module_t *self)
                                 "current slope would hit the output black level."));
   g_signal_connect(G_OBJECT(g->toe), "value-changed", G_CALLBACK(toe_shoulder_callback), self);
 
-  g->shoulder = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(self), 0.0f, 100.0f, 0.0f, 33.0f, 2);
+  g->shoulder = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(self), 0.0f, 100.0f, 0.0f, 10.0f, 2);
   gtk_box_pack_start(GTK_BOX(self->widget), g->shoulder, FALSE, FALSE, 0);
   dt_bauhaus_widget_set_label(g->shoulder, N_("highlights"));
   dt_bauhaus_slider_set_soft_range(g->shoulder, 0.1f, 90.0f);
@@ -5025,7 +5479,20 @@ void gui_init(dt_iop_module_t *self)
   g->version = dt_bauhaus_combobox_from_params(self, "version");
   gtk_widget_set_tooltip_text(g->version,
                               _("v3 is darktable 3.0 desaturation method, same as color balance.\n"
-                                "v4 is a newer desaturation method, based on spectral purity of light."));
+                                "v4 is a newer desaturation method, based on spectral purity of light.\n"
+                                "v8 tone maps each RGB channel separately in an inset rendering space:\n"
+                                "highlights bleach toward white and hues drift as tonal compression\n"
+                                "increases, with a parametric hue recovery on the saturation slider."));
+
+  // Spline family
+  g->spline_version = dt_bauhaus_combobox_from_params(self, "spline_version");
+  gtk_widget_set_tooltip_text(g->spline_version,
+                              _("v1 to v3 solve polynomial or rational toe and shoulder segments;\n"
+                                "polynomial curves can oscillate and lose monotonicity at high\n"
+                                "contrast or latitude.\n"
+                                "v4 uses generalized sigmoids: always monotonic, exact black and\n"
+                                "white endpoints, and a well-defined fallback when the S shape\n"
+                                "degenerates. hard/soft/safe then select the roll-off steepness."));
 
 
   g->auto_hardness = dt_bauhaus_toggle_from_params(self, "auto_hardness");
@@ -5117,7 +5584,20 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   if(IS_NULL_PTR(w) || w == g->version)
   {
-    if(p->version == DT_FILMIC_COLORSCIENCE_V1 || p->version == DT_FILMIC_COLORSCIENCE_V4)
+    if(p->version == DT_FILMIC_COLORSCIENCE_V6)
+    {
+      dt_bauhaus_widget_set_label(g->saturation, N_("color preservation"));
+      gtk_widget_set_tooltip_text(g->saturation, _("balance between chromatic character and color fidelity.\n"
+                                                   "negative values fade in the per-channel hue drifts and\n"
+                                                   "increase the bleaching (stronger 'film' character).\n"
+                                                   "positive values restore the original chroma\n"
+                                                   "(ratio-preserving color at per-channel lightness),\n"
+                                                   "keeping bright legitimate colors like sunsets saturated.\n"
+                                                   "from zero upward, hues are already fully preserved;\n"
+                                                   "zero restores half of the original chroma."));
+      gtk_widget_set_visible(GTK_WIDGET(g->preserve_color), FALSE);
+    }
+    else if(p->version == DT_FILMIC_COLORSCIENCE_V1 || p->version == DT_FILMIC_COLORSCIENCE_V4)
     {
       dt_bauhaus_widget_set_label(g->saturation, N_("extreme luminance saturation"));
       gtk_widget_set_tooltip_text(g->saturation, _("desaturates the output of the module\n"
@@ -5140,9 +5620,9 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
       gtk_widget_set_visible(GTK_WIDGET(g->preserve_color), FALSE);
     }
 
-    if(p->version != DT_FILMIC_COLORSCIENCE_V5)
+    // v7 and v8 define their own chrominance handling and ignore preserve_color
+    if(p->version != DT_FILMIC_COLORSCIENCE_V5 && p->version != DT_FILMIC_COLORSCIENCE_V6)
       gtk_widget_set_visible(GTK_WIDGET(g->preserve_color), TRUE);
-
   }
 
   if(IS_NULL_PTR(w) || w == g->reconstruct_bloom_vs_details)

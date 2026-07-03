@@ -53,6 +53,7 @@ typedef enum dt_iop_filmicrgb_colorscience_type_t
   DT_FILMIC_COLORSCIENCE_V3 = 2,
   DT_FILMIC_COLORSCIENCE_V4 = 3,
   DT_FILMIC_COLORSCIENCE_V5 = 4,
+  DT_FILMIC_COLORSCIENCE_V6 = 5, // AgX-like
 } dt_iop_filmicrgb_colorscience_type_t;
 
 typedef enum dt_iop_filmicrgb_reconstruction_type_t
@@ -66,6 +67,7 @@ typedef enum dt_iop_filmicrgb_curve_type_t
   DT_FILMIC_CURVE_POLY_4 = 0, // $DESCRIPTION: "hard"
   DT_FILMIC_CURVE_POLY_3 = 1,  // $DESCRIPTION: "soft"
   DT_FILMIC_CURVE_RATIONAL = 2, // $DESCRIPTION: "safe"
+  DT_FILMIC_CURVE_SIGMOID = 3, // internal marker for the sigmoid spline (v4), never in params
 } dt_iop_filmicrgb_curve_type_t;
 
 kernel void
@@ -250,7 +252,25 @@ static inline float filmic_spline(const float x,
   if(x < latitude_min)
   {
     // toe
-    if(type[0] == DT_FILMIC_CURVE_POLY_4)
+    if(type[0] == DT_FILMIC_CURVE_SIGMOID)
+    {
+      // sigmoid packing : M1 = scale (negative), M2 = power,
+      // M3/M4 = slope-matched power-curve fallback coeff/power, M5 = fallback flag,
+      // M3.z/M4.z = target black/white.
+      if(M5.x != 0.f)
+      {
+        // degenerate S shape : convex, slope-matched power curve down to target black
+        result = M3.z + fmax(0.f, M3.x * native_powr(fmax(x, 0.f), M4.x));
+      }
+      else
+      {
+        // generalized sigmoid u/(1 + u^p)^(1/p), C1 at the transition, exact at (0, target black)
+        const float ty = latitude_min * M2.z + M1.z;
+        const float u = M2.z * (x - latitude_min) / M1.x; // M1.x < 0 so u >= 0
+        result = M1.x * (u / native_powr(1.f + native_powr(u, M2.x), 1.f / M2.x)) + ty;
+      }
+    }
+    else if(type[0] == DT_FILMIC_CURVE_POLY_4)
     {
       // polynomial toe, 4th order
       result = M1.x + x * (M2.x + x * (M3.x + x * (M4.x + x * M5.x)));
@@ -271,7 +291,22 @@ static inline float filmic_spline(const float x,
   else if(x > latitude_max)
   {
     // shoulder
-    if(type[1] == DT_FILMIC_CURVE_POLY_4)
+    if(type[1] == DT_FILMIC_CURVE_SIGMOID)
+    {
+      if(M5.y != 0.f)
+      {
+        // degenerate S shape : concave, slope-matched power curve up to target white
+        result = M4.z - fmax(0.f, M3.y * native_powr(fmax(1.f - x, 0.f), M4.y));
+      }
+      else
+      {
+        // generalized sigmoid, C1 at the transition, exact at (1, target white)
+        const float ty = latitude_max * M2.z + M1.z;
+        const float u = M2.z * (x - latitude_max) / M1.y;
+        result = M1.y * (u / native_powr(1.f + native_powr(u, M2.y), 1.f / M2.y)) + ty;
+      }
+    }
+    else if(type[1] == DT_FILMIC_CURVE_POLY_4)
     {
       // polynomial shoulder, 4th order
       result = M1.y + x * (M2.y + x * (M3.y + x * (M4.y + x * M5.y)));
@@ -764,6 +799,98 @@ static inline float4 filmic_chroma_v5(const float4 i,
                        display_black, display_white, 0.f, use_output_profile);
 }
 
+
+static inline float4 filmic_agx_compress_negatives(const float4 i, const float4 luma_coeffs)
+{
+  // Out-of-gamut or clipped input can carry negative channels that the per-channel
+  // log encoding cannot represent. Offset them to zero and rescale to preserve the
+  // working-profile luminance, compensated with the opponent color's luminance.
+  // Mirrors filmic_agx_compress_negatives() in filmicrgb.c.
+  const float input_y = i.x * luma_coeffs.x + i.y * luma_coeffs.y + i.z * luma_coeffs.z;
+  const float max_rgb = fmax(fmax(i.x, i.y), i.z);
+  const float min_rgb = fmin(fmin(i.x, i.y), i.z);
+
+  const float4 opponent = (float4)max_rgb - i;
+  const float opponent_y = opponent.x * luma_coeffs.x + opponent.y * luma_coeffs.y + opponent.z * luma_coeffs.z;
+  const float max_opponent = fmax(fmax(opponent.x, opponent.y), opponent.z);
+  const float y_compensated = max_opponent - opponent_y + input_y;
+
+  const float offset = fmax(-min_rgb, 0.f);
+  const float4 shifted = i + (float4)offset;
+  const float max_shifted = fmax(fmax(shifted.x, shifted.y), shifted.z);
+  const float4 opponent_shifted = (float4)max_shifted - shifted;
+  const float max_opponent_shifted = fmax(fmax(opponent_shifted.x, opponent_shifted.y), opponent_shifted.z);
+  const float y_opponent_shifted = opponent_shifted.x * luma_coeffs.x + opponent_shifted.y * luma_coeffs.y
+                                   + opponent_shifted.z * luma_coeffs.z;
+  float y_new = shifted.x * luma_coeffs.x + shifted.y * luma_coeffs.y + shifted.z * luma_coeffs.z;
+  y_new += max_opponent_shifted - y_opponent_shifted;
+
+  const float ratio = (y_new > y_compensated && y_new > 1e-6f) ? y_compensated / y_new : 1.f;
+  return shifted * (float4)ratio;
+}
+
+
+static inline float4 filmic_agx(const float4 i,
+                                const float dynamic_range, const float black_exposure, const float grey_value,
+                                const float4 M1, const float4 M2, const float4 M3, const float4 M4, const float4 M5,
+                                const float latitude_min, const float latitude_max, const float output_power,
+                                const dt_iop_filmicrgb_curve_type_t type[2],
+                                constant const float *const matrix_in, constant const float *const matrix_out,
+                                const float display_black, const float display_white,
+                                const int use_output_profile,
+                                constant const float *const export_matrix_in, constant const float *const export_matrix_out,
+                                const float y_max,
+                                constant const float *const inset_matrix, constant const float *const outset_matrix,
+                                const float4 luma_coeffs, const float beta, const float beta_hue)
+{
+  // AgX-like rendering : per-channel tone mapping in an inset rendering space.
+  // Mirrors filmic_agx() in filmicrgb.c — see doc/filmic-agx.md.
+  float4 pix = i;
+  pix.x = isnan(pix.x) ? 0.f : clamp(pix.x, -1e6f, 1e6f);
+  pix.y = isnan(pix.y) ? 0.f : clamp(pix.y, -1e6f, 1e6f);
+  pix.z = isnan(pix.z) ? 0.f : clamp(pix.z, -1e6f, 1e6f);
+
+  const float4 compressed = filmic_agx_compress_negatives(pix, luma_coeffs);
+
+  // the hue/chroma reference is measured after the negatives compression : before it,
+  // out-of-gamut pixels have no meaningful chromaticity
+  const float4 Ych_original = pipe_RGB_to_Ych(compressed, matrix_in);
+
+  // work RGB -> inset rendering space, per-channel log + curve + hardness, exact-inverse outset
+  float4 rendering = matrix_product_float4(compressed, inset_matrix);
+  rendering.x = log_tonemapping(rendering.x, grey_value, black_exposure, dynamic_range);
+  rendering.y = log_tonemapping(rendering.y, grey_value, black_exposure, dynamic_range);
+  rendering.z = log_tonemapping(rendering.z, grey_value, black_exposure, dynamic_range);
+  rendering.x = filmic_spline(rendering.x, M1, M2, M3, M4, M5, latitude_min, latitude_max, type);
+  rendering.y = filmic_spline(rendering.y, M1, M2, M3, M4, M5, latitude_min, latitude_max, type);
+  rendering.z = filmic_spline(rendering.z, M1, M2, M3, M4, M5, latitude_min, latitude_max, type);
+  rendering = native_powr(clamp(rendering, (float4)0.f, (float4)y_max), output_power);
+  const float4 pix_out = matrix_product_float4(rendering, outset_matrix);
+
+  float4 Ych_final = pipe_RGB_to_Ych(pix_out, matrix_in);
+  // bleaching is allowed, spontaneous chroma boosts are not
+  const float chroma_final = fmin(Ych_original.y, Ych_final.y);
+
+  // Parametric color recovery : the hue mix blends chromaticity VECTORS
+  // (chroma-weighted) so meaningless bleached hues carry no weight, and hue uses
+  // a SEPARATE weight (beta_hue, saturates to 1 at the slider center) so restored
+  // chroma never arrives on a drifted hue. Mirrors filmic_agx() in filmicrgb.c.
+  const float r_mix = beta_hue * Ych_original.y * Ych_original.z
+                      + (1.f - beta_hue) * chroma_final * Ych_final.z;
+  const float g_mix = beta_hue * Ych_original.y * Ych_original.w
+                      + (1.f - beta_hue) * chroma_final * Ych_final.w;
+  const float norm_mix = hypot(g_mix, r_mix);
+  float4 Ych_reference = Ych_original;
+  Ych_reference.z = (norm_mix > 1e-9f) ? r_mix / norm_mix : Ych_original.z;
+  Ych_reference.w = (norm_mix > 1e-9f) ? g_mix / norm_mix : Ych_original.w;
+  Ych_final.y = beta * Ych_original.y + (1.f - beta) * chroma_final;
+
+  return gamut_mapping(Ych_final, Ych_reference, matrix_in, matrix_out,
+                       export_matrix_in, export_matrix_out,
+                       display_black, display_white, 0.f, use_output_profile);
+}
+
+
 static inline float4 filmic_split_v1(const float4 i,
                                      const float dynamic_range, const float black_exposure, const float grey_value,
                                      constant const dt_colorspaces_iccprofile_info_cl_t *const profile_info,
@@ -899,8 +1026,9 @@ filmicrgb_split (read_only image2d_t in, write_only image2d_t out,
       break;
     }
     case DT_FILMIC_COLORSCIENCE_V5:
+    case DT_FILMIC_COLORSCIENCE_V6:
     {
-      // v5 is handled as a chroma variant, it should not end up here
+      // v5 and v8 are handled as chroma variants, they should not end up here
       o = (float4){1.f, 0.f, 0.f, 1.f};
       break;
     }
@@ -1025,7 +1153,9 @@ filmicrgb_chroma (read_only image2d_t in, write_only image2d_t out,
                  const int use_output_profile,
                  constant const float *const export_matrix_in, constant const float *const export_matrix_out,
                  const float norm_min, const float norm_max,
-                 const float y_min, const float y_max)
+                 const float y_min, const float y_max,
+                 constant const float *const inset_matrix, constant const float *const outset_matrix,
+                 const float4 luma_coeffs, const float agx_beta, const float agx_beta_hue)
 {
   const unsigned int x = get_global_id(0);
   const unsigned int y = get_global_id(1);
@@ -1077,6 +1207,15 @@ filmicrgb_chroma (read_only image2d_t in, write_only image2d_t out,
                            color_science, type, matrix_in, matrix_out, display_black, display_white,
                            use_output_profile, export_matrix_in, export_matrix_out,
                            norm_min, norm_max, y_min, y_max);
+      break;
+    }
+    case DT_FILMIC_COLORSCIENCE_V6:
+    {
+      o = filmic_agx(i, dynamic_range, black_exposure, grey_value,
+                     M1, M2, M3, M4, M5, latitude_min, latitude_max, output_power,
+                     type, matrix_in, matrix_out, display_black, display_white,
+                     use_output_profile, export_matrix_in, export_matrix_out,
+                     y_max, inset_matrix, outset_matrix, luma_coeffs, agx_beta, agx_beta_hue);
       break;
     }
   }
