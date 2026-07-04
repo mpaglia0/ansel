@@ -463,10 +463,26 @@ through the manager at once (color picker `input_wait`/`output_wait`, histogram
   existing served-then-re-miss self-healing is preserved. A node-key serve is logged /
   supervised as `served (drift: node-key)`.
 
+**The early-return that swallowed the wake-up.** The node match above only helps if a
+`CACHELINE_READY` actually fires. But `dt_dev_pixelpipe_process()` has a fast path: if
+the requested target is *already host-cached*, it returns immediately (after refreshing
+the backbuf reference for a backbuf target) **without taking a write lock**, so no
+`CACHELINE_READY` is raised. Combined with drift this is the exact "no node update,
+nothing" hang seen in the field (issue #955, color picker on filmicrgb /
+colorcalibration): the picker predicted `H_gui`, the module's output is sitting in the
+cache under `H_pipe`, the pipe finds that hit and returns, and the waiter — keyed on
+`H_gui` — is never woken even though its buffer exists. `dt_dev_pixelpipe_process()`
+now raises `CACHELINE_READY(requested_hash, producer_node_key)` on that early-return
+**when a GUI cache request was pending** (`cache_request != NONE`), so the manager's
+producer-node match serves the waiter; its restart re-reads the module's current hash
+and hits. It is gated on the pending request so ordinary cache-hit renders add no
+signal traffic. (A *device-only* cached target does not hit this path: the top-level
+peek uses host-only `devid == -1`, and `process_rec`'s fast track requires non-NULL
+host data — a device-only entry falls through and is recomputed to host, which
+publishes and signals normally.)
+
 The color picker additionally re-samples on `DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED`
-(`_iop_color_picker_pipe_finished_callback`) as belt-and-suspenders: it also covers
-the case where the pipe finds the requested hash already cached and returns *without*
-republishing (so no `CACHELINE_READY` fires at all), because a module-only
+(`_iop_color_picker_pipe_finished_callback`) as belt-and-suspenders: a module-only
 `CACHE_REQUEST` still queues the backbuffer continuation in `develop.c`, guaranteeing a
 `PREVIEW_PIPE_FINISHED`. It is gated on the picker still being `update_pending`, so it
 is a no-op once a sample has landed.

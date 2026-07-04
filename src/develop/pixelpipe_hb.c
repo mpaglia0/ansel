@@ -1447,6 +1447,27 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
   {
     if(requested_backbuf)
       _update_backbuf_cache_reference(pipe, roi, entry);
+
+    /* A GUI consumer explicitly requested this target (color picker, histogram, autoset) and is
+     * blocked on it in the cache-wait manager. The output is already host-cached, so the run stops
+     * here without ever taking a write lock — hence no DT_SIGNAL_CACHELINE_READY would fire and the
+     * waiter would hang forever, even though its buffer is right there (doc/pipeline-cache.md §8).
+     * This is the "no node update, nothing" deadlock: it bites when the hash the GUI predicted
+     * (H_gui) drifted from the one now cached (H_pipe), so the waiter never sees its exact hash and
+     * the pipe never republishes. Wake it here, carrying the producing node key so the manager's
+     * producer-node match serves the waiter even under that drift; its restart then re-reads the
+     * module's current hash and hits. Gated on an actual pending request so ordinary cache-hit
+     * renders add no signal traffic. */
+    if(cache_request != DT_DEV_PIXELPIPE_CACHE_REQUEST_NONE)
+    {
+      const uint64_t ready_node_key
+          = (!requested_backbuf && !IS_NULL_PTR(requested_piece) && !IS_NULL_PTR(requested_piece->module))
+                ? dt_supervisor_node_key(pipe->type, requested_piece->module->op,
+                                         requested_piece->module->multi_priority)
+                : DT_PIXELPIPE_CACHE_HASH_INVALID;
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_CACHELINE_READY, requested_hash,
+                                    ready_node_key);
+    }
     return 0;
   }
 

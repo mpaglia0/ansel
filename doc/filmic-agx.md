@@ -1,7 +1,7 @@
-# Filmic RGB "AgX-like" rendering — design notes
+# Filmic RGB "AgX" rendering — design notes
 
 Status: implemented (CPU + OpenCL), 2026-07.
-Code: `src/iop/filmicrgb.c` (`filmic_agx*`, sigmoid spline v4), `data/kernels/filmic.cl`
+Code: `src/iop/filmicrgb.c` (`filmic_agx*`, perceptual sigmoid curve type), `data/kernels/filmic.cl`
 (sigmoid evaluator + `filmic_agx` device function dispatched by the chroma kernel),
 `tools/derive_filmic_agx_primaries.py` (anchor fit),
 `tools/derive_filmic_default_curve.py` (default curve appearance match).
@@ -57,10 +57,10 @@ degrees", it is in this system, so the degrees mean something perceptually.
 curve, a 3×3 matrix ("inset") nudges the working primaries toward white —
 imagine gently shrinking the gamut triangle and slightly twisting it. This
 makes the per-channel curve bleach saturated colors sooner and steers the hue
-shifts. After the curve, the inverse matrix ("outset") expands everything
-back. Because our outset is the *exact* inverse, the pair is invisible
-wherever the curve is straight — its effects appear only where tones are
-actually being compressed.
+shifts. After the curve, another matrix ("outset") expands everything back —
+in Ansel deliberately a bit *more* than the inset compressed (see the
+self-recovery finding in the slider section), so that valid diffuse colors get
+their saturation back while extreme highlights stay bleached.
 
 **Gamut mapping.** The final safety net: if a pixel's color cannot exist on
 the display (out of gamut), reduce its chroma — at constant hue — until it
@@ -205,8 +205,8 @@ grounded view transform. Two claims deserve specific debunking:
   are chosen to skew brights toward yellow. That is a creative decision — a
   perfectly defensible one — hard-coded as *the* rendering and presented as a
   property of the algorithm. In Ansel the drift direction is an explicit,
-  stated input of the anchor fit (`--drift-target`, default 0 = neutral,
-  maintainer decision); a warm variant is a one-flag refit away, not an
+  stated input of the anchor fit (`--drift-target`, default 0 = neutral); 
+  a warm variant is a one-flag refit away, not an
   identity baked into the module.
 
 ### Constants from first principles, or it does not ship
@@ -275,7 +275,7 @@ method; the rest is somebody's taste frozen into code.
 
 ## Architecture in Ansel
 
-- **Color science `v8 (AgX-like)`** — a new value of
+- **Color science `v8 (AgX)`** — a new value of
   `dt_iop_filmicrgb_colorscience_type_t`. Pixel path (`filmic_agx()`), in
   plain terms:
 
@@ -293,34 +293,50 @@ method; the rest is somebody's taste frozen into code.
      will behave nicely (see the constraints section below);
   5. run each channel independently through the ordinary filmic machinery:
      log encoding → spline → hardness;
-  6. multiply by the outset matrix (the exact inverse of the inset) — back to
-     the working profile;
+  6. multiply by the outset matrix — back to the working profile. The outset
+     over-expands relative to the inset (per-primary, κ-equivalent {1.31, 1.78,
+     1.01}, jointly fitted) so
+     that valid diffuse colors — skin tones, product colors — recover their
+     chroma on their own; the clamp of step 7 trims any excess to exactly the
+     original, per pixel;
   7. clamp the resulting chroma so it never exceeds the original (bleaching is
      allowed, spontaneous saturation boosts are not);
   8. **color recovery**: blend the result's color back toward the step-3
-     reference by the user-controlled amount β. The blend interpolates the
-     *chromaticity vectors* — each hue weighted by its own chroma — not the
-     hue angles: a bleached pixel whose output hue is numerically meaningless
-     (near-zero chroma) then contributes no direction to the mix, and opposing
-     hues mix through gray. See the note at the end of the slider section for
-     the bug that taught us this;
+     reference, with *separate* user-driven weights for hue and chroma (hue
+     recovers first — fully restored from the slider center upward). The hue
+     blend interpolates the *chromaticity vectors* — each hue weighted by its
+     own chroma — not the hue angles: a bleached pixel whose output hue is
+     numerically meaningless (near-zero chroma) then contributes no direction
+     to the mix. See the two bug notes at the end of the slider section for
+     what taught us both rules;
   9. hand the pixel to the existing filmic gamut mapping (working + export
      profiles), which fits the chosen hue into what the display can show.
 
-- **Spline `v4 (2026)`** — a new value of
-  `dt_iop_filmicrgb_spline_version_type_t`, usable with *any* color science,
-  replacing the polynomial toe/shoulder segments with generalized sigmoids
-  (`u/(1+u^p)^(1/p)` — an S-shaped function whose exponent `p` sets how long it
-  hugs the straight line before rolling off). Why it is better than the
-  polynomials: it is monotone for **any** setting (polynomials can wiggle when
-  the constraints get tight — that is what the orange warnings on the filmic
-  graph were about), it passes *exactly* through the black and white endpoints,
-  it joins the latitude without a kink (C1), and when the requested geometry is
-  impossible (the straight line would have to bend backwards to reach the
-  endpoint) it degrades into a clean power curve instead of a broken fit.
-  hard/soft/safe select fixed exponents per side. Implementation detail: the
+- **Curve type `perceptual`** — a new value of
+  `dt_iop_filmicrgb_curve_type_t` (the `shadows`/`highlights` control),
+  selectable per side alongside the legacy hard/soft/safe, usable with *any*
+  color science and the default for new edits. It replaces the polynomial
+  toe/shoulder segment with a generalized sigmoid (`u/(1+u^p)^(1/p)` — an
+  S-shaped function whose exponent `p` sets how long it hugs the straight line
+  before rolling off). Why it is better than the polynomials: it is monotone
+  for **any** setting (polynomials can wiggle when the constraints get tight —
+  that is what the orange warnings on the filmic graph were about), it passes
+  *exactly* through the black and white endpoints, it joins the latitude
+  without a kink (C1), and when the requested geometry is impossible (the
+  straight line would have to bend backwards to reach the endpoint) it degrades
+  into a clean power curve instead of a broken fit. Unlike the legacy types it
+  has **one fixed exponent per side** (not hard/soft/safe): the CIECAM16-J
+  appearance match (see the default-curve section). Implementation detail: the
   sigmoid's runtime parameters travel in the unused slots of the internal
   spline coefficient vectors, so the OpenCL kernels needed no new arguments.
+
+  *History note:* this first shipped (for ~24h) mislabelled as a *spline
+  version* `v4 (2026)` — wrong, because a spline version is the node
+  *geometry* (how latitude/balance place the toe/shoulder nodes) while the
+  sigmoid is the segment *shape* between them; they are orthogonal. It was
+  moved to a curve type; the `v4` spline-version enum value was removed and any
+  history that stored it falls back to `v3` node geometry silently (no
+  migration — maintainer decision given the 24h exposure).
 
 - **Zero new params members.** `dt_iop_filmicrgb_params_t` layout and
   `DT_MODULE_INTROSPECTION` version are unchanged: two enum *values* were added
@@ -337,12 +353,16 @@ Reading the matrix that way makes every constraint easy to state:
 
 1. **Gray must stay gray** (hard constraint). The displaced primaries keep the
    same white point, which translates to `M·(1,1,1)ᵀ = (1,1,1)ᵀ` — each row of
-   the matrix sums to 1. Consequence worth appreciating: since the outset is
-   the exact inverse and the latitude part of the curve treats all channels
-   identically, the whole bracket **cancels out perfectly for any pixel whose
-   three channels sit in the latitude**. The color machinery only touches
-   pixels that are actually being tone-compressed. This is provable, not
-   hoped-for.
+   the matrix sums to 1. Historical note: an earlier design used an outset that
+   was the *exact* inverse of the inset, on the strength of a provable theorem
+   (the bracket cancels perfectly for any pixel whose three channels sit in the
+   latitude). The theorem was true and became worthless: when the default
+   latitude dropped to 10%, the sigmoid owns the whole range, the curve is
+   nonlinear everywhere, and "transparent in the latitude" protects almost no
+   pixel. The exact inverse then *mandatorily bleached every valid color* —
+   including midtone skin tones, which is a racial-bias issue, not a style (see
+   the limitations section). The production outset is therefore fitted for
+   self-recovery instead (slider section).
 2. **No negative channels** (hard constraint). The log encoding in step 5
    cannot take a negative input. `M` keeps positive pixels positive exactly
    when every displaced primary stays *inside* the working gamut triangle.
@@ -370,12 +390,12 @@ Reading the matrix that way makes every constraint easy to state:
 | 1 | Separate `agx` module (33 params, 2 notebook pages, 2845 LoC) | Filmic color science value, adds 457 LoC | Same purpose as filmic (view transform); a second tone mapper splits users and duplicates the log/curve/picker scaffolding wholesale. |
 | 2 | Base primaries selector (export/work/Rec2020/P3/AdobeRGB/sRGB) | Working profile, always | The base folds into the constants; "export profile" as a base made the render depend on an output setting while we *already* gamut-map to the export profile at the end. |
 | 3 | Primaries displaced in CIE xy, rotations in xy radians | Displaced in Kirk/Filmlight Yrg chromaticity, rotations in Yrg angle | A degree of rotation then means the same perceptual hue shift for every primary (Yrg is fitted to even Munsell hue spacing); xy radians are perceptually uneven across the wheel. |
-| 4 | Hand-tuned constants (Blender forum lineage), 12 user sliders + 2 master ratios + reverse toggle | 6 fixed anchors fitted offline by `tools/derive_filmic_agx_primaries.py`; single strength scalar at runtime | The sliders exist upstream so users can fit their own rendering space; the shipped configurations are what everyone uses. The residual empiricism moves into a stated, reproducible objective function instead of thirty floats in a params struct. Positivity coupling (constraint 2) makes one shared scalar the *safe* parameterization. |
-| 5 | Outset partially restores purity, rotations not reversed by default (Blender), separately editable (darktable) | Outset = exact inverse of the inset, not editable | With the exact inverse, desaturation/drift are strictly a function of curve nonlinearity (transparent latitude — provable, see constraints). Blender's asymmetric outset bakes midtone desaturation into the transform; in Ansel that is a grading decision and Color Balance RGB owns it. |
+| 4 | Hand-tuned constants (Blender forum lineage), 12 user sliders + 2 master ratios + reverse toggle | 12 fixed anchors (per-primary inset+outset chroma & rotation) fitted offline by `tools/derive_filmic_agx_primaries.py --fit-priority`; single strength scalar at runtime | The sliders exist upstream so users can fit their own rendering space; the shipped configurations are what everyone uses. The residual empiricism moves into a stated, reproducible objective function instead of thirty floats in a params struct. Positivity coupling (constraint 2) makes one shared scalar the *safe* parameterization. |
+| 5 | Outset partially restores purity (under-expansion: bakes midtone *desaturation* in), rotations not reversed by default (Blender), separately editable (darktable) | Outset over-expands per-primary (κ-equiv {1.31, 1.78, 1.01}), jointly fitted with the inset, not editable | Fitted so valid diffuse colors (skin database + reflectances) recover their chroma through the bracket itself, with the output≤input chroma clamp trimming the excess per pixel. Blender's under-expansion bleaches midtones by construction — the exact opposite of what skin tones need; an exact inverse was tried and retired (see constraints). |
 | 6 | Hue restore mix in **HSV** (device-space hue), default 60% | Shortest-arc hue mix in **Kirk Ych**, inside the existing gamut-mapping stage | HSV hue is not a perceptual quantity. Filmic already computes Ych per pixel and its gamut mapper reduces chroma *at constant hue*, so deciding the hue first in the same metric is both cheaper and coherent. The recovery is exact per pixel, not a first-order matrix approximation ("Abney compensation" limited only by the Yrg Munsell fit — weakest in deep blue-violet). |
 | 7 | "Look" block: lift/slope/power/saturation + brightness | Dropped | Strict subset of Color Balance RGB (lift↔shadows lift/offset, slope↔gain+contrast, brightness↔power, saturation↔saturation global), computed there in a proper perceptual space with per-range masks. |
 | 8 | Own log encoding fixed to 0.18 mid-gray, contrast renormalized to the 16.5 EV Blender range, gamma-compensated slope, `auto_gamma` | Filmic's existing log encoding, grey/DR params, contrast, `auto_hardness` | Identical math where it overlaps; the renormalizations only existed to keep Blender's slider values meaningful. Filmic's parameterization is authoritative here; no values were imported. |
-| 9 | Own pivot/toe/shoulder curve machinery (13 params) | Filmic spline geometry + sigmoid family as spline v4 | The curve DoF map 1:1 onto existing filmic params (pivot↔grey, linear ratios↔latitude+balance, curve gamma↔hardness). The genuinely new DoF — continuous toe/shoulder powers — is quantized onto hard/soft/safe, derived from the appearance match and perceptual-sharpness spacing (see the default-curve section): safe (1.5, 9.0), soft (1.1, 4.5), hard (2.1, 12.7). |
+| 9 | Own pivot/toe/shoulder curve machinery (13 params) | Filmic spline geometry + sigmoid as a new curve type ("perceptual") | The curve DoF map 1:1 onto existing filmic params (pivot↔grey, linear ratios↔latitude+balance, curve gamma↔hardness). The genuinely new DoF — the toe/shoulder roll-off shape — is not a user control: the toe is a fixed appearance-matched exponent (1.5) and the shoulder is a slope-matched power roll-off computed at runtime from the geometry (see the default-curve section). |
 | 10 | Gamut compression hardcodes Rec2020 luminance coefficients | Generalized to the working profile's Y row | Works for any matrix working profile; identical result when working in Rec2020. |
 | 11 | No output/export gamut mapping | Existing filmic Yrg gamut mapping runs after the bracket | dt AgX output can leave the export gamut freely; ours cannot. Strictly an improvement. |
 | 12 | "Read exposure from metadata" heuristics (−8+0.5·exposure …) | Not ported | Magic constants; filmic's pickers and auto-tune cover the workflow. |
@@ -390,7 +410,7 @@ image. Params/DB/styles remain structurally compatible (no migration, no
 introspection bump); only the *render* of v8-edits is undefined on old builds.
 The `preserve_color` placement would have degraded to a defined v7 render
 instead, but was rejected as semantically wrong (v8 replaces the whole color
-handling, exactly like v7 does) — maintainer decision, 2026-07.
+handling, exactly like v7 does).
 
 ## The single runtime axis (saturation slider under v8)
 
@@ -424,16 +444,40 @@ flattened local contrast; its left end gives you the full film character. Any
 overshoot near display white is caught by the gamut mapper, so peak display
 brightness stays reachable.
 
-The slider value `s ∈ [−100, +100]` (hard limits ±200, clamped) maps to:
+The slider is **hue-only**: it recovers none,
+some or all of the per-channel hue drift and never touches chroma. With
+`a = s/100 ∈ [−1, +1]`:
 
-- `β = (s + 100) / 200` — how much of the original color (chroma + hue) is
-  restored: 0 = none (full character), 1 = all of it (full fidelity);
-- `t = 1 + max(0, −s)/100` — on the left half only, the inset/rotation
-  strength grows up to 2× the fitted anchors (stronger bleach and drift).
+- `β_hue = (a + 1) / 2` — a single linear ramp across the whole slider:
+  **0 at −100%, 0.5 at the center, 1 at +100%**;
+- **chroma is not user-controlled.** It is entirely the bracket's own
+  κ-recovery + clamp: valid diffuse colors reach the clamp (original chroma,
+  kept), strongly-compressed colors bleach along the bracket's smooth roll-off.
 
-So `s = +100` → norm-like color fidelity; `s = 0` → **an equal mix, the
-default** (deliberately the same convention as the v7 slider, whose zero also
-means "equal mix"); `s = −100` → full film character.
+The three anchor points:
+- `s = −100` → **pure AgX**: full per-channel hue drift (the film character),
+  strongly-compressed colors bleached;
+- `s = 0` (default) → **half the hue drift removed**, chroma unchanged;
+- `s = +100` → **original hues restored exactly**, chroma still
+  bracket-bleached (the transform contributes the per-channel luminance and the
+  bleach roll-off, but no hue shift).
+
+A short-lived earlier version also offered *chroma* recovery on the positive
+half (`β_chroma = max(0, a)`, for speculars/jewelry). It was removed: mixing
+any original chroma back on top of the bracket's output kinks highlight
+gradients — the recovered value `β·c_orig` fights the bracket's smooth bleach
+roll-off at the `min(c_orig, bracket)` clamp, and the visible seam in a bright
+colored gradient was worse than the muted highlight it rescued. Chroma fidelity
+of *valid* colors never needed the slider (it is in the bracket); recovering
+the chroma of *strongly-compressed* colors is better left to a downstream
+grading module, where it does not fight the tone map. (Also gone, from an even
+earlier design: the `t` strength multiplier that scaled the anchors up on the
+left half — it doubled the worst-case hue drift for no benefit once bleaching
+stopped being the point of that half.)
+
+The purple-band failure mode (restored chroma landing on a drifted hue) is now
+closed *by construction*: there is no restored chroma at all, so a
+partially-recovered hue can never carry extra saturation onto a wrong angle.
 
 **The mix must be chroma-weighted** (bug found in visual testing, 2026-07: a
 blue gradient swept from −10 to +15 EV turned magenta at the default slider
@@ -453,30 +497,174 @@ instead of through the perpendicular hue, and the aligned-hue behavior (and
 both endpoints) are numerically unchanged. Validated in the harness: bright
 blue at +6…+15 EV keeps hue 235° through the mix instead of drifting to 256°.
 
+**And hue must recover before chroma** (second half of the same bug, 2026-07:
+a fainter purple cast remained at the slider center after the vector-mix fix,
+still absent at both extremes). The residual mechanism is not a degenerate
+value but a property of *any* blend that couples hue and chroma recovery: the
+visible error is hue-drift × chroma, and the two are anti-correlated along the
+slider — at the character end the drift is maximal but the color is bleached
+away (pale, reads as the look); at the fidelity end the chroma is full but the
+drift is zero. Their product therefore peaks mid-slider. Measured on a true
+sRGB blue: the per-channel skew reaches +29.6° toward violet around +4…+6 EV
+while 34–84% of the chroma survives, and the coupled mix at the center left a
++8…+11° violet cast on 0.27–0.37 chroma — a visible purple band. The fix
+split the two weights so they were never both partial-and-rising on a drifting
+color. (This whole class of bug was later made moot — §"The single runtime
+axis" — when chroma recovery was removed from the slider entirely: with no
+restored chroma at all, a partially-recovered hue can never carry extra
+saturation onto a wrong angle.) Diffuse colors are immune throughout regardless.
+
+**And the bracket must self-recover diffuse chroma** (third finding, 2026-07:
+at −100% *everything* washed out, midtones included — olive skin tones bleached
+until they read as Caucasian, which is a racial-bias defect, not a style; see
+the limitations section). Root cause: the exact-inverse outset only returns
+what the curve did not converge, and with the 10%-latitude sigmoid the curve
+converges *everywhere* — the transparency theorem that justified the exact
+inverse had quietly become vacuous. The fix moves chroma fidelity off the
+slider and into the bracket: the outset is the inverse of a **κ-scaled** inset
+(κ = 1.51, same rotations), i.e. it over-expands, and the mandatory
+output≤input chroma clamp trims the excess to exactly 1.0 per pixel. The
+fitting questions this raised, with their measured answers
+(`--fit-outset` in the anchor script):
+
+- *Staged or joint fit?* Staged. Hue drift is **insensitive to κ** (29.7° max
+  at every κ tested), so the outset stage is orthogonal to the rotations fit
+  and a joint 12-parameter fit would add degeneracy for nothing — we have
+  railed three objectives already; no need to build a fourth.
+- *Start from the exact inverse and enlarge?* Yes: κ is searched upward from 1
+  by bisection for the smallest value whose 5th-percentile pre-clamp chroma
+  ratio on the **priority set** reaches 1. The priority set is the point of
+  the fit: the human skin database from `src/common/color_vocabulary.c`
+  (Lab D65, avg ± 1.5σ corners) plus in-gamut diffuse reflectances, each swept
+  over the tonal placements a photographer may give them (±1.5 EV for skin,
+  −2…+2.5 EV for objects).
+- *Portability across curves and dynamic ranges?* This is where the
+  clamp-based design pays: the fitted target is an *inequality* ("reach the
+  clamp"), and the clamp is the tone-adaptive stage, applied per pixel. Any
+  over-recovery in easier conditions is trimmed to exactly 1.0. Measured with
+  one fixed κ: post-clamp p5 ≥ 0.97 and median = 1.000 across studio 6.5 EV,
+  studio 8 EV, default 12 EV and HDR 16 EV curves. No runtime adaptation
+  needed, and no overfitting surface — the fit cannot "overshoot usefully".
+- *Does the bleaching job survive?* Yes: gamut-boundary colors at the white
+  endpoint still bleach to 0.59 chroma ratio (vs 0.52 with the exact inverse),
+  before the gamut mapper's own near-white crush — speculars and clipped
+  lights keep the film behavior.
+- *The recovery re-exposes hue drift, and the rotations themselves are
+  re-fitted* (fourth + fifth finding, 2026-07: visual testing showed sRGB blue
+  skewing to purple and green to cyan at −100%, "not there before"). The drift
+  *was* there before — the ~30° worst-case from the unanchored-hue study — but
+  the exact inverse bleached those pixels invisible; κ keeps them saturated
+  (sRGB blue +17.6° at 94% chroma).
+  - *First attempt — outset-only rotation deltas:* gave the outset its own
+    rotation set, fitted by chroma-weighted minimax over the sRGB gamut
+    boundary (a first fit over the Rec2020 boundary refused to move — its
+    extremes are clipped/emissive content that dominated the max). Note the
+    outset rotations are *not* bound by the log-positivity budget that pins
+    the inset: they act after the curve. Peak sRGB blue skew 17.6° → 13.7°.
+  - *The real cause — the blue INSET rotation:* an isolation probe (drift with
+    each rotation stage zeroed in turn) showed the +24° blue inset rotation —
+    fitted by `--minimax` to counter the drift of *bleached* pixels — was
+    itself producing +13.7° of the +13.7° once those pixels are recovered
+    (turn it off: +1.5°). The minimax rotations were *correct for a regime we
+    no longer run*. Re-fitting for the recovered regime drops the blue inset
+    to +1° and cuts the visible blue skew to **−0.3° at 96% chroma** — better
+    than any outset delta could do, because it removes the drift at its source
+    rather than counter-rotating it back.
+  - *The whack-a-mole, made explicit:* the bracket is one 3×3 matrix inverted,
+    so a primary's rotation couples into every hue. The +24° blue was *also*
+    suppressing the sunset's yellow drift as a side effect; removing it returns
+    sunsets to full yellow-ward (which is the requested direction,
+    but strong — up to +32° at the saturated extreme). Zeroing rotations
+    entirely wrecks green (−25°) and over-yellows sunsets (+37°). So the
+    production fit **keeps the diffuse-validated red/green inset rotations**
+    (they protect skin, sunset and foliage) and re-fits **only blue inset +
+    the three outset deltas**, under the priority ordering
+    (skin/reflective absolute; blue-LED purple the worst real complaint;
+    sunset must drift yellow not red). Result: inset {−2.50°, +9.29°, +1.09°},
+    outset {−2.04°, +13.04°, +6.21°}; sRGB blue −0.3°, skin red-ward capped at
+    −1.5° (was −3.0°), sunsets all yellow-ward, diffuse recovery intact
+    (post-clamp p5 = 1.000 across 6.5–16 EV). Reproducible via `--fit-outset`,
+    which supersedes `--minimax`.
+  - *Structural residual:* the near-white drift is EV-dependent and no static
+    matrix cancels a direction that changes along the tone axis. The
+    real-pipeline gamut mapper crushes chroma in exactly that zone, so the
+    model numbers overstate what reaches the screen. The one region the slider
+    cannot rescue is over-range blue LEDs (a blown blue spot has no
+    well-defined hue); there, bleaching is the honest treatment. Remaining
+    lever if a case still objects: a reliability weight on the recovered
+    chromaticity *direction* (near-white residuals are numerically unreliable
+    before the κ amplification — same lesson as the chroma-weighted hue mix),
+    a governor-side fix.
+
+Is this "an Ych tone-mapping in disguise"? In the diffuse range the bracket is
+now deliberately *near-neutral* — which is the requirement, not a
+contradiction: grading happens before the tone mapper, so the tone mapper
+should touch valid colors as little as possible. What the RGB bracket still
+does that Ych operations cannot: it *generates* the roll-off into bleach as a
+smooth tristimulus process (dye bleaching is a tristimulus phenomenon, and
+perceptual-space chroma manipulation is exactly what produced the
+yellow-leaves/blue-sky fringe artifacts documented for the color equalizer —
+light mixes in RGB, not in Ych). The Ych machinery downstream is the
+*governor*: it measures, clamps and anchors, but never generates. Generator in
+RGB, governor in Ych — that division is the design.
+
 ## Anchor constants and what the fit taught us
 
-The shipped constants are: **insets 0.25 for all three primaries**, and
-**rotations {−2.50° red, +9.29° green, +24.06° blue}**, measured as hue angles
-in Yrg. They come from `tools/derive_filmic_agx_primaries.py --minimax`
-(2026-07, drift target 0 — the maintainer explicitly rejected a baked-in warm
-bias), fitted against the appearance-matched default curve of the next section.
+The shipped constants (production fit, 2026-07, `--fit-priority`) are the whole
+12-parameter bracket, jointly fine-tuned:
 
-Why *minimax* (minimize the single worst hue error) rather than least-squares
-(minimize the average)? Because at the character end of the slider there is no
-safety net behind the matrices — the one number a viewer will notice is the
-worst skew, not the average. The fit lands at a worst-case drift of 23.8° over
-the visible exposure range. Two properties of that solution to know about:
-the blue rotation is not free — it sits where the no-negative-channels
-constraint stops it (constraint 2 above) — and the minimax landscape is a
-plateau, so re-running the fit can return a *different but equally good* set
-of angles; don't be alarmed by that. The least-squares alternative remains one
-flag away in the script. The positivity margin is enforced over the entire
-slider range (t ∈ [1, 2]) inside the fit itself.
+| stage | chroma (per primary R/G/B) | rotation (Yrg hue, R/G/B) |
+|---|---|---|
+| inset  | 0.350 / 0.350 / 0.345 | −2.51° / +9.06° / +1.02° |
+| outset | 0.458 / 0.621 / 0.350 | −1.98° / +11.95° / +4.32° |
+
+The outset is **per-primary**, no longer a single κ multiple of the inset: its
+κ-equivalent expansion ratios are {1.31, 1.78, 1.01} — green over-expands most
+(its inset pulled it furthest), blue barely recovers. On the priority set (skin
+database + diffuse reflectances) this gives skin |mean| hue drift **2.2°**
+(worst +6.6°) and reflective mean **2.3°** — everything comfortably below the
+~2–3° hue JND, with rendering character preserved (highlight chroma ~98%).
+
+**How the methodology got here (three eras).** The fit started life as
+`--minimax` (minimize the single worst hue error at the character end of the
+slider, where nothing backstops the matrices), which parked the blue rotation
+against the no-negative-channels wall at +24°. That was correct only while the
+outset *bleached* every color (exact inverse). Adding the κ recovery
+(`--fit-outset`) kept colors saturated, which re-exposed the drift the
+bleaching had hidden — and revealed that the same +24° blue rotation now
+*caused* purple on recovered blues. The final step (`--fit-priority`) drops the
+hand-structured "fix blue, keep red/green" recipe entirely and lets a joint
+Nelder-Mead solve all 12 parameters at once, but against a **narrowed target**:
+the priority set only (skin + reflective), with hard barriers on skin (red-ward
+drift ≤ −1.5°, chroma ≥ 92%) and no bleaching (diffuse p5 ≥ 0.97), so accuracy
+cannot be gamed by washing colors to gray. This is the current production fit;
+`--minimax` and `--fit-outset` are kept in the script as the historical record.
+
+**Why the target was narrowed — the DoF limit.** Before narrowing, a full
+12-parameter *global* fit (differential evolution) was run over the entire sRGB
+hue circle × exposure. The verdict was structural: with skin protected and
+bleaching forbidden, the linear bracket tops out at ~8° mean full-circle drift
+— **no better than the trivial uniform inset** — and it cannot hold saturated
+sRGB blue at +5–6 EV (above the white point) without either driving skin red or
+bleaching, both hard-vetoed. A pair of 3×3 matrices wrapped around a
+per-channel curve simply has too few degrees of freedom to hold every hue at
+every exposure; fixing one region borrows from another. So blue-at-high-EV is
+conceded as a lost edge case (it is left to the per-pixel Ych hue recovery,
+which is exact at full strength), and the bracket is optimized for the colors
+that actually matter in photographs.
+
+**Why *conservative*.** The inset is capped at 0.35 in the fit. The
+unconstrained optimum runs it at ~0.55, which buys a further skin gain (2.2° →
+1.4°) — but that gain is itself below the visibility threshold, while the
+stronger bracket has a *visible* cost: highlights desaturate more (the AgX
+rolloff look intensifies) and the pure-green primary drifts to +9°. Trading a
+perceptible character change for an invisible accuracy gain is a bad deal, so
+the cap stays (maintainer's call).
 
 One maintenance rule: the anchors are only optimal *for the curve they were
 fitted against*. `CURVE_DEFAULTS` in the script must be kept in sync with the
 C `$DEFAULT`s, and any change to the default curve requires re-running the
-anchor fit.
+fit (`--fit-priority`).
 
 Two findings from the fitting work reshaped the methodology and are worth
 keeping on record:
@@ -502,8 +690,8 @@ keeping on record:
    counter to one specific, well-known defect, not a general beautifier.
 
 The same script is the regression harness for any future retune. The sigmoid
-power presets (hard/soft/safe) are derived by the default-curve harness — see
-the appearance-matching section below.
+toe/shoulder exponents are derived by the default-curve harness — see the
+appearance-matching section below.
 
 ## Investigated: fully unanchored hue (chroma-only recovery)
 
@@ -559,13 +747,14 @@ Two options were assessed:
 - **A single self-adjusting strength factor: worthwhile, deferred.** The safe
   middle ground: keep the fitted matrix *shape* and only auto-scale its
   *strength* to the actual curve. Because validity (constraints 2 and 3) holds
-  along the whole strength axis, a scalar `t_auto` can be computed cheaply
-  when parameters change — either from a simple ratio (fitted shoulder length
-  vs. actual shoulder length, in EV) or by probing ~20 curve evaluations —
-  then multiplied into the user's slider value. Deterministic, smooth, no
-  optimizer. Since the gamut mapper owns the near-white endpoint anyway, the
-  residual mismatch is a second-order effect: implement this only if edits
-  with small dynamic ranges visibly bleach too late or too abruptly.
+  along the whole strength axis, a scalar can be computed cheaply when
+  parameters change — either from a simple ratio (fitted shoulder length vs.
+  actual shoulder length, in EV) or by probing ~20 curve evaluations.
+  Deterministic, smooth, no optimizer. The κ-recovery redesign lowered the
+  stakes further: the diffuse range is clamp-protected under *any* curve
+  (measured 6.5–16 EV), so a curve mismatch can only mis-time the bleaching of
+  extremes, whose endpoint the gamut mapper owns anyway. Implement only if
+  edits with small dynamic ranges visibly bleach too late or too abruptly.
 
 ## Future user parameters (only if demonstrated necessary)
 
@@ -573,16 +762,19 @@ Each of these requires bumping `DT_MODULE_INTROSPECTION` (new params members),
 which breaks the back-and-forth database compatibility contract — hence the
 bar is "users demonstrate a real limitation", not "would be nice".
 
-1. **Independent purity strength and hue fidelity** (2 floats). The bipolar
-   slider makes `t > 1` and `β > 0` mutually exclusive; someone may legitimately
-   want strong bleaching *and* partial hue recovery (e.g. concert photography:
-   heavy LED compression, but skin hues held). This is the most likely first
-   request. Until then, the coupling is defensible: the two halves are one
-   perceptual character↔fidelity axis.
-2. **Continuous toe/shoulder powers** (2 floats). If the 3-step hard/soft/safe
-   quantization of the sigmoid spline proves too coarse. Blender itself ships
-   fixed powers, and the powers sit in "advanced" territory upstream, so demand
-   is expected to be low.
+1. **Chroma recovery of strongly-compressed colors** (1 float). Removed from
+   the slider (it kinked highlight gradients, see the slider section), so
+   there is currently no way to un-bleach a specular or a clipped colored
+   light *inside* filmic — e.g. jewelry work where a highlight's colored glint
+   must hold. The intended answer is a downstream grading module (color balance
+   / saturation), where re-saturating does not fight the tone map's roll-off;
+   only add a param here if that workflow proves inadequate. Valid diffuse
+   colors need nothing (their chroma is in the bracket).
+2. **User-exposed sigmoid toe/shoulder exponents** (2 floats). The perceptual
+   sigmoid ships one fixed pair (1.5, 7.8) with no user control; a legacy
+   polynomial/rational type is the only escape to a different roll-off. If that
+   proves too coarse, expose the two exponents. Blender itself ships fixed
+   powers and keeps them in "advanced" territory, so demand is expected low.
 3. **Hue-recovery weighting by compression** (1 float or a fixed design change).
    `β` is currently uniform; a compression-weighted mix would hold midtone hues
    fully while letting the shoulder drift. Adds a second perceptual decision to
@@ -641,10 +833,10 @@ and JND weights 1–3:
   once the model replicated the C geometry exactly. The historically
   hand-tuned value was already the appearance-correct one; it now has a
   derivation instead of a reputation.
-- **Under spline v4, the latitude is a tension control and belongs in the
-  fit.** An earlier revision of this doc declared latitude and balance
-  "editing-ergonomics conventions, not derivable" and pinned them at 33%/0 —
-  retracted after a maintainer correction (2026-07). With sigmoid segments,
+- **Under the perceptual sigmoid, the latitude is a tension control and
+  belongs in the fit.** An earlier revision of this doc declared latitude and balance
+  "editing-ergonomics conventions, not derivable" and pinned them at 33%/0. 
+  With sigmoid segments,
   a small latitude hands the whole curve to the smooth roll-offs (soft,
   progressive transitions) while a large one forces short, hard turns — so the
   latitude shapes the transition strength exactly like the sigmoid exponents
@@ -679,18 +871,45 @@ and JND weights 1–3:
   to **~10%, now genuinely pinned by the data** (with a soft toe the fit wants
   some straight segment to hold the mid-tone slope; the earlier "latitude ~0"
   answer was an artifact of the crushing toe).
-- **Final defaults: safe = (1.5, 9.0), latitude 10%, balance 0.** Shadow slope
-  at −7 EV: 1.19 — open, detail alive. **Hard and soft are derived, not
-  hand-picked**: since the sigmoid exponents are not exposed in the GUI, the
-  three presets and the latitude slider together must cover the useful range
-  of transition strengths between them. "Soft" is solved to produce *half* of
-  safe's peak perceptual shoulder sharpness → (1.1, 4.5); "hard" is the usable
-  ceiling at ~1.4× → (2.1, 12.7). Shadow slopes at −7 EV: soft 1.42, safe
-  1.19, hard 0.92 — so crushed blacks are now an explicit opt-in, nobody's
-  default. The preset × latitude grid was verified to stay well-ordered and
-  well-spaced at every latitude from 1 to 60%.
-- Consequently `spline_version` now **defaults to v4** for new edits (old
-  edits keep their stored parameters), with default latitude 10% and balance 0.
+- **Perceptual toe = fixed 1.5, shoulder = slope-matched at runtime.** The two
+  ends are grounded on *different physical limits*, so they are shaped
+  differently — this asymmetry is the whole point.
+  - *Toe: fixed exponent 1.5.* Shadows have a perceptual floor — veiling flare
+    hides detail below ~0.1% output — so the toe is a JND-bounded appearance
+    fit, tuned to keep *visible* shadow gradients open (slope at −7 EV: 1.19).
+  - *Shoulder: no fixed exponent — slope-matched power roll-off.* This
+    corrects a real methodological error. The lightness match is **indifferent**
+    to the shoulder power (its RMS *monotonically* falls as the exponent rises,
+    9.96 → 8.87 across p = 1.5 → 16, with no interior optimum) because blown
+    highlights are physically *unmatchable* — the display maxes at white, so a
+    +4 EV scene highlight can never reach its scene lightness, and the match
+    "gives up" on the top stop and just rewards holding mid-tone contrast
+    longer (a hard shoulder). Fitting it therefore only **rails** against
+    whatever bound you set; the shipped 7.8/9.0 sat on the JND ceiling — i.e.
+    "as harsh as barely permissible," which is exactly why it read as harsh
+    (top-stop local contrast 0.022 out/EV vs ~0.06 gentle). The grounded answer
+    (maintainer's, 2026-07) is to **match the latitude slope**: the shoulder is
+    a power curve `y = white − c·(1−x)^q` with `q = slope·dx/dy`, which leaves
+    the latitude node at *exactly* the latitude slope and glides to white. No
+    magic number; `q` is pure geometry and **adapts to the dynamic range** —
+    q ≈ 1.0 for a 6.5 EV studio curve (barely any roll-off, nothing to
+    compress), 1.6 for the 12 EV default, 2.5 for a 14 EV ETTR curve (more
+    compression). Highlights hold detail: out at +3 EV is 85.6% (vs 96.2% at
+    7.8), i.e. clearly below white with tonal separation intact.
+  - *Coupling discovered in the process:* in v8 the shoulder is overloaded —
+    it is both the tone roll-off **and** the per-channel bleaching driver, so a
+    harsh shoulder was silently masking blue hue-drift by bleaching it away. A
+    *fixed* gentle shoulder (1.5) re-exposed the drift (sRGB blue +14.8° at
+    +4 EV) and broke HDR chroma recovery (needing κ = 2.1, still p5 0.865).
+    The slope-matched shoulder resolves it almost for free: it **hardens
+    exactly at high dynamic range** (q = 2.4 at HDR 16 EV), restoring the
+    bleaching there — blue drops back to +2.1°, κ = 2.0, default-DR portability
+    back to 1.000 (HDR 0.894).
+- `shadows`/`highlights` now **default to "perceptual"** for new edits (old
+  edits keep their stored curve types); `spline_version` stays at **v3** (its
+  job is only node geometry). The short-lived `v4 (2026)` spline version — which
+  conflated the sigmoid segment with the node geometry — was removed; histories
+  that stored it fall back to v3 geometry silently.
 - Order of operations for maintainers: the anchors are curve-relative, so
   `derive_filmic_agx_primaries.py` (which imports this harness's curve model;
   keep `CURVE_DEFAULTS` in sync with the C `$DEFAULT`s) was re-run against
@@ -700,9 +919,9 @@ and JND weights 1–3:
 
 - Add the sweep plots (purity-vs-EV, drift-vs-EV per hue, preset × latitude
   sharpness grid) to CI or at least to the PR.
-- Factory presets ("AgX-like base/punchy": v8 + black −10 EV / white +6.5 EV +
+- Factory presets ("AgX base/punchy": v8 + black −10 EV / white +6.5 EV +
   matched contrast).
-- Visual pass on the final defaults (latitude 10%, safe 1.5/9.0, refitted
-  anchors) — numbers are derived, eyes are not optional.
+- Visual pass on the final defaults (latitude 10%, toe 1.5, slope-matched shoulder,
+  refitted anchors) — numbers are derived, eyes are not optional.
 - User documentation: see `ansel-doc/content/views/darkroom/modules/filmic.md`
   (v8 + spline v4 + darktable-AgX emulation guide).

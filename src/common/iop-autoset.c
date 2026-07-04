@@ -175,10 +175,18 @@ int dt_iop_autoset_advance(struct dt_develop_t *dev, dt_autoset_manager_t *manag
   // module->autoset manipulates the module's internal parameters outside of the
   // normal (GUI) control flow. Protect concurrent params writes from the GUI and
   // write history while we still hold the lock.
+  //
+  // Pin the cacheline (refcount) *before* read-locking it, exactly like the color
+  // picker / colorequal / histogram consumers do: peek_gui() hands back an unreffed
+  // entry (its internal read lock is already released), so without a ref the worker
+  // could evict this intermediate module-input cacheline — which has refcount 0
+  // between renders — during the autoset() sampling call, freeing the buffer under us.
   dt_iop_gui_enter_critical_section(module);
+  dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, TRUE, entry);
   dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, entry);
   module->autoset(module, pipe, piece, input);
   dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, FALSE, entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, FALSE, entry);
   dt_dev_add_history_item(dev, module, FALSE, FALSE);
   dt_iop_gui_leave_critical_section(module);
 

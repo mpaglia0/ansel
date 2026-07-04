@@ -1105,6 +1105,16 @@ static inline void _dt_dev_modules_reload_defaults(dt_develop_t *dev)
     dt_iop_module_t *module = (dt_iop_module_t *)(modules->data);
     dt_iop_load_default_params(module);
 
+    // Reset the enabled state to the module default too. Neither dt_iop_load_default_params()
+    // nor dt_iop_reload_defaults() touch it, so without this a module keeps whatever enabled
+    // state the previous history point left it in. The history overlay below (_history_to_module)
+    // only re-enables modules that have an entry within the current slice; a module whose only
+    // history entry lies *after* history_end would otherwise stay stale-enabled while parked at
+    // INT_MAX, becoming an enabled ghost node after gamma that the pixelpipe format pass disables
+    // for "unexpected input buffer format" (issue #961). This restores the reset that was dropped
+    // when the reload path was refactored (commit 892dad90a9).
+    module->enabled = module->default_enabled;
+
     if(module->multi_priority == 0)
       module->iop_order = dt_ioppr_get_iop_order(dev->iop_order_list, module->op, module->multi_priority);
     else
@@ -1815,7 +1825,7 @@ static void _process_history_db_entry(dt_develop_t *dev, const int32_t imgid, co
    */
   if(!dt_iop_get_module_from_list(dev->iop, operation)) return;
 
-  const int iop_order = dt_ioppr_get_iop_order(dev->iop_order_list, operation, multi_priority);
+  int iop_order = dt_ioppr_get_iop_order(dev->iop_order_list, operation, multi_priority);
 
   // Init a bare minimal history entry
   dt_dev_history_item_t *hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));
@@ -1860,6 +1870,34 @@ static void _process_history_db_entry(dt_develop_t *dev, const int32_t imgid, co
   // Needed now to de-entangle multi-instances
   hist->module->iop_order = hist->iop_order;
   dt_iop_update_multi_priority(hist->module, hist->multi_priority);
+
+  // When the stored module_order uses a non-CUSTOM built-in (one entry per module),
+  // extra instances (multi_priority > 0) are absent from iop_order_list and get
+  // iop_order = INT_MAX above. Insert a placeholder so the module gets a valid
+  // sequential position instead of drifting through the pipeline at INT_MAX.
+  if(iop_order == INT_MAX && hist->multi_priority > 0)
+  {
+    dt_iop_order_entry_t *new_entry = (dt_iop_order_entry_t *)calloc(1, sizeof(dt_iop_order_entry_t));
+    g_strlcpy(new_entry->operation, operation, sizeof(new_entry->operation));
+    g_strlcpy(new_entry->name, hist->multi_name, sizeof(new_entry->name));
+    new_entry->instance = hist->multi_priority;
+    new_entry->o.iop_order = 0;
+
+    // Insert after the last existing entry for this operation so extra instances
+    // sit after the base, matching the order from dt_dev_module_duplicate.
+    GList *place = NULL;
+    for(GList *l = dev->iop_order_list; l; l = g_list_next(l))
+    {
+      const dt_iop_order_entry_t *e = (dt_iop_order_entry_t *)l->data;
+      if(!strcmp(e->operation, operation)) place = l;
+    }
+    dev->iop_order_list = g_list_insert_before(dev->iop_order_list,
+                                               place ? g_list_next(place) : NULL, new_entry);
+
+    iop_order = dt_ioppr_get_iop_order(dev->iop_order_list, operation, hist->multi_priority);
+    hist->iop_order = iop_order;
+    hist->module->iop_order = iop_order;
+  }
 
   // module has no user params and won't bother us in GUI - exit early, we are done
   if(hist->module->flags() & IOP_FLAGS_NO_HISTORY_STACK)
@@ -1970,6 +2008,16 @@ gboolean dt_dev_read_history_ext(dt_develop_t *dev, const int32_t imgid)
 
   // Sanitize and flatten module order
   dt_ioppr_resync_pipeline(dev, imgid, "dt_dev_read_history_no_image end", FALSE);
+
+  // After resync, iop_order_list was renumbered with correct sequential values.
+  // Fix hist->iop_order for entries recovered from a missing order entry: they
+  // got a placeholder value of 0 above; sync them from the now-correct module order.
+  for(GList *h = dev->history; h; h = g_list_next(h))
+  {
+    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)h->data;
+    if(hist->module && hist->iop_order < 1 && hist->module->iop_order > 0)
+      hist->iop_order = hist->module->iop_order;
+  }
 
   // Update "masks history"
   // This design is stupid because `dt_dev_history_item_t *hist->forms` is not read

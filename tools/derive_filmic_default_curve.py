@@ -76,9 +76,12 @@ def _sigmoid_scale(limit_x, limit_y, tx, ty, slope, power):
     return min(1e9, base ** (-1.0 / power))
 
 def curve_factory(black_ev, white_ev, contrast_param, latitude_pct, balance_pct,
-                  toe_power, shoulder_power):
+                  toe_power, shoulder_power, shoulder_slope_matched=False):
     """Returns curve(x): normalized log input -> display-linear output.
-    Parameters are the module's user parameters, v3 geometry, spline v4."""
+    Parameters are the module's user parameters, v3 geometry, perceptual sigmoid.
+    shoulder_slope_matched=True reproduces the shipped 'perceptual' shoulder : a
+    slope-matched power roll-off (exponent = slope*dx/dy, ignores shoulder_power),
+    matching filmic_rgb_compute_spline in the C code."""
     dr = white_ev - black_ev
     grey_log = abs(black_ev) / dr
     output_power = np.log(GREY) / np.log(grey_log)  # auto-hardness, as in C
@@ -122,6 +125,8 @@ def curve_factory(black_ev, white_ev, contrast_param, latitude_pct, balance_pct,
     toe_fb_c = toe_dy / toe_dx ** toe_fb_p
     sh_fb_p = contrast * sh_dx / sh_dy
     sh_fb_c = sh_dy / sh_dx ** sh_fb_p
+    # slope-matched shoulder always uses the power-curve branch (as C M5[1]=1)
+    sh_powcurve = shoulder_slope_matched or sh_concave
 
     def curve(x):
         x = np.clip(x, 0.0, 1.0)
@@ -132,7 +137,7 @@ def curve_factory(black_ev, white_ev, contrast_param, latitude_pct, balance_pct,
                 u = contrast * (x - toe_x) / toe_s
                 y = toe_s * (u / (1.0 + u ** toe_power) ** (1.0 / toe_power)) + toe_y
         elif x > sh_x:
-            if sh_concave:
+            if sh_powcurve:
                 y = white_display - max(0.0, sh_fb_c * (1.0 - x) ** sh_fb_p)
             else:
                 u = contrast * (x - sh_x) / sh_s

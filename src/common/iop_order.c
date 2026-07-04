@@ -876,7 +876,8 @@ int dt_ioppr_get_iop_order(GList *iop_order_list, const char *op_name, const int
     iop_order = order_entry->o.iop_order;
   }
   else if(!dt_deprecated(op_name))
-    fprintf(stderr, "cannot get iop-order for %s instance %d\n", op_name, multi_priority);
+    fprintf(stderr, "[iop_order] %s instance %d is missing from the saved pipeline order; "
+                    "its position will be sanitized to the default order\n", op_name, multi_priority);
 
   return iop_order;
 }
@@ -1280,9 +1281,15 @@ void dt_ioppr_resync_modules_order(dt_develop_t *dev)
     dt_iop_module_t *mod = (dt_iop_module_t *)(modules->data);
     GList *next = g_list_next(modules);
 
-    // modules with iop_order set to INT_MAX we keep them as they will be removed (non visible)
-    // _update_iop_visibility.
-    if(mod->iop_order != INT_MAX)
+    // Modules parked at INT_MAX are "not in pipe" (non-visible) and stay parked so
+    // _update_iop_visibility can remove them. But an ENABLED module must always occupy a
+    // real pipe position: leaving it at INT_MAX drops it after gamma and ties it with the
+    // other parked modules, so an unstable sort can wedge it into a wrong slot where the
+    // pixelpipe format pass disables it for "unexpected input buffer format" (issue #961).
+    // This happens to enabled extra instances (multi_priority > 0) whose history entry
+    // carried a stale INT_MAX order. Re-derive their order from the authoritative order
+    // list; a genuinely-orphan instance still falls back to INT_MAX from the lookup.
+    if(mod->iop_order != INT_MAX || mod->enabled)
       mod->iop_order = dt_ioppr_get_iop_order(dev->iop_order_list, mod->op, mod->multi_priority);
 
     modules = next;
