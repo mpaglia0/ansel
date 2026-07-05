@@ -77,9 +77,11 @@ gchar *dt_build_filename_from_pattern(const char *const filename, const int inde
 {
   dt_variables_params_t *params;
   dt_variables_params_init(&params);
-  params->filename = g_strdup(filename);
+  // Borrowed references, like every other dt_variables_params_t caller (see iop/watermark.c):
+  // dt_variables_params_destroy() does not own/free filename or jobcode.
+  params->filename = filename;
   params->sequence = index;
-  params->jobcode = g_strdup(data->jobcode);
+  params->jobcode = data->jobcode;
   params->imgid = UNKNOWN_IMAGE;
   params->img = img;
   dt_variables_set_datetime(params, data->datetime);

@@ -73,7 +73,7 @@ typedef struct dt_lib_studio_style_t
 
 const char *name(dt_lib_module_t *self)
 {
-  return _("Style");
+  return _("Auto style");
 }
 
 const char **views(dt_lib_module_t *self)
