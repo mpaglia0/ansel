@@ -41,6 +41,7 @@
 #include "gui/gtk.h"
 #include "libs/colorpicker.h"
 #include "libs/lib.h"
+#include "views/dev_toolbox.h"
 #include "views/view.h"
 #include "views/view_api.h"
 
@@ -136,6 +137,32 @@ void init(dt_view_t *self)
   d->own_primary_sample = d->dev->color_picker.primary_sample;
 
   self->data = d;
+}
+
+void gui_init(dt_view_t *self)
+{
+  dt_studio_capture_t *d = (dt_studio_capture_t *)self->data;
+
+  // Own instances, wired to this view's own dev, so the toggles' state and
+  // their popovers' controls are actually correct here rather than mutating
+  // darkroom's separate dev. The effect still won't be visible: it's
+  // darkroom's own expose() that paints it on the pixelpipe backbuffer, a
+  // path this view's surface-fetcher-based center never touches. Display's
+  // popover only gets the generic controls (brightness, margins) here:
+  // darkroom's own rendering-size and mask-preview-checkerboard extras don't
+  // apply without an editing layer, so we don't append them.
+  static const dt_dev_toolbox_button_t studio_capture_toolbox_buttons[]
+      = { DT_DEV_TOOLBOX_ISO_12646,     DT_DEV_TOOLBOX_DISPLAY, DT_DEV_TOOLBOX_RAWOVEREXPOSED,
+          DT_DEV_TOOLBOX_OVEREXPOSED, DT_DEV_TOOLBOX_SOFTPROOF, DT_DEV_TOOLBOX_GAMUT };
+  dt_dev_toolbox_create(d->dev, DT_VIEW_STUDIO_CAPTURE, studio_capture_toolbox_buttons,
+                       G_N_ELEMENTS(studio_capture_toolbox_buttons));
+  gtk_widget_show_all(gtk_bin_get_child(GTK_BIN(d->dev->display.floating_window)));
+
+  // Accelerators for the same buttons, bound to the accel group this view
+  // actually connects (see enter(): dt_accels_connect_active_group(...,
+  // "lighttable")) instead of darkroom's darkroom_accels.
+  dt_dev_toolbox_add_accels(d->dev, darktable.gui->accels->lighttable_accels, N_("Studio capture/Toolbox"),
+                            studio_capture_toolbox_buttons, G_N_ELEMENTS(studio_capture_toolbox_buttons));
 }
 
 void cleanup(dt_view_t *self)

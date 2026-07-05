@@ -20,6 +20,96 @@ Left panel, top to bottom:
   the same modules used elsewhere in the library, made visible in this view
   via their `views()` lists.
 
+At the bottom of the left panel: darkroom's **module toolbox**
+(`libs/tools/module_toolbox.c`), made visible here the same way — its
+`views()` list includes `"studio_capture"`. The toolbox itself is just a
+flow-box container; each button docked into it is tagged with the view(s) it
+should appear in when registered through `dt_view_manager_module_toolbox_add()`.
+It's a single lib instance shared across every view for the whole app
+lifetime — buttons accumulate in it as each view's `gui_init()` runs (once
+per view, not per visit), and `view_enter()` only shows/hides each one to
+match the current view; nothing is ever removed. Hiding must target the
+`GtkFlowBoxChild` wrapper `gtk_container_add()`/`gtk_flow_box_insert()`
+auto-creates around each button, not the button itself: a visible-but-empty
+wrapper still reserves a cell and its spacing in the flow layout, which used
+to leave gaps and push later buttons rightward whenever a view hid some of
+its siblings (visible in darkroom as the mask manager button drifting away
+from the rest, and in Studio Capture as its buttons failing to pack flush
+left) — `view_enter()` now hides/shows `gtk_widget_get_parent()` of the
+button when that parent is a `GtkFlowBoxChild`.
+
+Raw overexposed, clipping, soft-proof and gamut check, ISO 12646 and Picture
+display are built by `views/dev_toolbox.c`/`.h` — a shared unit extracted out
+of `darkroom.c`, designed so any future atelier with its own `dt_develop_t`
+can reuse the same buttons, not just these two. A single entry point,
+`dt_dev_toolbox_create(dev, views, buttons, n_buttons)`, takes an array of
+`dt_dev_toolbox_button_t` values and creates all of them — button *and*
+options popover — for the given `dev` in one call. Every button is wired to
+one shared "clicked" handler (`_button_clicked`) that reads back *which*
+button fired from a tag set on the widget at creation (`g_object_set_data`),
+instead of connecting a dedicated callback function per button; popovers
+(and the sliders/combos inside them) are equally shared, anchored through
+`dt_dev_toolbox_connect_popover()`/`dt_dev_toolbox_show_popup()` — the same
+generic show/anchor plumbing darkroom's own guides and auto-set popovers use
+via `dt_dev_toolbox_popover_set_preshow()` for their own pre-show refresh.
+Each button still ends up stored in its matching `dt_develop_t` field
+(`dev->overexposed.button`, `dev->profile.softproof_button`, etc.) as it
+always did, since those fields are plain, already-shared `dt_develop_t`
+members, not darkroom-specific state.
+
+Only one thing is NOT built by `dt_dev_toolbox_create()`, left for the
+caller to add on top of the buttons it returns: **view-specific popover
+extras**. Picture display's popover holds only background brightness and
+margins (generic); darkroom fetches that same content box with
+`gtk_bin_get_child(GTK_BIN(dev->display.floating_window))` and packs its own
+rendering-size combo and mask-preview-checkerboard section into it before
+calling `gtk_widget_show_all()` itself (which `dt_dev_toolbox_create()` does
+not do for Display's popover, precisely so a caller can still append to it
+first — Studio Capture, appending nothing, just calls `gtk_widget_show_all()`
+right away).
+
+Accelerators are shared too, via a second entry point:
+`dt_dev_toolbox_add_accels(dev, accel_group, category, buttons, n_buttons)`.
+The action names ("Toggle clipping indication", "Focus softproof
+options"...) are the same regardless of caller, since the buttons themselves
+are shared — only the accelerator group and category differ. darkroom's own
+`gui_init()` calls `dt_dev_toolbox_create()` once with its `dev`,
+`DT_VIEW_DARKROOM` and all six button kinds, then `dt_dev_toolbox_add_accels()`
+with `darktable.gui->accels->darkroom_accels` and `N_("Darkroom/Toolbox")`.
+Studio Capture's own `gui_init()` calls the *same* two functions with its own
+`d->dev`, `DT_VIEW_STUDIO_CAPTURE`, and — since its `enter()` connects
+`lighttable_accels` as its active group (see `dt_accels_connect_active_group(...,
+"lighttable")`), not `darkroom_accels` — `darktable.gui->accels->lighttable_accels`
+and `N_("Studio capture/Toolbox")`, so its keyboard shortcuts actually fire
+while this view is active. Either way the toolbox ends up with two separate
+button instances per kind (same icon/position, different `dev`), and shows
+only the one matching the active view.
+
+This makes both the toggles' *state* and their popovers' controls correct
+here — clicking flips this view's own `dev->overexposed.enabled`, moving a
+slider writes this view's own `dev->overexposed.lower`, not darkroom's — but
+the effect is still **not visible**: it's darkroom's own `expose()` that
+paints these overlays directly onto its pixelpipe backbuffer, a path Studio
+Capture's center never touches since it renders through the surface fetcher
+(mipmap cache) instead. Making the effect itself show up here needs
+replicating that overlay-drawing logic against the surface fetcher — in
+practice, the same darkroom-expose-core extraction already flagged as a
+deliberately deferred, separate task. Picture display's button isn't a
+toggle at all — it does nothing on click, its only role is to anchor its
+popover — so in Studio Capture it opens a working popover whose sliders
+persist to conf correctly but, like the toggles, have no visible effect yet.
+
+Guides and the guides popover are a single, already-global `GtkWidget`
+(`darktable.view_manager->guides_toggle`, created once in `darkroom.c`'s
+`gui_init()` and registered with `DT_VIEW_DARKROOM | DT_VIEW_STUDIO_CAPTURE`)
+rather than a per-`dev` field, so it didn't need extracting: the same widget
+instance is simply shown or hidden by the toolbox depending on the active
+view, and its state (a global toggle, not tied to any one `dev`) is correct
+in both views already.
+
+Auto-set, the pipeline node graph (both darkroom-editing concepts) and the
+mask manager popup (`libs/masks.c`) stay `DT_VIEW_DARKROOM` only, unextracted.
+
 ## Import module
 
 Two tabs plus the session controls:

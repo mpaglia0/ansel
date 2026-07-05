@@ -57,7 +57,7 @@ const char *name(struct dt_lib_module_t *self)
 
 const char **views(dt_lib_module_t *self)
 {
-  static const char *v[] = {"darkroom", NULL};
+  static const char *v[] = {"darkroom", "studio_capture", NULL};
   return v;
 }
 
@@ -116,13 +116,19 @@ void view_enter(struct dt_lib_module_t *self,struct dt_view_t *old_view,struct d
   for(const GList *child_elt = d->child_views; child_elt; child_elt = g_list_next(child_elt))
   {
     child_data_t* child_data = (child_data_t*)child_elt->data;
+    // Hide/show the flow box's own wrapper (the GtkFlowBoxChild gtk_container_add()/
+    // gtk_flow_box_insert() auto-created around the button), not just the button
+    // itself: a visible-but-empty wrapper still reserves a cell and its spacing
+    // in the flow layout, leaving gaps and misaligning the buttons that ARE shown.
+    GtkWidget *wrapper = gtk_widget_get_parent(GTK_WIDGET(child_data->child));
+    GtkWidget *item = GTK_IS_FLOW_BOX_CHILD(wrapper) ? wrapper : GTK_WIDGET(child_data->child);
     if(child_data->views & nv)
     {
-      gtk_widget_show_all(GTK_WIDGET(child_data->child));
+      gtk_widget_show_all(item);
     }
     else
     {
-      gtk_widget_hide(GTK_WIDGET(child_data->child));
+      gtk_widget_hide(item);
     }
   }
 }
