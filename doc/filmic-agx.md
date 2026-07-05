@@ -275,9 +275,11 @@ method; the rest is somebody's taste frozen into code.
 
 ## Architecture in Ansel
 
-- **Color science `v8 (AgX)`** — a new value of
-  `dt_iop_filmicrgb_colorscience_type_t`. Pixel path (`filmic_agx()`), in
-  plain terms:
+- **Color science `v8 (AgX)`** — three new values of
+  `dt_iop_filmicrgb_colorscience_type_t` (`V6`/`V7`/`V8` = no / low / high
+  bleach; `_filmic_is_agx()` dispatches them identically, they differ only by
+  the bracket constants — see "Three variants on one axis"). Pixel path
+  (`filmic_agx()`), in plain terms:
 
   1. sanitize the input (NaN → 0, clamp to ±1e6);
   2. lift any negative RGB values to zero while preserving the pixel's
@@ -390,8 +392,8 @@ Reading the matrix that way makes every constraint easy to state:
 | 1 | Separate `agx` module (33 params, 2 notebook pages, 2845 LoC) | Filmic color science value, adds 457 LoC | Same purpose as filmic (view transform); a second tone mapper splits users and duplicates the log/curve/picker scaffolding wholesale. |
 | 2 | Base primaries selector (export/work/Rec2020/P3/AdobeRGB/sRGB) | Working profile, always | The base folds into the constants; "export profile" as a base made the render depend on an output setting while we *already* gamut-map to the export profile at the end. |
 | 3 | Primaries displaced in CIE xy, rotations in xy radians | Displaced in Kirk/Filmlight Yrg chromaticity, rotations in Yrg angle | A degree of rotation then means the same perceptual hue shift for every primary (Yrg is fitted to even Munsell hue spacing); xy radians are perceptually uneven across the wheel. |
-| 4 | Hand-tuned constants (Blender forum lineage), 12 user sliders + 2 master ratios + reverse toggle | 12 fixed anchors (per-primary inset+outset chroma & rotation) fitted offline by `tools/derive_filmic_agx_primaries.py --fit-priority`; single strength scalar at runtime | The sliders exist upstream so users can fit their own rendering space; the shipped configurations are what everyone uses. The residual empiricism moves into a stated, reproducible objective function instead of thirty floats in a params struct. Positivity coupling (constraint 2) makes one shared scalar the *safe* parameterization. |
-| 5 | Outset partially restores purity (under-expansion: bakes midtone *desaturation* in), rotations not reversed by default (Blender), separately editable (darktable) | Outset over-expands per-primary (κ-equiv {1.31, 1.78, 1.01}), jointly fitted with the inset, not editable | Fitted so valid diffuse colors (skin database + reflectances) recover their chroma through the bracket itself, with the output≤input chroma clamp trimming the excess per pixel. Blender's under-expansion bleaches midtones by construction — the exact opposite of what skin tones need; an exact inverse was tried and retired (see constraints). |
+| 4 | Hand-tuned constants (Blender forum lineage), 12 user sliders + 2 master ratios + reverse toggle | Fixed anchors (uniform inset scalar + per-primary outset chroma & rotation) fitted offline by `tools/derive_filmic_agx_primaries.py`; three preset variants (no/low/high bleach), no runtime bracket sliders | The sliders exist upstream so users can fit their own rendering space; the shipped configurations are what everyone uses. The residual empiricism moves into a stated, reproducible objective (a desaturation budget) instead of thirty floats in a params struct. A uniform inset is the *safe* parameterization — per-primary insets let the fit game the metric. |
+| 5 | Outset partially restores purity (under-expansion: bakes midtone *desaturation* in), rotations not reversed by default (Blender), separately editable (darktable) | Outset over-expands per-primary (ratios > 1), jointly fitted with the inset, not editable | Fitted so valid diffuse colors (skin database + reflectances) recover their chroma through the bracket itself, with the output≤input chroma clamp trimming the excess per pixel. Blender's under-expansion bleaches midtones by construction — the exact opposite of what skin tones need; an exact inverse was tried and retired (see constraints). |
 | 6 | Hue restore mix in **HSV** (device-space hue), default 60% | Shortest-arc hue mix in **Kirk Ych**, inside the existing gamut-mapping stage | HSV hue is not a perceptual quantity. Filmic already computes Ych per pixel and its gamut mapper reduces chroma *at constant hue*, so deciding the hue first in the same metric is both cheaper and coherent. The recovery is exact per pixel, not a first-order matrix approximation ("Abney compensation" limited only by the Yrg Munsell fit — weakest in deep blue-violet). |
 | 7 | "Look" block: lift/slope/power/saturation + brightness | Dropped | Strict subset of Color Balance RGB (lift↔shadows lift/offset, slope↔gain+contrast, brightness↔power, saturation↔saturation global), computed there in a proper perceptual space with per-range masks. |
 | 8 | Own log encoding fixed to 0.18 mid-gray, contrast renormalized to the 16.5 EV Blender range, gamma-compensated slope, `auto_gamma` | Filmic's existing log encoding, grey/DR params, contrast, `auto_hardness` | Identical math where it overlaps; the renormalizations only existed to keep Blender's slider values meaningful. Filmic's parameterization is authoritative here; no values were imported. |
@@ -610,61 +612,134 @@ RGB, governor in Ych — that division is the design.
 
 ## Anchor constants and what the fit taught us
 
-The shipped constants (production fit, 2026-07, `--fit-priority`) are the whole
-12-parameter bracket, jointly fine-tuned:
+### Three variants on one axis (2026-07)
 
-| stage | chroma (per primary R/G/B) | rotation (Yrg hue, R/G/B) |
-|---|---|---|
-| inset  | 0.350 / 0.350 / 0.345 | −2.51° / +9.06° / +1.02° |
-| outset | 0.458 / 0.621 / 0.350 | −1.98° / +11.95° / +4.32° |
+v8 AgX ships as **three colorscience variants** — *no bleach* (default), *low
+bleach*, *high bleach*. They share the entire pixel path and differ **only** by
+the bracket constants. All three are points on a single axis: **inset strength**,
+which trades bright-color desaturation ("bleach") for in-bracket hue accuracy.
+More inset → the per-channel curve acts on more-compressed channels (less hue
+drift) but the round trip loses more chroma. The inset is **uniform** (a
+per-primary inset is the lever the optimizer abuses — it rails green to 0.7 and
+wrecks an unseen blue; the good fits use a uniform inset with per-primary action
+in the outset anyway), so each variant is one scalar plus the per-primary outset:
 
-The outset is **per-primary**, no longer a single κ multiple of the inset: its
-κ-equivalent expansion ratios are {1.31, 1.78, 1.01} — green over-expands most
-(its inset pulled it furthest), blue barely recovers. On the priority set (skin
-database + diffuse reflectances) this gives skin |mean| hue drift **2.2°**
-(worst +6.6°) and reflective mean **2.3°** — everything comfortably below the
-~2–3° hue JND, with rendering character preserved (highlight chroma ~98%).
+**Measured behaviour** (`tools/derive_filmic_agx_primaries.py --report`), as
+{avg ; max} over the skin-tone database and the diffuse reflective/memory-color
+hue circle, each swept over tonal placements. Desaturation is chroma loss
+(1 − output/input chroma, post clamp); hue shift is the bracket's raw drift
+*before* the Ych recovery slider mitigates it:
 
-**How the methodology got here (three eras).** The fit started life as
-`--minimax` (minimize the single worst hue error at the character end of the
-slider, where nothing backstops the matrices), which parked the blue rotation
-against the no-negative-channels wall at +24°. That was correct only while the
-outset *bleached* every color (exact inverse). Adding the κ recovery
-(`--fit-outset`) kept colors saturated, which re-exposed the drift the
-bleaching had hidden — and revealed that the same +24° blue rotation now
-*caused* purple on recovered blues. The final step (`--fit-priority`) drops the
-hand-structured "fix blue, keep red/green" recipe entirely and lets a joint
-Nelder-Mead solve all 12 parameters at once, but against a **narrowed target**:
-the priority set only (skin + reflective), with hard barriers on skin (red-ward
-drift ≤ −1.5°, chroma ≥ 92%) and no bleaching (diffuse p5 ≥ 0.97), so accuracy
-cannot be gamed by washing colors to gray. This is the current production fit;
-`--minimax` and `--fit-outset` are kept in the script as the historical record.
+| variant | skin desat avg/max | skin hue drift avg/max | reflective desat avg/max | reflective hue drift avg/max |
+|---|---|---|---|---|
+| **no bleach** | **0.0% / 0.0%** | 2.9° / 9.0° | 3.7% / 63.4% | 3.5° / 19.7° |
+| **low bleach** | 0.0% / 0.0% | 2.0° / 6.3° | 7.1% / 71.4% | 2.6° / 12.9° |
+| **medium bleach** | 0.4% / 9.2% | 1.4° / 4.4° | 10.6% / 75.1% | 2.1° / 10.0° |
+| **high bleach** | 2.6% / 19.0% | **0.8° / 2.1°** | 15.4% / 78.4% | 1.6° / 6.3° |
 
-**Why the target was narrowed — the DoF limit.** Before narrowing, a full
-12-parameter *global* fit (differential evolution) was run over the entire sRGB
-hue circle × exposure. The verdict was structural: with skin protected and
-bleaching forbidden, the linear bracket tops out at ~8° mean full-circle drift
-— **no better than the trivial uniform inset** — and it cannot hold saturated
-sRGB blue at +5–6 EV (above the white point) without either driving skin red or
-bleaching, both hard-vetoed. A pair of 3×3 matrices wrapped around a
-per-channel curve simply has too few degrees of freedom to hold every hue at
-every exposure; fixing one region borrows from another. So blue-at-high-EV is
-conceded as a lost edge case (it is left to the per-pixel Ych hue recovery,
-which is exact at full strength), and the bracket is optimized for the colors
-that actually matter in photographs.
+The single axis is visible across every column: from no→high bleach, hue drift
+falls (skin 2.9°→0.8°) and desaturation rises (skin avg 0.0%→2.6%, reflective avg
+3.7%→15.4%). The reflective *max* desaturation is high in all three (63–78%)
+because it is the intended bleach of near-clipping bright colors — that is
+per-channel tone mapping working, not a defect, and it is the same order in every
+variant.
 
-**Why *conservative*.** The inset is capped at 0.35 in the fit. The
-unconstrained optimum runs it at ~0.55, which buys a further skin gain (2.2° →
-1.4°) — but that gain is itself below the visibility threshold, while the
-stronger bracket has a *visible* cost: highlights desaturate more (the AgX
-rolloff look intensifies) and the pure-green primary drifts to +9°. Trading a
-perceptible character change for an invisible accuracy gain is a bad deal, so
-the cap stays (maintainer's call).
+- **no bleach — protect the irrecoverable.** Hue drift *is* recoverable downstream
+  (the Ych governor); saturation is *not* — nothing puts back chroma the bracket
+  bled. So the default protects chroma (skin desaturation literally 0.0%, reflective
+  avg 2.1%) and accepts the largest hue drift, which the "color preservation" slider
+  restores. *Use case:* the safe default — colourful subjects, product/skin work
+  where washing out is the worst failure; pair with the slider toward +100% if the
+  hue character needs pulling back. *Mitigation of its cost (hue):* the slider, exact
+  at +100%.
+- **high bleach — protect hue in-bracket.** Spends chroma (reflective avg 15.4%) to
+  drive the raw hue drift to near nothing (skin 0.8°, reflective max 6°), so the look
+  is hue-correct even with the slider at −100% (pure film character). *Use case:* when
+  you want the AgX highlight wash-out as an aesthetic and demand accurate hues without
+  touching the slider. *Mitigation of its cost (chroma):* none downstream — this is a
+  deliberate, irreversible trade, which is why it is not the default.
+- **low bleach — the perceptual midpoint.** Not a desaturation budget (that put it
+  too close to high-bleach — the visible gap no→low exceeded low→high) but the bracket
+  that best reproduces the **average of the no-bleach and high-bleach processed
+  outputs** (`--fit-low-bleach`). It bisects the hue drift evenly (skin 2.9°→**2.0°**→
+  0.8°, reflective 3.5°→**2.6°**→1.6°) with intermediate reflective desaturation
+  (7.1%), and — because the least-squares target lands where the output-chroma clamp
+  holds skin at full chroma — it keeps skin saturation (0% desat), *not* inheriting
+  high-bleach's skin whitening. *Use case:* the general-purpose middle, a even step
+  between the two extremes.
+
+The outset always **over-expands** (ratios > 1) so priority colours reach the
+output-chroma ≤ input-chroma clamp and are trimmed to exactly 1.0 per pixel —
+portable across dynamic ranges. The reproducible constants (mirror
+`filmic_agx_prepare_bracket`, and `SHIPPED_VARIANTS` in the script):
+
+| variant | inset | outset chroma (R/G/B) | cond | fit |
+|---|---|---|---|---|
+| no bleach | 0.336 | 0.349 / 0.737 / 0.397 | 4.7 | `--min-bleach` |
+| low bleach | 0.488 | 0.479 / 0.746 / 0.370 | 4.7 | `--fit-low-bleach` |
+| high bleach | 0.748 | 0.725 / 0.829 / 0.550 | 6.5 | `--max-desat 0.05` |
+
+**Rec2020 gamut safety (a hard constraint on the no-bleach fit).** The working
+space *is* linear Rec2020, so its primaries are the most saturated colors that can
+occur — the worst case. Minimum desaturation wants a strongly over-expanding outset
+(an early no-bleach fit ran inset 0.20 with outset ratios ~3), but that expansion
+pushes the **Rec2020 blue primary to negative luminance** across roughly −10…+1 EV:
+the outset's R and G rows have large negative off-diagonals, blue's still-saturated
+channels (after the weak inset) hit them, and blue's tiny luminance weight (0.046)
+means R,G ≈ −0.3 flips the luminance negative → **the pixel renders black**. Low and
+high bleach are immune because their strong insets (0.63, 0.75) pre-equalize the
+channels, so their (even more negative) outsets stay luminance-positive. The
+`--min-bleach` fit therefore constrains the outset to retain ≥ 25% of the pre-outset
+luminance for every Rec2020 primary/secondary across the tonal range; the shipped
+no-bleach (inset 0.336, milder outset ratios 1.0/2.2/1.2) keeps every boundary color
+luminance-positive (verified −12…+8 EV) at a small cost in reflective desaturation
+(2→3.7% avg). This was a real shipped bug — the fit's chroma metric clamped negative
+RGB to a tiny positive, so it never saw the black.
+
+**The `--max-desat FRAC` tool** is the recommended way to set a bracket: state the
+maximum average chroma loss over the priority set you'll accept, and the solver
+returns the best-hue bracket at that budget. The budget binds (achieved ≈ FRAC)
+and hue improves monotonically until it plateaus (~5%). The metric evaluates the
+whole priority set every step (vectorized via a curve LUT) so no color can hide,
+hard-caps the worst single hue at 16°, and vetoes skin red-ward drift — the
+guards that stop the optimizer gaming an average by wrecking one color.
+
+**The no-bleach surprise.** A hard 0% inset is the **worst** case for saturation,
+not the best: with no inset the outset cannot over-expand without wrecking
+conditioning, so bright colors bleach from the raw per-channel curve with nothing
+to recover them (**7.7% avg desat** at inset 0, vs < 1% at a moderate inset). The
+over-expanding outset is what *un-bleaches* — it pulls chroma back up to the clamp
+— and it only becomes well-conditioned once the inset is ≥ ~0.2. There is a sharp
+phase transition there: below it the fit is stuck at exact-inverse (~8% desat),
+above it desat collapses. So minimum bleach sits at a **moderate** inset, never
+near zero — the shipped no-bleach lands at 0.336 once Rec2020 gamut safety (below)
+rules out the still-lower-inset / stronger-outset optima.
+
+**The DoF limit (why the inset is uniform and blue is conceded).** A full
+12-parameter *global* fit (differential evolution) over the entire sRGB hue circle
+× exposure proved structural: with skin protected and bleaching forbidden, the
+linear bracket tops out at ~8° mean full-circle drift — no better than a uniform
+inset — and cannot hold saturated sRGB blue at +5–6 EV (above the white point)
+without driving skin red or bleaching. A pair of 3×3 matrices around a per-channel
+curve has too few DoF to hold every hue at every exposure; fixing one region
+borrows from another, and a per-primary inset just gives the optimizer more rope
+to hang an unseen color. So the inset is uniform, and blue-at-high-EV is left to
+the per-pixel Ych hue recovery (exact at full strength).
+
+**Methodology evolution.** The fit passed through `--minimax` (worst-case hue for
+the bleached exact-inverse regime; parked blue at +24° against the positivity
+wall), `--fit-outset` (added the κ recovery, which re-exposed the drift bleaching
+hid and revealed the +24° blue now *caused* purple), `--fit-priority` (joint
+12-param fit, uniform-target, capped inset 0.35), and finally the desaturation-
+budget frontier (`--max-desat`) that spans the three shipped variants. All earlier
+modes are kept in the script as the historical record.
 
 One maintenance rule: the anchors are only optimal *for the curve they were
 fitted against*. `CURVE_DEFAULTS` in the script must be kept in sync with the
-C `$DEFAULT`s, and any change to the default curve requires re-running the
-fit (`--fit-priority`).
+C `$DEFAULT`s, and any change to the default curve requires re-running the three
+fits — `--min-bleach` (no bleach) and `--max-desat 0.05` (high bleach) first, then
+`--fit-low-bleach` (low bleach is the midpoint of the other two, so it must be
+refit *after* them).
 
 Two findings from the fitting work reshaped the methodology and are worth
 keeping on record:

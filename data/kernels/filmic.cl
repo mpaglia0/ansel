@@ -53,7 +53,10 @@ typedef enum dt_iop_filmicrgb_colorscience_type_t
   DT_FILMIC_COLORSCIENCE_V3 = 2,
   DT_FILMIC_COLORSCIENCE_V4 = 3,
   DT_FILMIC_COLORSCIENCE_V5 = 4,
-  DT_FILMIC_COLORSCIENCE_V6 = 5, // AgX
+  DT_FILMIC_COLORSCIENCE_V6 = 5, // AgX, no bleach
+  DT_FILMIC_COLORSCIENCE_V7 = 6, // AgX, low bleach
+  DT_FILMIC_COLORSCIENCE_V8 = 7, // AgX, medium bleach
+  DT_FILMIC_COLORSCIENCE_V9 = 8, // AgX, high bleach
 } dt_iop_filmicrgb_colorscience_type_t;
 
 typedef enum dt_iop_filmicrgb_reconstruction_type_t
@@ -1027,8 +1030,11 @@ filmicrgb_split (read_only image2d_t in, write_only image2d_t out,
     }
     case DT_FILMIC_COLORSCIENCE_V5:
     case DT_FILMIC_COLORSCIENCE_V6:
+    case DT_FILMIC_COLORSCIENCE_V7:
+    case DT_FILMIC_COLORSCIENCE_V8:
+    case DT_FILMIC_COLORSCIENCE_V9:
     {
-      // v5 and v8 are handled as chroma variants, they should not end up here
+      // v5 to v9 (all AgX variants) are handled as chroma variants, not here
       o = (float4){1.f, 0.f, 0.f, 1.f};
       break;
     }
@@ -1209,7 +1215,10 @@ filmicrgb_chroma (read_only image2d_t in, write_only image2d_t out,
                            norm_min, norm_max, y_min, y_max);
       break;
     }
-    case DT_FILMIC_COLORSCIENCE_V6:
+    case DT_FILMIC_COLORSCIENCE_V6: // AgX : no / low / high bleach share the path,
+    case DT_FILMIC_COLORSCIENCE_V7: // they differ only by the inset/outset matrices
+    case DT_FILMIC_COLORSCIENCE_V8: // (computed CPU-side, passed in above)
+    case DT_FILMIC_COLORSCIENCE_V9:
     {
       o = filmic_agx(i, dynamic_range, black_exposure, grey_value,
                      M1, M2, M3, M4, M5, latitude_min, latitude_max, output_power,

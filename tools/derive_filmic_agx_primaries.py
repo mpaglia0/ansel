@@ -18,11 +18,19 @@ Objectives:
      degeneracy (conditioning).
 
 Usage:
+  python3 tools/derive_filmic_agx_primaries.py --max-desat FRAC   (recommended)
+  python3 tools/derive_filmic_agx_primaries.py --fit-priority
   python3 tools/derive_filmic_agx_primaries.py [--drift-target DEG_PER_EV]
 
+The recommended mode is --max-desat : you state the maximum average chroma loss
+over the priority set (skin + reflective) you accept, and the solver returns the
+bracket with the best hue match at or below that budget. Sweep it to trace the
+hue/chroma frontier. See its --help for the full method.
+
 Prints the C arrays to paste into filmic_agx_prepare_bracket(). Requires
-numpy + scipy. Constants below are copied verbatim from the C code so the model
-matches the pipeline bit-for-bit in spirit (float64 here, float32 there).
+numpy + scipy (run with python3.12). Constants below are copied verbatim from the
+C code so the model matches the pipeline bit-for-bit in spirit (float64 here,
+float32 there).
 """
 
 import argparse
@@ -228,6 +236,224 @@ def residuals(params, drift_target_rad_per_ev):
         res.extend(0.5 * (d - drift_target_rad_per_ev))              # uniform drift
     return np.array(res, dtype=float)
 
+# ---------------------------------------------------------------- shipped variants + vectorized report
+# The three v8 "AgX" colorscience variants (see filmic_agx_prepare_bracket in
+# src/iop/filmicrgb.c). SINGLE SOURCE OF TRUTH — these must equal the C constants.
+# Regenerate each with the fit mode noted; --report measures them for the doc tables.
+SHIPPED_VARIANTS = {  # inset is uniform ; outset is per-primary (over-expanding)
+    "no-bleach":   dict(fit="--min-bleach",     inset=0.335562,
+                        irot=[-0.0092314, +0.0979124, +0.0034991],
+                        outset=[0.349067, 0.737216, 0.396854], orot=[+0.0047636, +0.1445774, +0.0011608]),
+    "low-bleach":  dict(fit="--fit-low-bleach", inset=0.487623,
+                        irot=[-0.0176159, +0.0650293, +0.0044292],
+                        outset=[0.479379, 0.746078, 0.369679], orot=[-0.0050757, +0.1018535, +0.0119466]),
+    "medium-bleach": dict(fit="--fit-medium-bleach", inset=0.595334,
+                          irot=[-0.0273940, +0.0323704, +0.0236516],
+                          outset=[0.576994, 0.768241, 0.402336], orot=[-0.0167965, +0.0642740, +0.0419658]),
+    "high-bleach": dict(fit="--max-desat 0.05", inset=0.747987,
+                        irot=[-0.0515563, -0.0375649, +0.0222773],
+                        outset=[0.724651, 0.828507, 0.550322], orot=[-0.0438769, -0.0095878, +0.0521530]),
+}
+
+# tone curve baked into a monotone LUT once, so the whole measurement vectorizes
+# (np.interp) instead of calling the scalar-branching curve per sample
+_LUT_X = np.linspace(0.0, 1.0, 8193)
+_LUT_Y = np.array([CURVE(v) for v in _LUT_X])
+
+def chroma_hue_batch(RGB):
+    """(N,3) working-linear-Rec2020 -> (chroma, hue) in Kirk Yrg, relative to white."""
+    LMS = ((RGB @ REC2020_TO_XYZ_D50.T) @ XYZ_D50_to_D65_CAT16.T) @ XYZ_D65_to_LMS_2006.T
+    a = LMS.sum(axis=1, keepdims=True)
+    rg = (LMS / np.where(a == 0.0, 1.0, a)) @ LMS_to_filmlightRGB.T
+    dr, dg = rg[:, 0] - WHITE_YRG[1], rg[:, 1] - WHITE_YRG[2]
+    return np.hypot(dr, dg), np.arctan2(dg, dr)
+
+def variant_bracket(v):
+    """(inset matrix M, applied outset matrix) for a SHIPPED_VARIANTS entry."""
+    M, _ = bracket_matrices(np.full(3, v["inset"]), v["irot"])
+    Mo, _ = bracket_matrices(v["outset"], v["orot"])
+    return M, np.linalg.inv(Mo)
+
+def measure_batch(S, C_in, H_in, M, Mo):
+    """(N,3) samples through inset -> per-channel curve -> outset ; returns
+    (chroma_ratio post output<=input clamp, hue_drift_deg), both (N,)."""
+    x = (np.log2(np.maximum(S @ M.T, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+    y = np.interp(np.clip(x, 0.0, 1.0).ravel(), _LUT_X, _LUT_Y).reshape(x.shape)
+    O = np.maximum(y @ Mo.T, 1e-10)
+    c_f, h_f = chroma_hue_batch(O)
+    cr = np.minimum(c_f / np.maximum(C_in, 1e-9), 1.0)
+    dh = np.rad2deg(np.remainder(h_f - H_in + np.pi, 2 * np.pi) - np.pi)
+    return cr, dh
+
+def skin_and_reflective_sets():
+    """Two disjoint sample arrays, each swept over tonal placements : the skin-tone
+    database, and the diffuse 'reflective'/memory-color hue circle (NOT skin)."""
+    y_row = REC2020_TO_XYZ_D50[1]
+    def place(rgb, evs):
+        lum = y_row @ rgb
+        return [rgb * (GREY * 2.0 ** e / lum) for e in evs]
+    skin = []
+    for (L, Ls, a, As, b, Bs) in _SKIN_LAB:
+        for dL in (-1.5, 0.0, 1.5):
+            for da in (-1.5, 1.5):
+                for db in (-1.5, 1.5):
+                    rgb = _lab_d65_to_work(L + dL * Ls, a + da * As, b + db * Bs)
+                    if rgb.min() > 0:
+                        skin += place(rgb, (-1.5, -0.75, 0.0, 0.75, 1.5))
+    refl = []
+    for k in range(12):
+        h = 2 * np.pi * k / 12
+        base = np.array([np.cos(h), np.cos(h - 2 * np.pi / 3), np.cos(h + 2 * np.pi / 3)])
+        base = (base - base.min()) / (base.max() - base.min())
+        for p in (0.3, 0.5, 0.7):
+            refl += place(p * base + (1 - p) * 0.5, (-2, -1, 0, 1, 2, 2.5))
+    return np.array(skin), np.array(refl)
+
+def rec2020_worst_boundary_luminance(M, Mo):
+    """Worst output luminance over the Rec2020 primaries and secondaries across the
+    tonal range. Rec2020 IS the working space, so its primaries are the most saturated
+    colors that can occur — the worst case. A strongly over-expanding outset can push
+    them to NEGATIVE luminance (the pixel renders BLACK); this must stay > 0. This is
+    the gamut-safety check that caught the no-bleach blue-goes-black bug."""
+    y_row = REC2020_TO_XYZ_D50[1]
+    bnd = [np.maximum(np.array(c, float), 1e-6) for c in
+           ([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 1, 1], [1, 0, 1], [1, 1, 0])]
+    worst = 1e9
+    for s in bnd:
+        lum0 = y_row @ s
+        for ev in np.arange(-12.0, 8.01, 0.5):
+            mr = M @ (s * GREY * 2.0 ** ev / lum0)
+            x = (np.log2(np.maximum(mr, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+            cv = np.interp(np.clip(x, 0.0, 1.0), _LUT_X, _LUT_Y)
+            worst = min(worst, float(y_row @ (Mo @ cv)))
+    return worst
+
+def fit_midpoint(lo_key, hi_key, inset_lo, inset_hi, seed_insets):
+    """Solve for the bracket that best reproduces the AVERAGE of two variants' processed
+    outputs — the perceptual midpoint. Target = 0.5*(post_bracket(lo) + post_bracket(hi))
+    over a skin + reflective + Rec2020-boundary sample set (skin weighted x2), fit in
+    least squares under Rec2020 gamut safety, positivity and conditioning. Returns the
+    10-parameter bracket (uniform inset, inset rot[3], outset[3], outset rot[3]) or None."""
+    from scipy.optimize import minimize
+    y_row = REC2020_TO_XYZ_D50[1]
+
+    def post_bracket(S, M, Mo):
+        x = (np.log2(np.maximum(S @ M.T, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+        y = np.interp(np.clip(x, 0.0, 1.0).ravel(), _LUT_X, _LUT_Y).reshape(x.shape)
+        return y @ Mo.T
+
+    def brkp(p):
+        M, _ = bracket_matrices(np.full(3, p[0]), p[1:4])
+        Mo, _ = bracket_matrices(p[4:7], p[7:10])
+        return M, np.linalg.inv(Mo)
+
+    S_sk, S_rf = skin_and_reflective_sets()
+
+    def place(rgb, evs):
+        lum = y_row @ rgb
+        return [rgb * (GREY * 2.0 ** e / lum) for e in evs]
+    bnd = []
+    for c in ([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 1, 1], [1, 0, 1], [1, 1, 0]):
+        bnd += place(np.maximum(np.array(c, float), 1e-6), (-4, -2, 0, 2))
+    S = np.vstack([S_sk, S_rf, np.array(bnd)])
+    wt = np.ones(len(S)); wt[:len(S_sk)] = 2.0           # weight skin (portraits)
+
+    def input_chroma(RGB):                               # module chroma_hue_batch is shadowed inside main()
+        LMS = ((RGB @ REC2020_TO_XYZ_D50.T) @ XYZ_D50_to_D65_CAT16.T) @ XYZ_D65_to_LMS_2006.T
+        a = LMS.sum(axis=1, keepdims=True)
+        rg = (LMS / np.where(a == 0.0, 1.0, a)) @ LMS_to_filmlightRGB.T
+        return np.hypot(rg[:, 0] - WHITE_YRG[1], rg[:, 1] - WHITE_YRG[2])
+    keep = input_chroma(S) > 0.03
+    S, wt = S[keep], wt[keep]
+
+    Mlo, Molo = variant_bracket(SHIPPED_VARIANTS[lo_key])
+    Mhi, Mohi = variant_bracket(SHIPPED_VARIANTS[hi_key])
+    TARGET = 0.5 * (post_bracket(S, Mlo, Molo) + post_bracket(S, Mhi, Mohi))
+
+    BIG = 1e6
+
+    def objective(p):
+        if not (inset_lo <= p[0] <= inset_hi):
+            return BIG
+        if p[4:7].min() < 0.02 or p[4:7].max() > 0.98:
+            return BIG
+        if np.abs(np.concatenate([p[1:4], p[7:10]])).max() > np.deg2rad(25):
+            return BIG
+        M, Mo = brkp(p)
+        if M.min() < 0.004 or max(np.linalg.cond(M), np.linalg.cond(Mo)) > 6.5:
+            return BIG
+        if rec2020_worst_boundary_luminance(M, Mo) <= 0.0:   # gamut safety : no black
+            return BIG
+        O = post_bracket(S, M, Mo)
+        return float(np.mean(wt[:, None] * (O - TARGET) ** 2))
+
+    best = None
+    for i0 in seed_insets:
+        x0 = [i0, -0.03, 0.16, 0.01, min(0.9, i0), min(0.9, i0 * 1.25), min(0.9, i0 * 0.9), -0.02, 0.17, 0.0]
+        r = minimize(objective, x0, method="Nelder-Mead",
+                     options={"xatol": 1e-6, "fatol": 1e-9, "maxiter": 9000, "maxfev": 9000})
+        if r.fun < BIG and (best is None or r.fun < best.fun):
+            best = r
+    return best.x if best is not None else None
+
+def print_midpoint_constants(p, mode, endpoints):
+    """Print the C constant block for a fitted midpoint bracket (or a failure note)."""
+    if p is None:
+        print("// no feasible %s under the constraints." % mode)
+        return
+    M, _ = bracket_matrices(np.full(3, p[0]), p[1:4])
+    Mo, _ = bracket_matrices(p[4:7], p[7:10])
+    Mo = np.linalg.inv(Mo)
+    print("// fitted by tools/derive_filmic_agx_primaries.py %s" % mode)
+    print("// perceptual midpoint of %s (average of processed outputs)" % endpoints)
+    print("// Rec2020 gamut safety : worst boundary luminance %+.4f ; cond %.1f"
+          % (rec2020_worst_boundary_luminance(M, Mo), max(np.linalg.cond(M), np.linalg.cond(Mo))))
+    print("static const float inset_anchor[3]    = { %.6ff, %.6ff, %.6ff };" % (p[0], p[0], p[0]))
+    print("static const float rotation_anchor[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+          % (p[1], p[2], p[3], *np.rad2deg(p[1:4])))
+    print("static const float outset_anchor[3]   = { %.6ff, %.6ff, %.6ff };" % (p[4], p[5], p[6]))
+    print("static const float outset_rotation[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+          % (p[7], p[8], p[9], *np.rad2deg(p[7:10])))
+
+def report_variants():
+    """Print the {avg,max} x {desaturation,hue drift} x {skin,reflective} table for
+    the four shipped variants, plus a Rec2020 gamut-safety check. Desaturation is over
+    all colors that carry chroma ; hue drift is measured where chroma survives (ratio >
+    0.2 — a bleached color has no meaningful hue). This is the source of the tables in
+    doc/filmic-agx.md and the user docs."""
+    S_sk, S_rf = skin_and_reflective_sets()
+    Csk, Hsk = chroma_hue_batch(S_sk)
+    Crf, Hrf = chroma_hue_batch(S_rf)
+    mk = Csk > 0.04                                          # drop near-neutral inputs (ratio is noise)
+    S_sk, Csk, Hsk = S_sk[mk], Csk[mk], Hsk[mk]
+    mr = Crf > 0.05
+    S_rf, Crf, Hrf = S_rf[mr], Crf[mr], Hrf[mr]
+
+    def stat(S, C, H, M, Mo):
+        cr, dh = measure_batch(S, C, H, M, Mo)
+        d = (1.0 - cr) * 100.0
+        g = np.abs(dh[cr > 0.2])
+        return d.mean(), d.max(), g.mean(), g.max()
+
+    print("# {avg ; max} desaturation and hue drift, skin tones vs reflective colors")
+    print("# skin database (De Rigal/Xiao) and diffuse memory-color hue circle, over tonal placements")
+    print("%-11s | %-31s | %-31s" % ("", "SKIN TONES", "REFLECTIVE COLORS"))
+    print("%-11s | %-13s %-16s | %-13s %-16s"
+          % ("variant", "desat a/max", "hue drift a/max", "desat a/max", "hue drift a/max"))
+    for name, v in SHIPPED_VARIANTS.items():
+        M, Mo = variant_bracket(v)
+        sda, sdm, sha, shm = stat(S_sk, Csk, Hsk, M, Mo)
+        rda, rdm, rha, rhm = stat(S_rf, Crf, Hrf, M, Mo)
+        print("%-11s | %4.1f%% %5.1f%%   %4.1f° %5.1f°  | %4.1f%% %5.1f%%   %4.1f° %5.1f°"
+              % (name, sda, sdm, sha, shm, rda, rdm, rha, rhm))
+
+    print("\n# Rec2020 gamut safety : worst output luminance over the Rec2020 primaries")
+    print("# and secondaries, EV -12..+8. Must be > 0 — a negative value renders BLACK.")
+    for name, v in SHIPPED_VARIANTS.items():
+        M, Mo = variant_bracket(v)
+        wl = rec2020_worst_boundary_luminance(M, Mo)
+        print("%-11s worst boundary luminance %+.4f   %s" % (name, wl, "OK" if wl > 0 else "*** BLACK ***"))
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -278,13 +504,391 @@ def main():
                          "database + diffuse reflectances) at preserved chroma. Supersedes "
                          "--fit-outset : the outset is now a per-primary expansion, not a "
                          "scalar kappa. Hard constraints (barriers the optimizer cannot "
-                         "cross) : skin red-ward drift <= -1.5 deg, skin chroma >= 92%, "
+                         "cross) : skin red-ward drift <= -1.5 deg, skin chroma >= 92%%, "
                          "diffuse recovery p5 >= 0.97 (bleaching cannot game accuracy), inset "
                          "positivity >= 0.004, conditioning <= 6.5. Inset capped at 0.35 to "
                          "keep rendering character (the free optimum runs 0.55 for a sub-JND "
                          "gain at a visible highlight-desaturation cost). sRGB blue at high EV "
                          "is not targeted — a structural DoF limit, left to the Ych recovery.")
+    ap.add_argument("--max-desat", type=float, default=None, metavar="FRAC",
+                    help="Desaturation-budgeted fit — the recommended way to set the bracket. "
+                         "FRAC is the MAXIMUM average chroma loss (1 - output/input chroma, post "
+                         "output<=input clamp) over the priority set (skin database + diffuse "
+                         "reflectances) you are willing to trade for hue accuracy — e.g. 0.05 = "
+                         "at most 5%% average desaturation. The solver minimizes hue drift and "
+                         "spends desaturation on hue up to FRAC : a hard barrier caps the "
+                         "average, and a tiny chroma-preference term keeps chroma as high as the "
+                         "hue optimum allows, so a slack budget is not wasted (the 'best chroma "
+                         "match' half). The inset is a single UNIFORM scalar (10 params : inset "
+                         "chroma + 3 inset rotations + 3 outset chroma + 3 outset rotations) — a "
+                         "per-primary inset is the lever the optimizer abuses to game the metric "
+                         "(green rails to 0.7, wrecking an unseen blue), and the good fits use a "
+                         "uniform inset with the per-primary action in the outset anyway. The "
+                         "whole priority set is evaluated every step (vectorized, no subsample), "
+                         "so no color can hide ; the worst single hue is hard-capped at 16 deg ; "
+                         "skin red-ward drift stays vetoed (<= -1.5 deg) regardless of budget. "
+                         "The desaturation is mostly the bright-color / highlight bleach (the AgX "
+                         "wash-out look), so individual highlights bleaching hard is expected and "
+                         "not penalized. Sweep FRAC to trace the hue/chroma frontier : ~0.02 "
+                         "gives inset 0.63 / skin 1.3 deg / refl max 10 deg ; ~0.05 gives inset "
+                         "0.75 / skin 0.8 deg / refl max 6 deg (saturated colors visibly bleach) ; "
+                         "beyond ~0.05 hue stops improving. Supersedes --fit-priority (which is "
+                         "roughly FRAC 0.02 on a uniform 0.35 inset).")
+    ap.add_argument("--min-bleach", action="store_true",
+                    help="Fit the NO-BLEACH variant : minimize the bracket's own desaturation, "
+                         "letting hue drift (which the downstream Ych hue-recovery restores — "
+                         "there is no downstream saturation recovery, so chroma is what must be "
+                         "protected here). COUNTERINTUITIVE result this encodes : a hard 0%% "
+                         "inset is the WORST case for saturation (~7.7%% avg desat), because "
+                         "with no inset the outset cannot over-expand without wrecking "
+                         "conditioning, so bright colors bleach from the raw per-channel curve "
+                         "with nothing to recover them. The over-expanding outset is what un-"
+                         "bleaches (pulls chroma back up to the output<=input clamp), and it "
+                         "only becomes well-conditioned at inset >= ~0.2. So minimum bleach sits "
+                         "at a MODERATE inset ~0.25 (avg desat < 0.5%%, conditioning ~3, very "
+                         "stable) — not near zero. Objective : minimize avg + worst-color "
+                         "desaturation over the priority set, inset in [0.20, 0.30], worst hue "
+                         "<= 24 deg (recoverable), conditioning <= 4.5 (stability), skin red-ward "
+                         "drift <= -2.5 deg.")
+    ap.add_argument("--fit-low-bleach", action="store_true",
+                    help="Fit the LOW-BLEACH variant as the PERCEPTUAL MIDPOINT of no-bleach and "
+                         "high-bleach. Rather than a desaturation budget (which put low-bleach's "
+                         "hue too close to high-bleach — the visible gap no->low was larger than "
+                         "low->high), the target is the straight average of the no-bleach and "
+                         "high-bleach PROCESSED OUTPUTS (post-bracket display RGB) over a skin + "
+                         "reflective + Rec2020-boundary sample set (skin weighted x2 for "
+                         "portraits) ; the low-bleach bracket is solved to reproduce that average "
+                         "in least squares. Result bisects the hue drift evenly on both sides and "
+                         "keeps skin chroma (avoids high-bleach's skin whitening). Constrained to "
+                         "Rec2020 gamut safety, skin red-ward veto, positivity, conditioning "
+                         "<= 6.5. Reads no/high-bleach from SHIPPED_VARIANTS ; refit if either "
+                         "endpoint changes.")
+    ap.add_argument("--fit-medium-bleach", action="store_true",
+                    help="Fit the MEDIUM-BLEACH variant as the PERCEPTUAL MIDPOINT of low-bleach and "
+                         "high-bleach. See --fit-low-bleach")
+    ap.add_argument("--report", action="store_true",
+                    help="Measure the three SHIPPED variants (no/low/high bleach) and print the "
+                         "{avg ; max} desaturation and hue-shift table for skin tones vs "
+                         "reflective colors — the source of the tables in doc/filmic-agx.md and "
+                         "the user docs. Reads the constants from SHIPPED_VARIANTS (which must "
+                         "mirror filmic_agx_prepare_bracket in the C), so it doubles as a drift "
+                         "check that the shipped brackets still measure as documented.")
     args = ap.parse_args()
+
+    if args.fit_low_bleach:
+        p = fit_midpoint("no-bleach", "high-bleach", 0.20, 0.75, (0.35, 0.45, 0.55))
+        if p is not None:
+            print_midpoint_constants(p, "--fit-low-bleach", "no-bleach and high-bleach")
+        else:
+            print("// no feasible low-bleach midpoint under the constraints.")
+        return
+    
+    if args.fit_medium_bleach:
+        p = fit_midpoint("low-bleach", "high-bleach", 0.20, 0.75, (0.35, 0.45, 0.55))
+        if p is not None:
+            print_midpoint_constants(p, "--fit-medium-bleach", "low-bleach and high-bleach")
+        else:
+            print("// no feasible medium-bleach midpoint under the constraints.")
+        return
+
+    if args.report:
+        report_variants()
+        return
+
+    if args.max_desat is not None:
+        from scipy.optimize import minimize
+        budget = float(args.max_desat)
+        y_row = REC2020_TO_XYZ_D50[1]
+
+        def place(rgb, evs):
+            lum = y_row @ rgb
+            return [rgb * (GREY * 2.0 ** e / lum) for e in evs]
+
+        refl = priority_samples()
+        skin_base = [_lab_d65_to_work(L, a + da * As, b + db * Bs)
+                     for (L, Ls, a, As, b, Bs) in _SKIN_LAB
+                     for da in (-1, 1) for db in (-1, 1)]
+        skin_base = [s for s in skin_base if s.min() > 0]
+        skin = [s for w in skin_base for s in place(w, (-1.5, -0.5, 0.5, 1.5))]
+
+        # Vectorized pipeline : NO subsampling. Every color in the priority set is
+        # evaluated on every objective call, so the optimizer can never game the
+        # average by wrecking a hue it cannot see. The tone curve branches on scalars,
+        # so bake it into a monotone lookup table and apply it with np.interp.
+        LUT_X = np.linspace(0.0, 1.0, 8193)
+        LUT_Y = np.array([CURVE(v) for v in LUT_X])
+        S_refl = np.array(refl)                              # (Nr, 3) working linear Rec2020
+        S_skin = np.array(skin)                              # (Ns, 3)
+
+        def yrg_rg_batch(RGB):                               # RGB (N,3) -> (r, g) chromaticity
+            LMS = ((RGB @ REC2020_TO_XYZ_D50.T) @ XYZ_D50_to_D65_CAT16.T) @ XYZ_D65_to_LMS_2006.T
+            a = LMS.sum(axis=1, keepdims=True)
+            rg = (LMS / np.where(a == 0.0, 1.0, a)) @ LMS_to_filmlightRGB.T
+            return rg[:, 0], rg[:, 1]
+
+        def chroma_hue_batch(RGB):
+            r, g = yrg_rg_batch(RGB)
+            dr, dg = r - WHITE_YRG[1], g - WHITE_YRG[2]
+            return np.hypot(dr, dg), np.arctan2(dg, dr)
+
+        C_refl, H_refl = chroma_hue_batch(S_refl)            # input chroma/hue, invariant
+        C_skin, H_skin = chroma_hue_batch(S_skin)
+        # Drop near-neutral inputs : a gray has no saturation to preserve and no
+        # meaningful hue, so its chroma RATIO (c_out/c_in) is numerical noise that
+        # otherwise inflates the desaturation average and the worst-color cap — which
+        # is exactly what the green-heavy inset was exploiting.
+        rkeep = C_refl > 0.05
+        S_refl, C_refl, H_refl = S_refl[rkeep], C_refl[rkeep], H_refl[rkeep]
+        skeep = C_skin > 0.04                                # keep pale skin, drop the near-grays
+        S_skin, C_skin, H_skin = S_skin[skeep], C_skin[skeep], H_skin[skeep]
+
+        # Parameterization : the inset is a single UNIFORM scalar (p[0]), and the
+        # per-primary action lives entirely in the outset — which is exactly the
+        # structure the good fits converge to anyway (the shipped inset is 0.35 on all
+        # three). A per-primary inset is the lever the optimizer abused to game the
+        # gated metrics (green railed to 0.7, wrecking an unseen blue) ; removing that
+        # DoF structurally forbids the pathology. 10 params :
+        #   p[0]      uniform inset chroma
+        #   p[1:4]    inset rotations (R, G, B)
+        #   p[4:7]    outset chroma   (R, G, B)
+        #   p[7:10]   outset rotations (R, G, B)
+        def brk(p):
+            M, _ = bracket_matrices(np.full(3, p[0]), p[1:4])
+            Mo, _ = bracket_matrices(p[4:7], p[7:10])
+            return M, np.linalg.inv(Mo)
+
+        def measure(S, C_in, H_in, M, Mo):                   # -> chroma_ratio, drift_deg (N,)
+            x = (np.log2(np.maximum(S @ M.T, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+            y = np.interp(np.clip(x, 0.0, 1.0).ravel(), LUT_X, LUT_Y).reshape(x.shape)
+            O = np.maximum(y @ Mo.T, 1e-10)
+            c_f, h_f = chroma_hue_batch(O)
+            cr = np.minimum(c_f / np.maximum(C_in, 1e-9), 1.0)
+            dh = np.rad2deg(np.remainder(h_f - H_in + np.pi, 2 * np.pi) - np.pi)
+            return cr, dh
+
+        BIG = 1e5
+
+        def evaluate(p):
+            """(skin_cr, skin_dh, refl_cr, refl_dh, cond) or None if degenerate."""
+            if not (0.05 <= p[0] <= 0.85):                   # uniform inset chroma
+                return None
+            for i in (4, 5, 6):                              # outset chroma
+                if not (0.02 <= p[i] <= 0.95):
+                    return None
+            for i in (1, 2, 3, 7, 8, 9):                     # rotations |.| <= 25 deg
+                if abs(p[i]) > np.deg2rad(25):
+                    return None
+            M, Mo = brk(p)
+            if M.min() < 0.004:
+                return None
+            cond = max(np.linalg.cond(M), np.linalg.cond(Mo))
+            if cond > 6.5:                                   # reject near-degenerate brackets
+                return None
+            skin_cr, skin_dh = measure(S_skin, C_skin, H_skin, M, Mo)
+            refl_cr, refl_dh = measure(S_refl, C_refl, H_refl, M, Mo)
+            return skin_cr, skin_dh, refl_cr, refl_dh, cond
+
+        def objective(p):
+            ev = evaluate(p)
+            if ev is None:
+                return BIG
+            skin_cr, skin_dh, refl_cr, refl_dh, cond = ev
+            if skin_dh.min() < -1.5:                         # skin red-ward veto (absolute)
+                return BIG + abs(skin_dh.min())
+            # desaturation = the chroma the bracket costs (mostly the bright-color /
+            # highlight bleach — the AgX wash-out look — which IS the cost the budget
+            # trades ; individual highlights bleaching hard is fine, so no per-color cap).
+            desats = np.concatenate([1.0 - skin_cr, 1.0 - refl_cr])
+            mean_desat = float(desats.mean())
+            gated = np.abs(refl_dh[refl_cr > 0.2])           # hue where chroma survives
+            worst_hue = float(gated.max())
+            # hue fidelity : mean AND worst single color ('best hue match' = no color
+            # badly off, not a good average hiding an outlier).
+            hue_err = np.mean(gated) + 0.5 * worst_hue + 1.5 * np.mean(np.abs(skin_dh))
+            return (hue_err
+                    + 0.10 * mean_desat                      # prefer chroma when hue is tied (best-chroma-match)
+                    + 1e4 * max(0.0, mean_desat - budget)    # HARD average-desaturation budget
+                    + 20.0 * max(0.0, worst_hue - 16.0))     # HARD worst-case hue cap (deg)
+
+        # start from the shipped config (uniform inset 0.35), plus stronger-inset
+        # restarts — a larger budget affords a stronger bracket for better hue
+        p0 = [0.35, -0.0437436, 0.1580839, 0.0177711,
+              0.457525, 0.621106, 0.349832, -0.0346110, 0.2086015, 0.0753169]
+        best = None
+        for di in (0.0, 0.12, 0.24):
+            start = list(p0)
+            start[0] += di
+            r = minimize(objective, start, method="Nelder-Mead",
+                         options={"xatol": 1e-5, "fatol": 1e-4, "maxiter": 8000, "maxfev": 8000})
+            if r.fun < BIG and (best is None or r.fun < best.fun):
+                best = r
+        if best is None:
+            print("// no feasible bracket under the constraints (skin red veto / positivity / conditioning).")
+            print("// the desaturation budget is not the binding constraint — check --max-desat is >= 0.")
+            return
+        p = best.x
+        skin_cr, skin_dh, refl_cr, refl_dh, cond = evaluate(p)
+        desats = np.concatenate([1.0 - skin_cr, 1.0 - refl_cr])
+        mean_desat = float(desats.mean())
+        gated = np.abs(refl_dh[refl_cr > 0.2])
+        M, Mo = brk(p)
+        inset = p[0]
+        print("// fitted by tools/derive_filmic_agx_primaries.py --max-desat %.3f (obj %.3f)" % (budget, best.fun))
+        print("// achieved avg desaturation %.1f%% (budget %.1f%%) ; worst single color %.1f%% (bright-color bleach)"
+              % (100 * mean_desat, 100 * budget, 100 * desats.max()))
+        print("// priority set : skin |mean| %.1f deg [%+.1f..%+.1f] ; reflective mean %.1f max %.1f ; cond %.1f"
+              % (np.mean(np.abs(skin_dh)), skin_dh.min(), skin_dh.max(),
+                 gated.mean(), gated.max(), cond))
+        print("static const float inset_anchor[3]    = { %.6ff, %.6ff, %.6ff };" % (inset, inset, inset))
+        print("static const float rotation_anchor[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+              % (p[1], p[2], p[3], *np.rad2deg(p[1:4])))
+        print("static const float outset_anchor[3]   = { %.6ff, %.6ff, %.6ff };" % (p[4], p[5], p[6]))
+        print("static const float outset_rotation[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+              % (p[7], p[8], p[9], *np.rad2deg(p[7:10])))
+        print("// kappa-equivalent per-primary outset/inset ratios : %.3f %.3f %.3f"
+              % (p[4] / inset, p[5] / inset, p[6] / inset))
+        return
+
+    if args.min_bleach:
+        from scipy.optimize import minimize
+        y_row = REC2020_TO_XYZ_D50[1]
+
+        def place(rgb, evs):
+            lum = y_row @ rgb
+            return [rgb * (GREY * 2.0 ** e / lum) for e in evs]
+
+        refl = priority_samples()
+        skin_base = [_lab_d65_to_work(L, a + da * As, b + db * Bs)
+                     for (L, Ls, a, As, b, Bs) in _SKIN_LAB
+                     for da in (-1, 1) for db in (-1, 1)]
+        skin_base = [s for s in skin_base if s.min() > 0]
+        skin = [s for w in skin_base for s in place(w, (-1.5, -0.5, 0.5, 1.5))]
+
+        LUT_X = np.linspace(0.0, 1.0, 8193)
+        LUT_Y = np.array([CURVE(v) for v in LUT_X])
+        S_refl = np.array(refl)
+        S_skin = np.array(skin)
+
+        def chroma_hue_batch(RGB):
+            LMS = ((RGB @ REC2020_TO_XYZ_D50.T) @ XYZ_D50_to_D65_CAT16.T) @ XYZ_D65_to_LMS_2006.T
+            a = LMS.sum(axis=1, keepdims=True)
+            rg = (LMS / np.where(a == 0.0, 1.0, a)) @ LMS_to_filmlightRGB.T
+            dr, dg = rg[:, 0] - WHITE_YRG[1], rg[:, 1] - WHITE_YRG[2]
+            return np.hypot(dr, dg), np.arctan2(dg, dr)
+
+        C_refl, H_refl = chroma_hue_batch(S_refl)
+        C_skin, H_skin = chroma_hue_batch(S_skin)
+        rkeep = C_refl > 0.05
+        S_refl, C_refl, H_refl = S_refl[rkeep], C_refl[rkeep], H_refl[rkeep]
+        skeep = C_skin > 0.04
+        S_skin, C_skin, H_skin = S_skin[skeep], C_skin[skeep], H_skin[skeep]
+        S_all = np.vstack([S_skin, S_refl])
+        C_all = np.concatenate([C_skin, C_refl])
+        H_all = np.concatenate([H_skin, H_refl])
+
+        def brk(p):                                          # p[0] inset, p[1:4] irot, p[4:7] outset, p[7:10] orot
+            M, _ = bracket_matrices(np.full(3, p[0]), p[1:4])
+            Mo, _ = bracket_matrices(p[4:7], p[7:10])
+            return M, np.linalg.inv(Mo)
+
+        def measure(S, C_in, H_in, M, Mo):
+            x = (np.log2(np.maximum(S @ M.T, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+            y = np.interp(np.clip(x, 0.0, 1.0).ravel(), LUT_X, LUT_Y).reshape(x.shape)
+            O = np.maximum(y @ Mo.T, 1e-10)
+            c_f, h_f = chroma_hue_batch(O)
+            cr = np.minimum(c_f / np.maximum(C_in, 1e-9), 1.0)
+            dh = np.rad2deg(np.remainder(h_f - H_in + np.pi, 2 * np.pi) - np.pi)
+            return cr, dh
+
+        # Rec2020 GAMUT SAFETY. The working space IS linear Rec2020, so its primaries
+        # and secondaries are the most saturated colors representable — the true worst
+        # case (more so than sRGB's). A strong outset over-expansion, which minimum-
+        # desaturation wants, pushes these to NEGATIVE luminance -> black pixels : the
+        # no-bleach blue-ramp-goes-black failure. Require the outset to retain at least
+        # 25% of the pre-outset luminance for every primary/secondary across the tonal
+        # range. (Deep shadows keep near-zero luminance either way — the ratio scales.)
+        _BND = [np.maximum(np.array(c, float), 1e-6) for c in
+                ([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 1, 1], [1, 0, 1], [1, 1, 0])]
+        _BND_EV = (-8, -6, -4, -2, -1, 0, 1, 2, 3)
+
+        def gamut_violation(M, Mo):
+            worst = 0.0
+            for s in _BND:
+                lum0 = y_row @ s
+                for ev in _BND_EV:
+                    mr = M @ (s * GREY * 2.0 ** ev / lum0)
+                    x = (np.log2(np.maximum(mr, 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV)
+                    cv = np.interp(np.clip(x, 0.0, 1.0), LUT_X, LUT_Y)
+                    worst = max(worst, 0.25 * (y_row @ cv) - (y_row @ (Mo @ cv)))
+            return worst
+
+        BIG = 1e5
+
+        def objective(p):
+            if not (0.15 <= p[0] <= 0.45):
+                return BIG
+            if p[4:7].min() < 0.02 or p[4:7].max() > 0.98:
+                return BIG
+            if np.abs(np.concatenate([p[1:4], p[7:10]])).max() > np.deg2rad(25):
+                return BIG
+            M, Mo = brk(p)
+            if M.min() < 0.004:
+                return BIG
+            cond = max(np.linalg.cond(M), np.linalg.cond(Mo))
+            if cond > 5.0:                                   # conditioning : stability
+                return BIG
+            gv = gamut_violation(M, Mo)
+            if gv > 0.0:                                     # Rec2020 gamut safety (hard) — no black
+                return BIG + gv * 100.0
+            skin_cr, skin_dh = measure(S_skin, C_skin, H_skin, M, Mo)
+            if skin_dh.min() < -2.5:                         # skin red-ward veto (looser : hue recovered)
+                return BIG + abs(skin_dh.min())
+            cr, _ = measure(S_all, C_all, H_all, M, Mo)
+            refl_cr, refl_dh = measure(S_refl, C_refl, H_refl, M, Mo)
+            worst_hue = np.abs(refl_dh[refl_cr > 0.2]).max()
+            d = 1.0 - cr
+            # minimize the bracket's desaturation (avg + a touch of worst-color) ; hue is free
+            # up to 24 deg (recovered downstream) ; a small skin-hue term keeps skin sane.
+            return (d.mean() * 100.0 + 0.15 * d.max() * 100.0
+                    + 0.3 * max(0.0, worst_hue - 24.0)
+                    + 0.5 * np.mean(np.abs(skin_dh)))
+
+        best = None
+        for seed in ([0.18, 0.0, 0.06, 0.0, 0.44, 0.58, 0.28, 0.0, 0.10, 0.02],
+                     [0.25, 0.0, 0.05, 0.0, 0.50, 0.58, 0.35, 0.0, 0.08, 0.02],
+                     [0.30, 0.0, 0.03, 0.0, 0.55, 0.60, 0.40, 0.0, 0.06, 0.02]):
+            r = minimize(objective, seed, method="Nelder-Mead",
+                         options={"xatol": 1e-6, "fatol": 1e-6, "maxiter": 8000, "maxfev": 8000})
+            if r.fun < BIG and (best is None or r.fun < best.fun):
+                best = r
+        if best is None:
+            print("// no feasible no-bleach bracket under the constraints.")
+            return
+        p = best.x
+        skin_cr, skin_dh = measure(S_skin, C_skin, H_skin, *brk(p))
+        cr, _ = measure(S_all, C_all, H_all, *brk(p))
+        refl_cr, refl_dh = measure(S_refl, C_refl, H_refl, *brk(p))
+        g = np.abs(refl_dh[refl_cr > 0.2])
+        M, Mo = brk(p)
+        inset = p[0]
+        print("// fitted by tools/derive_filmic_agx_primaries.py --min-bleach (no-bleach variant, obj %.3f)" % best.fun)
+        print("// avg desaturation %.2f%% ; worst single color %.0f%% ; refl hue mean %.1f max %.1f (recovered downstream)"
+              % (100 * (1 - cr).mean(), 100 * (1 - cr).max(), g.mean(), g.max()))
+        print("// skin |mean| %.1f deg [%+.1f..%+.1f] ; cond %.1f"
+              % (np.mean(np.abs(skin_dh)), skin_dh.min(), skin_dh.max(), max(np.linalg.cond(M), np.linalg.cond(Mo))))
+        # Rec2020 gamut-safety proof : worst luminance retention over primaries/secondaries
+        worst_ret = min((y_row @ (Mo @ np.interp(np.clip((np.log2(np.maximum(M @ (s * GREY * 2.0 ** ev / (y_row @ s)), 1e-10) / GREY) - BLACK_EV) / (WHITE_EV - BLACK_EV), 0.0, 1.0), LUT_X, LUT_Y)))
+                         for s in _BND for ev in _BND_EV)
+        print("// Rec2020 gamut safety : worst boundary output luminance %+.4f (must be > 0 : no black)" % worst_ret)
+        print("static const float inset_anchor[3]    = { %.6ff, %.6ff, %.6ff };" % (inset, inset, inset))
+        print("static const float rotation_anchor[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+              % (p[1], p[2], p[3], *np.rad2deg(p[1:4])))
+        print("static const float outset_anchor[3]   = { %.6ff, %.6ff, %.6ff };" % (p[4], p[5], p[6]))
+        print("static const float outset_rotation[3] = { %+.7ff, %+.7ff, %+.7ff }; // %+.2f°, %+.2f°, %+.2f°"
+              % (p[7], p[8], p[9], *np.rad2deg(p[7:10])))
+        print("// kappa-equivalent per-primary outset/inset ratios : %.3f %.3f %.3f"
+              % (p[4] / inset, p[5] / inset, p[6] / inset))
+        return
 
     if args.fit_priority:
         from scipy.optimize import minimize

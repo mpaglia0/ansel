@@ -152,8 +152,22 @@ typedef enum dt_iop_filmicrgb_colorscience_type_t
   DT_FILMIC_COLORSCIENCE_V3 = 2, // $DESCRIPTION: "v5 (2021)"
   DT_FILMIC_COLORSCIENCE_V4 = 3, // $DESCRIPTION: "v6 (2022)"
   DT_FILMIC_COLORSCIENCE_V5 = 4, // $DESCRIPTION: "v7 (2023)"
-  DT_FILMIC_COLORSCIENCE_V6 = 5, // $DESCRIPTION: "v8 (AgX)"
+  DT_FILMIC_COLORSCIENCE_V6 = 5, // $DESCRIPTION: "v8 (AgX, no bleach)"
+  DT_FILMIC_COLORSCIENCE_V7 = 6, // $DESCRIPTION: "v8 (AgX, low bleach)"
+  DT_FILMIC_COLORSCIENCE_V8 = 7, // $DESCRIPTION: "v8 (AgX, medium bleach)"
+  DT_FILMIC_COLORSCIENCE_V9 = 8, // $DESCRIPTION: "v8 (AgX, high bleach)"
 } dt_iop_filmicrgb_colorscience_type_t;
+
+// The three v8 "AgX" variants share the whole pixel path and differ ONLY by the
+// inset/outset bracket constants (see filmic_agx_prepare_bracket) : how much
+// bright-color desaturation ("bleach") they trade for in-bracket hue accuracy.
+// no bleach : max saturation, hue leans on the Ych recovery ; high bleach : best
+// in-bracket hue, strongest wash-out. All dispatch identically here.
+static inline gboolean _filmic_is_agx(const dt_iop_filmicrgb_colorscience_type_t v)
+{
+  return v == DT_FILMIC_COLORSCIENCE_V6 || v == DT_FILMIC_COLORSCIENCE_V7
+      || v == DT_FILMIC_COLORSCIENCE_V8 || v == DT_FILMIC_COLORSCIENCE_V9;
+}
 
 typedef enum dt_iop_filmicrgb_spline_version_type_t
 {
@@ -224,7 +238,7 @@ typedef struct dt_iop_filmicrgb_params_t
   float balance;            // $MIN: -50 $MAX: 50 $DEFAULT: 0.0 $DESCRIPTION: "shadows \342\206\224 highlights balance"
   float noise_level;        // $MIN: 0.0 $MAX: 6.0 $DEFAULT: 0.05f $DESCRIPTION: "add noise in highlights"
   dt_iop_filmicrgb_methods_type_t preserve_color; // $DEFAULT: DT_FILMIC_METHOD_MAX_RGB $DESCRIPTION: "preserve chrominance"
-  dt_iop_filmicrgb_colorscience_type_t version; // $DEFAULT: DT_FILMIC_COLORSCIENCE_V5 $DESCRIPTION: "color science"
+  dt_iop_filmicrgb_colorscience_type_t version; // $DEFAULT: DT_FILMIC_COLORSCIENCE_V7 $DESCRIPTION: "color science"
   gboolean auto_hardness;                       // $DEFAULT: TRUE $DESCRIPTION: "auto adjust hardness"
   gboolean custom_grey;                         // $DEFAULT: FALSE $DESCRIPTION: "use custom middle-gray values"
   int high_quality_reconstruction;       // $MIN: 0 $MAX: 10 $DEFAULT: 1 $DESCRIPTION: "iterations of color inpainting"
@@ -2337,47 +2351,79 @@ static gboolean _filmic_agx_build_displaced(const dt_iop_order_iccprofile_info_t
 }
 
 static void filmic_agx_prepare_bracket(const dt_iop_order_iccprofile_info_t *const work_profile,
+                                       const dt_iop_filmicrgb_colorscience_type_t variant,
                                        dt_colormatrix_t inset, dt_colormatrix_t outset)
 {
-  // All 12 constants from tools/derive_filmic_agx_primaries.py --fit-priority :
-  // a joint Nelder-Mead fine-tune of the whole bracket (per-primary inset chroma
-  // + rotation, per-primary outset chroma + rotation) started from the earlier
-  // uniform-0.25 / kappa=2 config, minimizing hue drift over the PRIORITY set
-  // (skin database + diffuse reflectances, over their tonal placements) at
-  // preserved chroma. Fitted against the appearance-matched default curve
-  // (contrast 1.18, latitude 10%, toe 1.5 / slope-matched shoulder).
+  // All constants from tools/derive_filmic_agx_primaries.py, fitted against the
+  // appearance-matched default curve (contrast 1.18, latitude 10%, toe 1.5 /
+  // slope-matched shoulder). The three v8 variants are three points on ONE axis :
+  // the inset strength, which trades bright-color desaturation ("bleach") for
+  // in-bracket hue accuracy. The inset is UNIFORM (per-primary insets let the fit
+  // game the metric via a lopsided green channel) ; the per-primary action lives
+  // in the outset, which OVER-expands (ratios > 1) so priority colors REACH the
+  // output-chroma <= input-chroma clamp of the pixel path and are trimmed to
+  // exactly 1.0 per pixel, tone-adaptively (portable across dynamic ranges).
   //
-  // Hard constraints the optimizer cannot cross : skin red-ward drift <= -1.5°
-  // (asymmetric — yellow-ward is acceptable on skin/sunsets, red-ward is not, a
-  // racial-bias concern ; see doc/filmic-agx.md), skin chroma >= 92%, diffuse
-  // recovery p5 >= 0.97 (so accuracy can NOT be gamed by bleaching), inset
-  // positivity >= 0.004, conditioning <= 6.5. Result on the priority set : skin
-  // |mean| drift 2.7° -> 2.2° (worst +7.7° -> +6.6°), reflective mean 2.6° -> 2.3°
-  // — everything comfortably below the ~2-3° hue JND, with rendering character
-  // preserved (highlight chroma ~98%, unchanged greens).
-  //
-  // The inset is capped near 0.35 on purpose : the unconstrained optimum ran the
-  // bracket at ~0.55, which buys a further (sub-JND) 2.2° -> 1.4° on skin but at
-  // a VISIBLE cost — stronger highlight desaturation and the pure-green primary
-  // to +9°. Not worth an invisible accuracy gain.
-  //
-  // sRGB blue at very high EV (+5..+6, above the white point) is deliberately
-  // NOT targeted : the linear bracket cannot hold it without sacrificing skin or
-  // bleaching (both hard-vetoed above), a structural DoF limit proven by a full
-  // 12-parameter global fit — see doc/filmic-agx.md. It is left to the per-pixel
-  // Ych hue recovery, which is exact at full strength.
-  static const float inset_anchor[3]    = { 0.349959f, 0.349946f, 0.344980f };
-  static const float rotation_anchor[3] = { -0.0437436f, +0.1580839f, +0.0177711f }; // -2.51°, +9.06°, +1.02°
-  // Outset : now a PER-PRIMARY expansion, no longer a single kappa multiple of the
-  // inset. The fit found kappa-equivalent ratios { 1.31, 1.78, 1.01 } — green
-  // over-expands most (its inset pulled it furthest), blue barely recovers. Still
-  // an over-expansion (> inset) so priority colors REACH the output-chroma <=
-  // input-chroma clamp of the pixel path, which trims recovery to exactly 1.0 per
-  // pixel, tone-adaptively (what keeps it portable across dynamic ranges). Acts
-  // after the curve, so unlike the inset it is not bound by the log-positivity
-  // budget (negatives are the gamut mapper's business).
-  static const float outset_anchor[3]   = { 0.457525f, 0.621106f, 0.349832f };
-  static const float outset_rotation[3] = { -0.0346110f, +0.2086015f, +0.0753169f }; // -1.98°, +11.95°, +4.32°
+  // Fits are hue-accuracy-optimal at a chosen average-desaturation budget over the
+  // priority set (skin database + diffuse reflectances), skin red-ward drift always
+  // vetoed (<= -1.5°, a racial-bias concern — see doc/filmic-agx.md). Metrics below
+  // are on that set. sRGB blue at very high EV is a structural DoF limit of any
+  // linear bracket, left to the per-pixel Ych hue recovery (exact at full strength).
+  float inset_anchor[3], rotation_anchor[3], outset_anchor[3], outset_rotation[3];
+  switch(variant)
+  {
+    case DT_FILMIC_COLORSCIENCE_V7: // low bleach : --fit-low-bleach
+      // PERCEPTUAL MIDPOINT of no-bleach and high-bleach : the bracket that best
+      // reproduces the average of the two variants' processed outputs (least squares
+      // over skin + reflective + Rec2020-boundary samples). A pure desaturation budget
+      // put it too close to high-bleach (the visible gap no->low exceeded low->high) ;
+      // averaging bisects the hue drift evenly (skin 2.9°->1.9°->0.8°) while keeping
+      // skin chroma, so it does not inherit high-bleach's skin whitening. avg desat
+      // (reflective) 7.2%, skin |mean| hue 1.9°, cond 4.7, Rec2020 gamut-safe.
+      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.487623f;
+      rotation_anchor[0] = -0.0176159f; rotation_anchor[1] = +0.0650293f; rotation_anchor[2] = +0.0044292f;
+      outset_anchor[0]   = 0.479379f; outset_anchor[1] = 0.746078f; outset_anchor[2] = 0.369679f;
+      outset_rotation[0] = -0.0050757f; outset_rotation[1] = +0.1018535f; outset_rotation[2] = +0.0119466f;
+      break;
+    case DT_FILMIC_COLORSCIENCE_V8: // medium bleach : --fit-medium-bleach
+      // Same as above, splits the gap between low-bleach and high-bleach.
+      // avg desat (reflective) 10.6%, skin |mean| hue 1.4°, cond 5.0, Rec2020 gamut-safe.
+      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.595334f;
+      rotation_anchor[0] = -0.0273940f; rotation_anchor[1] = 0.0323704f; rotation_anchor[2] = 0.0236516f;
+      outset_anchor[0]   =  0.576994f; outset_anchor[1] = 0.768241f; outset_anchor[2] = 0.402336f;
+      outset_rotation[0] = -0.0167965f; outset_rotation[1] = 0.0642740f; outset_rotation[2] = 0.0419658f;
+      break;
+    case DT_FILMIC_COLORSCIENCE_V9: // high bleach : --max-desat 0.05
+      // Best in-bracket hue. avg desat 5.0%, skin |mean| 0.8°, reflective max 6.3°,
+      // cond 6.5. Saturated colors visibly wash out (the strong AgX highlight look).
+      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.747987f;
+      rotation_anchor[0] = -0.0515563f; rotation_anchor[1] = -0.0375649f; rotation_anchor[2] = +0.0222773f;
+      outset_anchor[0]   = 0.724651f; outset_anchor[1] = 0.828507f; outset_anchor[2] = 0.550322f;
+      outset_rotation[0] = -0.0438769f; outset_rotation[1] = -0.0095878f; outset_rotation[2] = +0.0521530f;
+      break;
+    case DT_FILMIC_COLORSCIENCE_V6: // no bleach (default) : --min-bleach
+    default:
+      // Minimum bleach — protects saturation (there is no downstream saturation
+      // recovery, only hue recovery), so hue is allowed to drift ~3-20° and the Ych
+      // slider restores it. avg desat 0.65%, skin |mean| 3.1°, cond 4.7.
+      // COUNTERINTUITIVE : a hard 0% inset is the WORST for saturation (7.7% desat) —
+      // with no inset the outset cannot over-expand without wrecking conditioning, so
+      // bright colors bleach from the raw curve unrecovered. The minimum sits at a
+      // MODERATE inset whose well-conditioned outset un-bleaches. See doc.
+      //
+      // REC2020 GAMUT SAFETY (mandatory) : a strongly over-expanding outset — which
+      // pure minimum-desaturation wants (an earlier fit ran inset 0.20 / outset ratio
+      // ~3) — pushes the Rec2020 blue primary to NEGATIVE luminance in the -10..+1 EV
+      // range, rendering it BLACK (the working space IS Rec2020, so its primaries are
+      // the worst case). --min-bleach constrains the outset to retain >= 25% of the
+      // pre-outset luminance for every Rec2020 primary/secondary across the tonal
+      // range ; the result keeps every boundary color luminance-positive.
+      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.335562f;
+      rotation_anchor[0] = -0.0092314f; rotation_anchor[1] = +0.0979124f; rotation_anchor[2] = +0.0034991f;
+      outset_anchor[0]   = 0.349067f; outset_anchor[1] = 0.737216f; outset_anchor[2] = 0.396854f;
+      outset_rotation[0] = +0.0047636f; outset_rotation[1] = +0.1445774f; outset_rotation[2] = +0.0011608f;
+      break;
+  }
 
   dt_colormatrix_t M_recovery = { { 0.f } };
   if(!_filmic_agx_build_displaced(work_profile, inset_anchor, rotation_anchor, inset)
@@ -2446,7 +2492,7 @@ static inline void filmic_agx(const float *const restrict in, float *const restr
   // rendering-space bracket : work RGB -> inset rendering space -> work RGB
   dt_colormatrix_t inset = { { 0.f } };
   dt_colormatrix_t outset = { { 0.f } };
-  filmic_agx_prepare_bracket(work_profile, inset, outset);
+  filmic_agx_prepare_bracket(work_profile, data->version, inset, outset);
   dt_colormatrix_t inset_t, outset_t;
   transpose_3xSSE(inset, inset_t);
   transpose_3xSSE(outset, outset_t);
@@ -2717,7 +2763,7 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
   const float white_display = powf(data->spline.y[4], data->output_power);
   const float black_display = powf(data->spline.y[0], data->output_power);
 
-  if(data->version == DT_FILMIC_COLORSCIENCE_V6)
+  if(_filmic_is_agx(data->version))
   {
     // AgX color science : per-channel curve in an inset rendering space with
     // parametric Ych hue recovery. Ignores preserve_color, like v7.
@@ -3039,11 +3085,11 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   cl_mem outset_matrix_cl = NULL;
   float luma_coeffs[4] = { work_profile->matrix_in[1][0], work_profile->matrix_in[1][1],
                            work_profile->matrix_in[1][2], 0.f };
-  if(d->version == DT_FILMIC_COLORSCIENCE_V6)
+  if(_filmic_is_agx(d->version))
   {
     dt_colormatrix_t inset = { { 0.f } };
     dt_colormatrix_t outset = { { 0.f } };
-    filmic_agx_prepare_bracket(work_profile, inset, outset);
+    filmic_agx_prepare_bracket(work_profile, d->version, inset, outset);
     float inset_3x4[12];
     float outset_3x4[12];
     pack_3xSSE_to_3x4(inset, inset_3x4);
@@ -3198,7 +3244,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   const float black_display = powf(spline.y[0], d->output_power);
 
   if(d->preserve_color == DT_FILMIC_METHOD_NONE && d->version != DT_FILMIC_COLORSCIENCE_V5
-     && d->version != DT_FILMIC_COLORSCIENCE_V6)
+     && !_filmic_is_agx(d->version))
   {
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_split, 0, sizeof(cl_mem), (void *)&in);
     dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_rgb_split, 1, sizeof(cl_mem), (void *)&dev_out);
@@ -5590,7 +5636,7 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   if(IS_NULL_PTR(w) || w == g->version)
   {
-    if(p->version == DT_FILMIC_COLORSCIENCE_V6)
+    if(_filmic_is_agx(p->version))
     {
       dt_bauhaus_widget_set_label(g->saturation, N_("color preservation"));
       gtk_widget_set_tooltip_text(g->saturation, _("how much of the per-channel hue drift to keep.\n"
@@ -5625,8 +5671,8 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
       gtk_widget_set_visible(GTK_WIDGET(g->preserve_color), FALSE);
     }
 
-    // v7 and v8 define their own chrominance handling and ignore preserve_color
-    if(p->version != DT_FILMIC_COLORSCIENCE_V5 && p->version != DT_FILMIC_COLORSCIENCE_V6)
+    // v7 and v8 (all AgX variants) define their own chrominance handling and ignore preserve_color
+    if(p->version != DT_FILMIC_COLORSCIENCE_V5 && !_filmic_is_agx(p->version))
       gtk_widget_set_visible(GTK_WIDGET(g->preserve_color), TRUE);
   }
 
