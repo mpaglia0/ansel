@@ -207,6 +207,8 @@ static inline __attribute__((always_inline)) void process_common_setup(struct dt
   if(self->dev->gui_attached && dt_dev_pixelpipe_has_preview_output(self->dev, pipe, roi_out))
   {
     dt_iop_zonesystem_gui_data_t *g = (dt_iop_zonesystem_gui_data_t *)self->gui_data;
+    if(IS_NULL_PTR(g)) return;
+
     dt_iop_gui_enter_critical_section(self);
     if(IS_NULL_PTR(g->in_preview_buffer) || IS_NULL_PTR(g->out_preview_buffer) || g->preview_width != width
        || g->preview_height != height)
