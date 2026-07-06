@@ -3429,6 +3429,7 @@ void gui_init(struct dt_iop_module_t *self)
   gui_cache_init(self);
 
   g->notebook = dt_ui_notebook_new();
+  dt_ui_notebook_set_picker_owner(g->notebook, self);
 
   // Advanced view
 

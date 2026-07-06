@@ -1790,6 +1790,9 @@ void gui_init(dt_iop_module_t *self)
 
   // start building top level widget
   g->notebook = dt_ui_notebook_new();
+  // Each page holds its own pickers (global_H on "4 ways", white/grey fulcrum on
+  // "masks"); reset any active one when the page they live on is switched away from.
+  dt_ui_notebook_set_picker_owner(g->notebook, self);
 
   // Page master
   self->widget = dt_ui_notebook_page(g->notebook, N_("master"), _("global grading"));

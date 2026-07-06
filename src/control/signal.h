@@ -292,6 +292,15 @@ typedef enum dt_signal_t
   */
   DT_SIGNAL_CONTROL_PICKERDATA_READY,
 
+  /** \brief This signal is raised when a GtkNotebook created/registered via
+      dt_ui_notebook_set_picker_owner() switches page. The GTK/GUI layer does not
+      know what the owner pointer represents (kept opaque, `gpointer`); listeners
+      that do (e.g. the color picker) cast it back to their own type.
+      param: gpointer owner -- whatever was passed to dt_ui_notebook_set_picker_owner()
+      no returned value
+  */
+  DT_SIGNAL_CONTROL_NOTEBOOK_TAB_CHANGED,
+
   /* \brief This signal is raised when metadata view needs update */
   DT_SIGNAL_METADATA_UPDATE,
 

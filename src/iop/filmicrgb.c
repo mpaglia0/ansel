@@ -5296,6 +5296,10 @@ void gui_init(dt_iop_module_t *self)
 
   // Init GTK notebook
   g->notebook = dt_ui_notebook_new();
+  // Each page holds its own pickers (grey/white/black point on scene, auto
+  // exposure/contrast boost on reconstruct); reset any active one when the page
+  // it lives on is switched away from.
+  dt_ui_notebook_set_picker_owner(g->notebook, self);
 
   // Page SCENE
   self->widget = dt_ui_notebook_page(g->notebook, N_("scene"), NULL);

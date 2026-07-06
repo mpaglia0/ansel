@@ -2146,6 +2146,16 @@ static void _gui_reset_callback(GtkButton *button, GdkEventButton *event, dt_iop
   // FIXME: can we stop with all the easter-eggs key modifiers doing undocumented stuff all along ?
   if(!(event && dt_modifier_is(event->state, GDK_CONTROL_MASK)) || !dt_gui_presets_autoapply_for_module(module))
   {
+    /* Resetting a module's parameters does not change GUI focus, so the
+       focus-loss cleanup in dt_iop_request_focus() never runs here: an active
+       eye-dropper (this module's own, or its blending/masking parametric-mask
+       picker -- both share dev->color_picker) and any live mask-shape editing
+       state (edit mode, shape buttons, mask/channel display) must be turned
+       off explicitly, or they keep sampling/drawing on the image against
+       parameters that no longer exist. */
+    dt_iop_color_picker_reset(module, FALSE);
+    dt_iop_gui_blending_lose_focus(module);
+
     // if a drawn mask is set, remove it from the list
     if(module->blend_params->mask_id > 0)
     {
@@ -2215,7 +2225,15 @@ void dt_iop_request_focus(dt_iop_module_t *module)
     if(out_focus_module->gui_focus)
       out_focus_module->gui_focus(out_focus_module, FALSE);
 
-    dt_iop_color_picker_reset(out_focus_module, TRUE);
+    /* A module that loses focus (switching to another module, or collapsing the
+       focused module, which calls dt_iop_request_focus(NULL)) must not leave an
+       active picker sampling/drawn on the image behind it: the picker's own
+       "must have GUI focus" invariant only hides its on-screen overlay, it does
+       not stop it or reset the toggle button, so a stale enabled picker can
+       resurface unexpectedly (e.g. when the module's GUI is rebuilt). A real
+       reset (keep = FALSE) is required here, not the "preserve across a soft
+       refresh" keep = TRUE used by gui_update()/gui_changed() call sites. */
+    dt_iop_color_picker_reset(out_focus_module, FALSE);
     dt_gui_refocus_center();
 
     gtk_widget_set_state_flags(dt_iop_gui_get_pluginui(out_focus_module), GTK_STATE_FLAG_NORMAL, TRUE);

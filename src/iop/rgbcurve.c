@@ -1302,6 +1302,7 @@ void gui_init(struct dt_iop_module_t *self)
   dt_ui_notebook_page(g->channel_tabs, N_("G"), _("curve nodes for g channel"));
   dt_ui_notebook_page(g->channel_tabs, N_("B"), _("curve nodes for b channel"));
   g_signal_connect(G_OBJECT(g->channel_tabs), "switch_page", G_CALLBACK(tab_switch_callback), self);
+  dt_ui_notebook_set_picker_owner(g->channel_tabs, self);
   gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(g->channel_tabs), TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(hbox), gtk_grid_new(), TRUE, TRUE, 0);
 

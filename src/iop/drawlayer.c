@@ -2918,6 +2918,9 @@ void gui_init(dt_iop_module_t *self)
   g->controls.notebook = notebook;
   gtk_widget_set_hexpand(notebook, TRUE);
   gtk_box_pack_start(GTK_BOX(self->widget), notebook, FALSE, FALSE, 0);
+  // image_colorpicker lives on the "Brush" tab; reset it if still active once the
+  // user switches away from that tab.
+  dt_ui_notebook_set_picker_owner(GTK_NOTEBOOK(notebook), self);
 
   GtkWidget *brush_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   GtkWidget *layer_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);

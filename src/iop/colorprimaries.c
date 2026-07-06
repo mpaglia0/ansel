@@ -1245,6 +1245,9 @@ void gui_init(dt_iop_module_t *self)
   g->tabs = GTK_NOTEBOOK(gtk_notebook_new());
   gtk_notebook_set_show_border(g->tabs, FALSE);
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->tabs), TRUE, TRUE, 0);
+  // white_level lives on the "options" tab; reset it if still active once the
+  // user switches away from that tab.
+  dt_ui_notebook_set_picker_owner(g->tabs, self);
 
   GtkWidget *colors_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   GtkWidget *colors_tab = gtk_label_new(_("colors"));

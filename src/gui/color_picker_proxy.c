@@ -968,6 +968,22 @@ static void _iop_color_picker_pipe_finished_callback(gpointer instance, gpointer
   _queue_refresh_active_picker(dev);
 }
 
+/**
+ * Any module notebook registered via dt_ui_notebook_set_picker_owner(notebook, module)
+ * relays its page switches here. Each page typically holds its own picker(s), read at
+ * apply time: leaving one active across a page switch would keep it sampling/drawing on
+ * the image for a control the user can no longer see or turn off from that hidden page.
+ * The GTK layer only carries the opaque owner pointer; we are the ones who know it is a
+ * dt_iop_module_t here.
+ */
+static void _iop_color_picker_notebook_tab_changed_callback(gpointer instance, gpointer owner, gpointer user_data)
+{
+  (void)instance;
+  (void)user_data;
+  if(IS_NULL_PTR(owner)) return;
+  dt_iop_color_picker_reset((dt_iop_module_t *)owner, FALSE);
+}
+
 void dt_iop_color_picker_init(void)
 {
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_HISTORY_RESYNC,
@@ -976,6 +992,8 @@ void dt_iop_color_picker_init(void)
                                   G_CALLBACK(_iop_color_picker_cacheline_ready_callback), NULL);
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED,
                                   G_CALLBACK(_iop_color_picker_pipe_finished_callback), NULL);
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_CONTROL_NOTEBOOK_TAB_CHANGED,
+                                  G_CALLBACK(_iop_color_picker_notebook_tab_changed_callback), NULL);
 }
 
 void dt_iop_color_picker_cleanup(void)
@@ -986,6 +1004,8 @@ void dt_iop_color_picker_cleanup(void)
                                      G_CALLBACK(_iop_color_picker_cacheline_ready_callback), NULL);
   DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals,
                                      G_CALLBACK(_iop_color_picker_pipe_finished_callback), NULL);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals,
+                                     G_CALLBACK(_iop_color_picker_notebook_tab_changed_callback), NULL);
 }
 
 static GtkWidget *_color_picker_new(dt_iop_module_t *module, dt_iop_color_picker_kind_t kind, GtkWidget *w,

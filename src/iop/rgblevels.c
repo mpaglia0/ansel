@@ -816,6 +816,7 @@ void gui_init(dt_iop_module_t *self)
   dt_ui_notebook_page(c->channel_tabs, N_("G"), _("curve nodes for g channel"));
   dt_ui_notebook_page(c->channel_tabs, N_("B"), _("curve nodes for b channel"));
   g_signal_connect(G_OBJECT(c->channel_tabs), "switch_page", G_CALLBACK(_tab_switch_callback), self);
+  dt_ui_notebook_set_picker_owner(c->channel_tabs, self);
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(c->channel_tabs), FALSE, FALSE, 0);
 
   c->area = GTK_DRAWING_AREA(gtk_drawing_area_new());

@@ -2329,6 +2329,27 @@ GtkWidget *dt_ui_notebook_page(GtkNotebook *notebook, const char *text, const ch
   return page;
 }
 
+static void _notebook_switch_page_signal_relay(GtkNotebook *notebook, GtkWidget *page, guint page_num,
+                                               gpointer user_data)
+{
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_CONTROL_NOTEBOOK_TAB_CHANGED, user_data);
+}
+
+void dt_ui_notebook_set_picker_owner(GtkNotebook *notebook, gpointer owner)
+{
+  if(IS_NULL_PTR(notebook)) return;
+
+  // Guard against connecting twice on the same notebook (e.g. a caller re-entering
+  // gui_init after a GUI rebuild); user_data is set per-connection, so re-registering
+  // a different owner on an already-relayed notebook would otherwise leak the old
+  // connection instead of updating it.
+  const gulong existing = g_signal_handler_find(G_OBJECT(notebook), G_SIGNAL_MATCH_FUNC, 0, 0, NULL,
+                                                G_CALLBACK(_notebook_switch_page_signal_relay), NULL);
+  if(existing) g_signal_handler_disconnect(G_OBJECT(notebook), existing);
+
+  g_signal_connect(G_OBJECT(notebook), "switch_page", G_CALLBACK(_notebook_switch_page_signal_relay), owner);
+}
+
 static gint _get_container_row_heigth(GtkWidget *w)
 {
   gint height = DT_PIXEL_APPLY_DPI(10);

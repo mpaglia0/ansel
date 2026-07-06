@@ -2076,7 +2076,6 @@ static void _channel_tabs_switch_callback(GtkNotebook *notebook, GtkWidget *page
 
   dt_gui_freeze_end();
 
-  dt_iop_color_picker_reset(self, TRUE);
   if(c->display_mask)
     dt_dev_pixelpipe_update_history_main(self->dev);
   gtk_widget_queue_draw(self->widget);
@@ -2297,6 +2296,10 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_widget_show(gtk_notebook_get_nth_page(c->channel_tabs, c->channel));
   gtk_notebook_set_current_page(c->channel_tabs, c->channel);
   g_signal_connect(G_OBJECT(c->channel_tabs), "switch_page", G_CALLBACK(_channel_tabs_switch_callback), self);
+  /* The picker samples for the *currently selected* channel (c->channel), read at apply
+     time. Leaving it active across a tab switch would apply a sample picked for one
+     channel to whichever channel is now selected once the async sample lands. */
+  dt_ui_notebook_set_picker_owner(c->channel_tabs, self);
   gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(c->channel_tabs), TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new("   "), FALSE, FALSE, 0);
 

@@ -223,6 +223,9 @@ static dt_signal_description _signal_description[DT_SIGNAL_COUNT] = {
   { "dt-control-pickerdata-ready", NULL, NULL, G_TYPE_NONE, g_cclosure_marshal_VOID__VOID, 0, NULL, NULL,
     TRUE }, // DT_SIGNAL_CONTROL_PICKERDATA_REAEDY
 
+  { "dt-control-notebook-tab-changed", NULL, NULL, G_TYPE_NONE, g_cclosure_marshal_generic, 1, pointer_arg, NULL,
+    FALSE }, // DT_SIGNAL_CONTROL_NOTEBOOK_TAB_CHANGED (owner)
+
   { "dt-metadata-update", NULL, NULL, G_TYPE_NONE, g_cclosure_marshal_VOID__VOID, 0, NULL, NULL,
     FALSE }, // DT_SIGNAL_METADATA_UPDATE
 

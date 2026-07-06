@@ -1103,6 +1103,7 @@ void gui_init(struct dt_iop_module_t *self)
   dt_ui_notebook_page(c->channel_tabs, N_("a"), _("tonecurve for a channel"));
   dt_ui_notebook_page(c->channel_tabs, N_("b"), _("tonecurve for b channel"));
   g_signal_connect(G_OBJECT(c->channel_tabs), "switch_page", G_CALLBACK(tab_switch), self);
+  dt_ui_notebook_set_picker_owner(c->channel_tabs, self);
   gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(c->channel_tabs), TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(hbox), gtk_grid_new(), TRUE, TRUE, 0);
 
