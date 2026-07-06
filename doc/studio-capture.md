@@ -140,6 +140,16 @@ directory outside the source folder with non-empty naming patterns that
 expand to a valid destination path. The status label shows the specific
 reason it's disabled; the same check gates `dt_folder_survey_start()` itself,
 so the button's state is never out of sync with what pressing it would do.
+
+The project date field is validated through `dt_datetime_entry_to_exif()` ->
+`dt_string_to_datetime()` (`common/datetime.c`), which overlays the typed
+text byte-for-byte onto the `"0001-01-01 00:00:00.000"` template: a partial
+value is valid (the untyped tail keeps the template's defaults, so `"2026"`
+becomes `2026-01-01 00:00:00.000`), but the format itself — dashes/space/
+colons/dot at those exact character positions — must match, since it's a
+positional overlay, not a tolerant parser. Unlike the regular Import
+dialog's own datetime field, this one has no calendar picker to fall back
+on, so its tooltip spells the format out explicitly.
 Every field that affects this check re-evaluates it on change; **on
 conflict** and **delete original file** don't, since they only affect what
 happens to a conflicting/copied file, never whether the session can start.

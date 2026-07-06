@@ -270,6 +270,17 @@ void gui_init(dt_lib_module_t *self)
   d->datetime = gtk_entry_new();
   gtk_entry_set_text(GTK_ENTRY(d->datetime), dt_conf_get_string_const("studio_capture/datetime"));
   gtk_entry_set_placeholder_text(GTK_ENTRY(d->datetime), _("Current date at scan time"));
+  // Unlike the regular Import dialog's own datetime field, this one has no calendar picker to
+  // fall back on, so the expected format needs to be explicit. dt_string_to_datetime()
+  // (common/datetime.c) overlays the typed text onto the "0001-01-01 00:00:00.000" template
+  // byte-for-byte: a partial value is valid and gets the untyped tail filled from the template
+  // (e.g. "2026" -> 2026-01-01 00:00:00.000), but the format itself (dashes/space/colons/dot at
+  // these exact positions) must match.
+  gtk_widget_set_tooltip_text(d->datetime,
+                              _("Format: YYYY-MM-DD, optionally followed by HH:MM:SS.mmm\n"
+                                "Partial values are completed with defaults, e.g. \"2026\" becomes "
+                                "2026-01-01.\n"
+                                "Leave empty to use the current date at scan time."));
   g_signal_connect(G_OBJECT(d->datetime), "changed", G_CALLBACK(_studio_import_datetime_callback), d);
   _studio_import_pack_row(GTK_BOX(self->widget), _("Project date"), d->datetime);
 
