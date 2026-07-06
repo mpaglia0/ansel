@@ -19,14 +19,14 @@
     <type>bool</type>
     <default>false</default>
     <shortdescription>Enable the map view</shortdescription>
-    <longdescription>Check to enable the global map view. If you don't print yourself, keep disabled to save some resources. (needs a restart)</longdescription>
+    <longdescription>Check to enable the global map view. (needs a restart)</longdescription>
   </dtconfig>
   <dtconfig prefs="views" section="otherviews" restart="true">
     <name>/views/slideshow/enable</name>
     <type>bool</type>
     <default>false</default>
     <shortdescription>Enable the slideshow view</shortdescription>
-    <longdescription>Check to enable the global slideshow view. If you don't print yourself, keep disabled to save some resources. (needs a restart)</longdescription>
+    <longdescription>Check to enable the global slideshow view. (needs a restart)</longdescription>
   </dtconfig>
   <dtconfig>
     <name>darkroom/render_size</name>
