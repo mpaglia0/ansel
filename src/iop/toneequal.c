@@ -1048,7 +1048,7 @@ static inline __attribute__((always_inline)) int toneeq_process(struct dt_iop_mo
   // Display output
   if(self->dev->gui_attached && pipe->type == DT_DEV_PIXELPIPE_FULL)
   {
-    if(g->mask_display)
+    if(!IS_NULL_PTR(g) && g->mask_display)
     {
       display_luminance_mask(in, luminance, out, roi_in, roi_out, pipe, ch);
       ((dt_dev_pixelpipe_t *)pipe)->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;

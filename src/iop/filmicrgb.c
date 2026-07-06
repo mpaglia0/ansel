@@ -2671,7 +2671,7 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
   {
     dt_iop_filmicrgb_gui_data_t *g = (dt_iop_filmicrgb_gui_data_t *)self->gui_data;
 
-    if(g->show_mask)
+    if(!IS_NULL_PTR(g) && g->show_mask)
     {
       display_mask(mask, out, roi_out->width, roi_out->height);
       dt_pixelpipe_cache_free_align(mask);
@@ -3150,7 +3150,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   {
     dt_iop_filmicrgb_gui_data_t *g = (dt_iop_filmicrgb_gui_data_t *)self->gui_data;
 
-    if(g->show_mask)
+    if(!IS_NULL_PTR(g) && g->show_mask)
     {
       dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_show_mask, 0, sizeof(cl_mem), (void *)&mask);
       dt_opencl_set_kernel_arg(devid, gd->kernel_filmic_show_mask, 1, sizeof(cl_mem), (void *)&dev_out);

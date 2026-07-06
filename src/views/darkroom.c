@@ -117,6 +117,8 @@
 #include "gui/presets.h"
 #include "libs/colorpicker.h"
 #include "libs/lib.h"
+#include "views/dev_backbuf.h"
+#include "views/dev_toolbox.h"
 #include "views/view.h"
 #include "views/view_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
@@ -150,8 +152,6 @@ typedef struct coords_t
 #define DARKROOM_EDGE_PAN_INTERVAL_MS 64
 #define DARKROOM_EDGE_PAN_MARGIN_PX DT_PIXEL_APPLY_DPI(50)
 #define DARKROOM_EDGE_PAN_SPEED_PX_PER_S 360.0f
-
-static void _update_softproof_gamut_checking(dt_develop_t *d);
 
 /* signal handler for filmstrip image switching */
 static void _view_darkroom_filmstrip_activate_callback(gpointer instance, int32_t imgid, gpointer user_data);
@@ -470,22 +470,6 @@ static void _darkroom_pickers_draw(dt_view_t *self, cairo_t *cri,
   cairo_restore(cri);
 }
 
-void _colormanage_ui_color(const float L, const float a, const float b, dt_aligned_pixel_t RGB)
-{
-  dt_aligned_pixel_t Lab = { L, a, b, 1.f };
-  dt_aligned_pixel_t XYZ = { 0.f, 0.f, 0.f, 1.f };
-  dt_Lab_to_XYZ(Lab, XYZ);
-  cmsDoTransform(darktable.color_profiles->transform_xyz_to_display, XYZ, RGB, 1);
-}
-
-static void _render_iso12646(cairo_t *cr, double width, double height, int border)
-{
-  // draw the white frame around picture
-  cairo_rectangle(cr, -border * .5f, -border * .5f, width + border, height + border);
-  cairo_set_source_rgb(cr, 1., 1., 1.);
-  cairo_fill(cr);
-}
-
 /* Debug-only darkroom expose mode:
  * - no persistent surface locks,
  * - no fallback cache,
@@ -560,7 +544,7 @@ static gboolean _render_main_direct_debug(cairo_t *cr, dt_develop_t *dev, const 
   const int wd = image_box[2];
   const int ht = image_box[3];
   cairo_translate(cr, image_box[0], image_box[1]);
-  if(dev->iso_12646.enabled) _render_iso12646(cr, wd, ht, border);
+  if(dev->iso_12646.enabled) dt_dev_draw_iso12646_border(cr, wd, ht, border);
   cairo_surface_set_device_scale(surface, darktable.gui->ppd, darktable.gui->ppd);
   cairo_rectangle(cr, 0, 0, wd, ht);
   cairo_set_source_surface(cr, surface, 0, 0);
@@ -572,18 +556,8 @@ static gboolean _render_main_direct_debug(cairo_t *cr, dt_develop_t *dev, const 
 }
 #endif
 
-typedef struct darkroom_locked_surface_t
-{
-  uint64_t hash;
-  int width;
-  int height;
-  void *data;
-  struct dt_pixel_cache_entry_t *entry;
-  cairo_surface_t *surface;
-} darkroom_locked_surface_t;
-
-static darkroom_locked_surface_t _darkroom_main_locked = { .hash = (uint64_t)-1 };
-static darkroom_locked_surface_t _darkroom_preview_locked = { .hash = (uint64_t)-1 };
+static dt_dev_locked_surface_t _darkroom_main_locked = { .hash = DT_PIXELPIPE_CACHE_HASH_INVALID };
+static dt_dev_locked_surface_t _darkroom_preview_locked = { .hash = DT_PIXELPIPE_CACHE_HASH_INVALID };
 static dt_dev_pixelpipe_cache_wait_t _darkroom_main_wait = { 0 };
 static dt_dev_pixelpipe_cache_wait_t _darkroom_preview_wait = { 0 };
 static cairo_surface_t *_darkroom_preview_fallback_surface = NULL;
@@ -592,26 +566,6 @@ static uint64_t _darkroom_preview_fallback_zoom_hash = 0;
 static uint64_t _darkroom_preview_fallback_backbuf_hash = 0;
 static int _darkroom_preview_fallback_width = 0;
 static int _darkroom_preview_fallback_height = 0;
-
-static void _release_locked_surface(darkroom_locked_surface_t *locked)
-{
-  if(IS_NULL_PTR(locked)) return;
-
-  if(locked->surface)
-  {
-    cairo_surface_destroy(locked->surface);
-    locked->surface = NULL;
-  }
-
-  /* These cairo views only mirror whatever cacheline the pipeline currently exposes as backbuffer.
-   * They never own the backbuffer keepalive ref themselves: `pixelpipe_hb.c` swaps that ownership
-   * when publishing a new backbuffer. Releasing the surface must therefore only drop the GUI view. */
-  locked->entry = NULL;
-  locked->data = NULL;
-  locked->hash = (uint64_t)-1;
-  locked->width = 0;
-  locked->height = 0;
-}
 
 static void _release_preview_fallback_surface(void)
 {
@@ -628,154 +582,16 @@ static void _release_preview_fallback_surface(void)
   _darkroom_preview_fallback_height = 0;
 }
 
-static void _darkroom_restart_cache_wait(gpointer user_data)
-{
-  dt_develop_t *dev = (dt_develop_t *)user_data;
-  if(IS_NULL_PTR(dev) || !dev->gui_attached) return;
-  dt_control_queue_redraw_center();
-}
-
 static void _release_expose_source_caches(void)
 {
-  _release_locked_surface(&_darkroom_main_locked);
-  _release_locked_surface(&_darkroom_preview_locked);
+  dt_dev_release_locked_surface(&_darkroom_main_locked);
+  dt_dev_release_locked_surface(&_darkroom_preview_locked);
   dt_dev_pixelpipe_cache_wait_cleanup(&_darkroom_main_wait, "darkroom-release-main");
   dt_dev_pixelpipe_cache_wait_cleanup(&_darkroom_preview_wait, "darkroom-release-preview");
 #if DARKROOM_EXPOSE_DUMB_DEBUG
   dt_dev_pixelpipe_cache_wait_cleanup(&_darkroom_main_debug_wait, "darkroom-release-debug");
 #endif
   _release_preview_fallback_surface();
-}
-
-static gboolean _lock_pipe_surface(dt_develop_t *dev, dt_dev_pixelpipe_t *pipe, darkroom_locked_surface_t *locked,
-                                   const gboolean keep_previous_on_fail, const gboolean lock_read)
-{
-  if(IS_NULL_PTR(dev) || IS_NULL_PTR(pipe) || IS_NULL_PTR(locked)) return FALSE;
-  (void)lock_read;
-  dt_dev_pixelpipe_cache_wait_t *wait = NULL;
-  const char *wait_owner = "darkroom-unknown";
-  if(pipe == dev->pipe)
-  {
-    wait = &_darkroom_main_wait;
-    wait_owner = "darkroom-main";
-  }
-  else if(pipe == dev->preview_pipe)
-  {
-    wait = &_darkroom_preview_wait;
-    wait_owner = "darkroom-preview";
-  }
-  if(!IS_NULL_PTR(wait))
-    dt_dev_pixelpipe_cache_wait_set_owner(wait, wait_owner, dev);
-
-  const uint64_t hash = dt_dev_backbuf_get_hash(&pipe->backbuf);
-  if(hash == (uint64_t)-1) return keep_previous_on_fail && (!IS_NULL_PTR(locked->surface));
-
-  /* Fast-path reuse is only valid if the cacheline identity/data pointer are
-   * still the same behind the hash key. This avoids reusing stale cairo views
-   * when an entry is recreated or replaced under the same key. */
-  dt_pixel_cache_entry_t *live_entry = NULL;
-  void *live_data = NULL;
-  if(!IS_NULL_PTR(locked->surface) && locked->hash == hash
-     && dt_dev_pixelpipe_cache_peek_gui(pipe, NULL, &live_data, &live_entry, wait,
-                                        _darkroom_restart_cache_wait, dev)
-     && live_entry == locked->entry && live_data == locked->data)
-  {
-    locked->width = pipe->backbuf.width;
-    locked->height = pipe->backbuf.height;
-    return TRUE;
-  }
-
-  struct dt_pixel_cache_entry_t *entry = NULL;
-  /* GUI surfaces only borrow the currently published backbuffer. They rely on the backbuffer keepalive ref
-   * owned by `pixelpipe_hb.c`, so they must not take or drop their own cache refs here. */
-  void *data = NULL;
-  if(!dt_dev_pixelpipe_cache_peek_gui(pipe, NULL, &data, &entry, wait,
-                                      _darkroom_restart_cache_wait, dev))
-    data = NULL;
-  if(IS_NULL_PTR(data))
-  {
-    /* Keep previous frame only while waiting for a *different* target hash.
-     * If requested hash equals the currently locked one but cache lookup fails,
-     * the cached line was likely flushed/invalidated: drop stale lock so the
-     * line can be recreated and displayed again. */
-    if(keep_previous_on_fail && !IS_NULL_PTR(locked->surface) && locked->hash != hash) return TRUE;
-    _release_locked_surface(locked);
-    return FALSE;
-  }
-
-  const int width = pipe->backbuf.width;
-  const int height = pipe->backbuf.height;
-  const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, width);
-  const size_t required_size = (size_t)stride * (size_t)height;
-  const size_t entry_size = dt_pixel_cache_entry_get_size(entry);
-  if(width <= 0 || height <= 0 || entry_size < required_size || dt_pixel_cache_entry_get_data(entry) != data)
-  {
-    if(keep_previous_on_fail && !IS_NULL_PTR(locked->surface) && locked->hash != hash) return TRUE;
-    _release_locked_surface(locked);
-    return FALSE;
-  }
-
-  // The widget is about to (re)bind its surface to this backbuffer cacheline.
-  // Emitted off the fast-path, so it fires when the displayed buffer changes,
-  // not on every identical expose.
-  if(dt_supervisor_active())
-    dt_supervisor_widget(DT_SV_READ, wait_owner, hash, pipe->type, pipe->imgid);
-
-  if(!IS_NULL_PTR(locked->surface) && locked->data == data && locked->width == width && locked->height == height)
-  {
-    locked->hash = hash;
-    locked->entry = entry;
-    locked->data = data;
-    return TRUE;
-  }
-
-  cairo_surface_t *surface = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_RGB24, width, height, stride);
-  if(IS_NULL_PTR(surface) || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
-  {
-    if(!IS_NULL_PTR(surface)) cairo_surface_destroy(surface);
-    if(keep_previous_on_fail && !IS_NULL_PTR(locked->surface)) return TRUE;
-    _release_locked_surface(locked);
-    return FALSE;
-  }
-
-  _release_locked_surface(locked);
-  locked->hash = hash;
-  locked->width = width;
-  locked->height = height;
-  locked->data = data;
-  locked->entry = entry;
-  locked->surface = surface;
-  return TRUE;
-}
-
-static gboolean _render_main_locked_surface(cairo_t *cr, dt_develop_t *dev, darkroom_locked_surface_t *locked,
-                                            const int width, const int height, const int border,
-                                            const dt_aligned_pixel_t bg_color)
-{
-  if(IS_NULL_PTR(cr) || IS_NULL_PTR(dev) || IS_NULL_PTR(locked) || IS_NULL_PTR(locked->surface)) return FALSE;
-  if(IS_NULL_PTR(locked->entry) || locked->hash == (uint64_t)-1) return FALSE;
-
-  cairo_set_source_rgb(cr, bg_color[0], bg_color[1], bg_color[2]);
-  cairo_paint(cr);
-
-  int wd = locked->width;
-  int ht = locked->height;
-  if(wd <= 0 || ht <= 0) return FALSE;
-
-  wd /= darktable.gui->ppd;
-  ht /= darktable.gui->ppd;
-  cairo_translate(cr, .5f * (width - wd), .5f * (height - ht));
-
-  if(dev->iso_12646.enabled) _render_iso12646(cr, wd, ht, border);
-
-  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, locked->entry);
-  cairo_surface_set_device_scale(locked->surface, darktable.gui->ppd, darktable.gui->ppd);
-  cairo_rectangle(cr, 0, 0, wd, ht);
-  cairo_set_source_surface(cr, locked->surface, 0, 0);
-  cairo_fill(cr);
-  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, FALSE, locked->entry);
-
-  return TRUE;
 }
 
 static gboolean _build_preview_fallback_surface(dt_develop_t *dev, const int width, const int height, const int border,
@@ -819,7 +635,7 @@ static gboolean _build_preview_fallback_surface(dt_develop_t *dev, const int wid
     {
       cairo_save(cr);
       cairo_translate(cr, image_box[0], image_box[1]);
-      _render_iso12646(cr, image_box[2], image_box[3], border);
+      dt_dev_draw_iso12646_border(cr, image_box[2], image_box[3], border);
       cairo_restore(cr);
     }
   }
@@ -963,10 +779,7 @@ void expose(
 
 #if DARKROOM_EXPOSE_DUMB_DEBUG
   dt_aligned_pixel_t bg_color_dbg;
-  if(dev->iso_12646.enabled)
-    _colormanage_ui_color(50., 0., 0., bg_color_dbg);
-  else
-    _colormanage_ui_color((float)dt_conf_get_int("display/brightness"), 0., 0., bg_color_dbg);
+  dt_dev_get_background_color(dev, bg_color_dbg);
   _render_main_direct_debug(cri, dev, width, height, border, bg_color_dbg);
   cairo_restore(cri);
   return;
@@ -1013,11 +826,7 @@ void expose(
   gboolean drawn = FALSE;
   gboolean drawn_from_main = FALSE;
 
-  // user param is Lab lightness/brightness (which is they same for greys)
-  if(dev->iso_12646.enabled)
-    _colormanage_ui_color(50., 0., 0., bg_color);
-  else
-    _colormanage_ui_color((float)dt_conf_get_int("display/brightness"), 0., 0., bg_color);
+  dt_dev_get_background_color(dev, bg_color);
 
   cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
 
@@ -1046,9 +855,9 @@ void expose(
    * fallback again. */
   if(main_ready_for_current_view)
   {
-    if(_lock_pipe_surface(dev, dev->pipe, &_darkroom_main_locked, FALSE, FALSE)
+    if(dt_dev_lock_pipe_surface(dev, dev->pipe, &_darkroom_main_locked, &_darkroom_main_wait, "darkroom-main", FALSE)
        && _darkroom_main_locked.surface
-       && _render_main_locked_surface(cr, dev, &_darkroom_main_locked, width, height, border, bg_color))
+       && dt_dev_render_locked_surface(cr, dev, &_darkroom_main_locked, width, height, border, bg_color))
     {
       expose_state.main_zoom_hash = zoom_hash;
       expose_state.image_surface_imgid = dev->image_storage.id;
@@ -1078,9 +887,10 @@ void expose(
    * current zoom: once zoomed, preview must use the scaled fallback below. */
   if(!drawn && preview_matches_full_image)
   {
-    if(_lock_pipe_surface(dev, dev->preview_pipe, &_darkroom_preview_locked, FALSE, TRUE)
+    if(dt_dev_lock_pipe_surface(dev, dev->preview_pipe, &_darkroom_preview_locked, &_darkroom_preview_wait,
+                                "darkroom-preview", FALSE)
        && _darkroom_preview_locked.surface
-       && _render_main_locked_surface(cr, dev, &_darkroom_preview_locked, width, height, border, bg_color))
+       && dt_dev_render_locked_surface(cr, dev, &_darkroom_preview_locked, width, height, border, bg_color))
     {
       // This frame validates the composed image, not the locked main surface. Keep main_zoom_hash
       // unchanged so the old main backbuffer cannot be reused as if it had been rendered at fit.
@@ -1099,7 +909,8 @@ void expose(
    * placeholder so navigation remains responsive. */
   if(!drawn && roi_changed && !full_image_backbuf_ready && preview_has_backbuf)
   {
-    if(_lock_pipe_surface(dev, dev->preview_pipe, &_darkroom_preview_locked, TRUE, TRUE)
+    if(dt_dev_lock_pipe_surface(dev, dev->preview_pipe, &_darkroom_preview_locked, &_darkroom_preview_wait,
+                                "darkroom-preview", TRUE)
        && _build_preview_fallback_surface(dev, width, height, border, bg_color, zoom_hash)
        && _render_preview_fallback_surface(cr))
     {
@@ -1131,7 +942,7 @@ void expose(
    * the same zoom/pan. History-only changes should not glitch to preview or
    * background while the new main backbuf is still being produced. */
   if(!drawn && _darkroom_locked_main_valid_for_zoom(&expose_state, zoom_hash)
-     && _render_main_locked_surface(cr, dev, &_darkroom_main_locked, width, height, border, bg_color))
+     && dt_dev_render_locked_surface(cr, dev, &_darkroom_main_locked, width, height, border, bg_color))
   {
     expose_state.image_surface_imgid = dev->image_storage.id;
     expose_state.image_surface_has_main = TRUE;
@@ -1243,29 +1054,7 @@ void expose(
   }
 
   // indicate if we are in gamut check or softproof mode
-  if(darktable.color_profiles->mode != DT_PROFILE_NORMAL)
-  {
-    gchar *label = darktable.color_profiles->mode == DT_PROFILE_GAMUTCHECK ? _("gamut check") : _("soft proof");
-    cairo_set_source_rgba(cri, 0.5, 0.5, 0.5, 0.5);
-    PangoLayout *layout;
-    PangoRectangle ink;
-    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
-    pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
-    layout = pango_cairo_create_layout(cri);
-    pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(20) * PANGO_SCALE);
-    pango_layout_set_font_description(layout, desc);
-    pango_layout_set_text(layout, label, -1);
-    pango_layout_get_pixel_extents(layout, &ink, NULL);
-    cairo_move_to(cri, ink.height * 2, height - (ink.height * 3));
-    pango_cairo_layout_path(cri, layout);
-    cairo_set_source_rgb(cri, 0.7, 0.7, 0.7);
-    cairo_fill_preserve(cri);
-    cairo_set_line_width(cri, 0.7);
-    cairo_set_source_rgb(cri, 0.3, 0.3, 0.3);
-    cairo_stroke(cri);
-    pango_font_description_free(desc);
-    g_object_unref(layout);
-  }
+  dt_dev_draw_profile_mode_label(cri, height);
 
   dt_show_times_f(&start, "[darkroom]", "redraw");
 }
@@ -1412,112 +1201,14 @@ static void _view_darkroom_filmstrip_activate_callback(gpointer instance, int32_
 
 /** toolbar buttons */
 
-static gboolean _toolbar_show_popup(gpointer user_data)
+static void _guides_popover_preshow(gpointer user_data)
 {
-  GtkPopover *popover = GTK_POPOVER(user_data);
-
-  GtkWidget *button = gtk_popover_get_relative_to(popover);
-  GdkRectangle button_rect = { 0 };
-  GtkWidget *anchor = dt_gui_get_popup_relative_widget(button, &button_rect);
-  GdkDevice *pointer = gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_display_get_default()));
-
-  int x, y;
-  GdkWindow *pointer_window = gdk_device_get_window_at_position(pointer, &x, &y);
-  gpointer   pointer_widget = NULL;
-  if(pointer_window)
-    gdk_window_get_user_data(pointer_window, &pointer_widget);
-
-  gtk_popover_set_relative_to(popover, anchor ? anchor : button);
-
-  GdkRectangle rect = { button_rect.x + button_rect.width / 2, button_rect.y, 1, 1 };
-
-  if(pointer_widget == anchor)
-  {
-    rect.x = x;
-    rect.y = y;
-  }
-  else if(pointer_widget && anchor && pointer_widget != anchor)
-  {
-    gtk_widget_translate_coordinates(pointer_widget, anchor, x, y, &rect.x, &rect.y);
-  }
-
-  gtk_popover_set_pointing_to(popover, &rect);
-
-  // for the guides popover, it need to be updated before we show it
-  if(darktable.view_manager && GTK_WIDGET(popover) == darktable.view_manager->guides_popover)
-    dt_guides_update_popover_values();
-  else if(GTK_WIDGET(popover) == _darkroom_autoset_popover)
-    _darkroom_autoset_popover_rebuild(darktable.develop);
-
-  gtk_widget_show_all(GTK_WIDGET(popover));
-
-  // cancel glib timeout if invoked by long button press
-  return FALSE;
+  dt_guides_update_popover_values();
 }
 
-/**
- * DOC
- * Toolbox accelerators forward keyboard activation to the existing Gtk buttons
- * so the keyboard path reuses the exact same callbacks, state changes and
- * popover anchoring as the pointer path.
- */
-static gboolean _darkroom_toolbox_button_activate_accel(GtkAccelGroup *accel_group, GObject *accelerable,
-                                                        guint keyval, GdkModifierType modifier,
-                                                        gpointer data)
+static void _autoset_popover_preshow(gpointer user_data)
 {
-  GtkWidget *button = GTK_WIDGET(data);
-  if(IS_NULL_PTR(button) || !gtk_widget_is_visible(button) || !gtk_widget_is_sensitive(button)) return FALSE;
-
-  gtk_button_clicked(GTK_BUTTON(button));
-  return TRUE;
-}
-
-static gboolean _darkroom_toolbox_button_focus_accel(GtkAccelGroup *accel_group, GObject *accelerable,
-                                                     guint keyval, GdkModifierType modifier,
-                                                     gpointer data)
-{
-  GtkWidget *button = GTK_WIDGET(data);
-  if(IS_NULL_PTR(button) || !gtk_widget_is_visible(button) || !gtk_widget_is_sensitive(button)) return FALSE;
-
-  GtkWidget *popover = g_object_get_data(G_OBJECT(button), "dt-darkroom-toolbox-popover");
-  if(IS_NULL_PTR(popover) || !gtk_widget_is_sensitive(popover)) return FALSE;
-
-  gtk_widget_grab_focus(button);
-  gtk_popover_set_relative_to(GTK_POPOVER(popover), button);
-  _toolbar_show_popup(popover);
-  return TRUE;
-}
-
-static void _get_final_size_with_iso_12646(dt_develop_t *d)
-{
-  if(d->iso_12646.enabled)
-  {
-    // For ISO 12646, we want portraits and landscapes to cover roughly the same surface
-    // no matter the size of the widget. Meaning we force them to fit a square
-    // of length matching the smaller widget dimension. The goal is to leave
-    // a consistent perceptual impression between pictures, independent from orientation.
-    const int main_dim = MIN(d->roi.orig_width, d->roi.orig_height);
-    d->roi.border_size = 0.125 * main_dim;
-  }
-  else
-  {
-    d->roi.border_size = DT_PIXEL_APPLY_DPI(dt_conf_get_int("plugins/darkroom/ui/border_size"));
-  }
-
-  dt_dev_configure(d, d->roi.orig_width - 2 * d->roi.border_size, d->roi.orig_height - 2 * d->roi.border_size);
-}
-
-/* colour assessment */
-static void _iso_12646_quickbutton_clicked(GtkWidget *w, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  if(!d->gui_attached) return;
-
-  d->iso_12646.enabled = !d->iso_12646.enabled;
-  _get_final_size_with_iso_12646(d);
-
-  // This is already called in _get_final_size_... but it's not enough
-  dt_control_queue_redraw_center();
+  _darkroom_autoset_popover_rebuild(darktable.develop);
 }
 
 /* overlay color */
@@ -1539,26 +1230,7 @@ static void _guides_view_changed(gpointer instance, dt_view_t *old_view, dt_view
  * They all need a full history -> pipeline resynchronization.
  */
 
-/* display */
-static void _display_quickbutton_clicked(GtkWidget *w, gpointer user_data)
-{
-}
-
-static void display_brightness_callback(GtkWidget *slider, gpointer user_data)
-{
-  dt_conf_set_int("display/brightness", (int)(dt_bauhaus_slider_get(slider)));
-  dt_control_queue_redraw_center();
-  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DARKROOM_UI_CHANGED);
-}
-
-static void display_borders_callback(GtkWidget *slider, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  dt_conf_set_int("plugins/darkroom/ui/border_size", (int)dt_bauhaus_slider_get(slider));
-  _get_final_size_with_iso_12646(d);
-  dt_dev_pixelpipe_change_zoom_main(d);
-  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_DARKROOM_UI_CHANGED);
-}
+/* display: darkroom-only extras appended to the popover dt_dev_toolbox_create() builds */
 
 /**
  * @brief Persist the global mask-preview appearance and resynchronize every node using it.
@@ -1614,171 +1286,6 @@ static void _darkroom_change_rendering_size(GtkWidget *combobox, gpointer user_d
   dt_dev_pixelpipe_resync_history_main(d);
 }
 
-/* overexposed */
-static void _overexposed_quickbutton_clicked(GtkWidget *w, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->overexposed.enabled = !d->overexposed.enabled;
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void colorscheme_callback(GtkWidget *combo, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->overexposed.colorscheme = dt_bauhaus_combobox_get(combo);
-  if(d->overexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->overexposed.button));
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void lower_callback(GtkWidget *slider, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->overexposed.lower = dt_bauhaus_slider_get(slider);
-  if(d->overexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->overexposed.button));
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void upper_callback(GtkWidget *slider, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->overexposed.upper = dt_bauhaus_slider_get(slider);
-  if(d->overexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->overexposed.button));
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void mode_callback(GtkWidget *slider, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->overexposed.mode = dt_bauhaus_combobox_get(slider);
-  if(d->overexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->overexposed.button));
-
-  dt_dev_pixelpipe_update_history_main(d);
-}
-
-/* rawoverexposed */
-static void _rawoverexposed_quickbutton_clicked(GtkWidget *w, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->rawoverexposed.enabled = !d->rawoverexposed.enabled;
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void rawoverexposed_mode_callback(GtkWidget *combo, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->rawoverexposed.mode = dt_bauhaus_combobox_get(combo);
-  if(d->rawoverexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->rawoverexposed.button));
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void rawoverexposed_colorscheme_callback(GtkWidget *combo, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->rawoverexposed.colorscheme = dt_bauhaus_combobox_get(combo);
-  if(d->rawoverexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->rawoverexposed.button));
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-static void rawoverexposed_threshold_callback(GtkWidget *slider, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  d->rawoverexposed.threshold = dt_bauhaus_slider_get(slider);
-  if(d->rawoverexposed.enabled == FALSE)
-    gtk_button_clicked(GTK_BUTTON(d->rawoverexposed.button));
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-/* softproof */
-static void _softproof_quickbutton_clicked(GtkWidget *w, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  if(darktable.color_profiles->mode == DT_PROFILE_SOFTPROOF)
-    darktable.color_profiles->mode = DT_PROFILE_NORMAL;
-  else
-    darktable.color_profiles->mode = DT_PROFILE_SOFTPROOF;
-
-  _update_softproof_gamut_checking(d);
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-/* gamut */
-static void _gamut_quickbutton_clicked(GtkWidget *w, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  if(darktable.color_profiles->mode == DT_PROFILE_GAMUTCHECK)
-    darktable.color_profiles->mode = DT_PROFILE_NORMAL;
-  else
-    darktable.color_profiles->mode = DT_PROFILE_GAMUTCHECK;
-
-  _update_softproof_gamut_checking(d);
-
-  dt_dev_pixelpipe_resync_history_main(d);
-}
-
-/* set the gui state for both softproof and gamut checking */
-static void _update_softproof_gamut_checking(dt_develop_t *d)
-{
-  g_signal_handlers_block_by_func(d->profile.softproof_button, _softproof_quickbutton_clicked, d);
-  g_signal_handlers_block_by_func(d->profile.gamut_button, _gamut_quickbutton_clicked, d);
-
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->profile.softproof_button), darktable.color_profiles->mode == DT_PROFILE_SOFTPROOF);
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->profile.gamut_button), darktable.color_profiles->mode == DT_PROFILE_GAMUTCHECK);
-
-  g_signal_handlers_unblock_by_func(d->profile.softproof_button, _softproof_quickbutton_clicked, d);
-  g_signal_handlers_unblock_by_func(d->profile.gamut_button, _gamut_quickbutton_clicked, d);
-}
-
-
-static void softproof_profile_callback(GtkWidget *combo, gpointer user_data)
-{
-  dt_develop_t *d = (dt_develop_t *)user_data;
-  gboolean profile_changed = FALSE;
-  const int pos = dt_bauhaus_combobox_get(combo);
-  for(GList *profiles = darktable.color_profiles->profiles; profiles; profiles = g_list_next(profiles))
-  {
-    dt_colorspaces_color_profile_t *pp = (dt_colorspaces_color_profile_t *)profiles->data;
-    if(pp->out_pos == pos)
-    {
-      if(darktable.color_profiles->softproof_type != pp->type
-        || (darktable.color_profiles->softproof_type == DT_COLORSPACE_FILE
-            && strcmp(darktable.color_profiles->softproof_filename, pp->filename)))
-
-      {
-        darktable.color_profiles->softproof_type = pp->type;
-        g_strlcpy(darktable.color_profiles->softproof_filename, pp->filename,
-                  sizeof(darktable.color_profiles->softproof_filename));
-        profile_changed = TRUE;
-      }
-      goto end;
-    }
-  }
-
-  // profile not found, fall back to sRGB. shouldn't happen
-  fprintf(stderr, "can't find softproof profile `%s', using sRGB instead\n", dt_bauhaus_combobox_get_text(combo));
-  profile_changed = darktable.color_profiles->softproof_type != DT_COLORSPACE_SRGB;
-  darktable.color_profiles->softproof_type = DT_COLORSPACE_SRGB;
-  darktable.color_profiles->softproof_filename[0] = '\0';
-
-end:
-  if(profile_changed)
-  {
-    DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED, DT_COLORSPACES_PROFILE_TYPE_SOFTPROOF);
-    dt_dev_pixelpipe_resync_history_main(d);
-  }
-}
-
 /** end of toolbox */
 
 #if 0
@@ -1831,35 +1338,6 @@ static void _toggle_mask_visibility_callback(dt_action_t *action)
 
 
 #endif
-
-static gboolean _quickbutton_press_release(GtkWidget *button, GdkEventButton *event, GtkWidget *popover)
-{
-  static guint start_time = 0;
-
-  int delay = 0;
-  g_object_get(gtk_settings_get_default(), "gtk-long-press-time", &delay, NULL);
-
-  if((event->type == GDK_BUTTON_PRESS && event->button == 3) ||
-     (event->type == GDK_BUTTON_RELEASE && event->time - start_time > delay))
-  {
-    gtk_popover_set_relative_to(GTK_POPOVER(popover), button);
-    g_object_set(G_OBJECT(popover), "transitions-enabled", FALSE, NULL);
-
-    _toolbar_show_popup(popover);
-    return TRUE;
-  }
-  else
-  {
-    start_time = event->time;
-    return FALSE;
-  }
-}
-
-void connect_button_press_release(GtkWidget *w, GtkWidget *p)
-{
-  g_signal_connect(w, "button-press-event", G_CALLBACK(_quickbutton_press_release), p);
-  g_signal_connect(w, "button-release-event", G_CALLBACK(_quickbutton_press_release), p);
-}
 
 gboolean _focus_main_image(GtkAccelGroup *accel_group, GObject *accelerable, guint keyval,
                            GdkModifierType modifier, gpointer data)
@@ -2114,53 +1592,20 @@ void gui_init(dt_view_t *self)
    * Add view specific tool buttons
    */
 
-  /* Enable ISO 12646-compliant colour assessment conditions */
-  dev->iso_12646.button = dtgtk_togglebutton_new(dtgtk_cairo_paint_bulb, 0, NULL);
-  gtk_widget_set_tooltip_text(dev->iso_12646.button,
-                              _("toggle ISO 12646 color assessment conditions"));
-  g_signal_connect(G_OBJECT(dev->iso_12646.button), "clicked", G_CALLBACK(_iso_12646_quickbutton_clicked), dev);
-  dt_view_manager_module_toolbox_add(darktable.view_manager, dev->iso_12646.button, DT_VIEW_DARKROOM);
-  dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel, dev->iso_12646.button,
-                                N_("Darkroom/Toolbox"),
-                                N_("Toggle ISO 12646 color assessment conditions"), 0, 0,
-                                _("Triggers the action"));
+  static const dt_dev_toolbox_button_t darkroom_toolbox_buttons[]
+      = { DT_DEV_TOOLBOX_ISO_12646,     DT_DEV_TOOLBOX_DISPLAY, DT_DEV_TOOLBOX_RAWOVEREXPOSED,
+          DT_DEV_TOOLBOX_OVEREXPOSED, DT_DEV_TOOLBOX_SOFTPROOF, DT_DEV_TOOLBOX_GAMUT };
+  dt_dev_toolbox_create(dev, DT_VIEW_DARKROOM, darkroom_toolbox_buttons,
+                        G_N_ELEMENTS(darkroom_toolbox_buttons));
+  dt_dev_toolbox_add_accels(dev, darktable.gui->accels->darkroom_accels, N_("Darkroom/Toolbox"),
+                            darkroom_toolbox_buttons, G_N_ELEMENTS(darkroom_toolbox_buttons));
 
-  /* display background options */
+  /* display background options: dt_dev_toolbox_create() already built the
+   * button and a popover with the generic controls (brightness, margins);
+   * append darkroom-only extras (rendering size, mask preview) to that same
+   * popover's content box. */
   {
-    dev->display.button = dtgtk_button_new(dtgtk_cairo_paint_display, 0, NULL);
-    dt_view_manager_module_toolbox_add(darktable.view_manager, dev->display.button, DT_VIEW_DARKROOM);
-    gtk_widget_set_tooltip_text(dev->display.button, _("Picture display options"));
-    g_signal_connect(G_OBJECT(dev->display.button), "clicked",
-                     G_CALLBACK(_display_quickbutton_clicked), dev);
-
-    // and the popup window
-    dev->display.floating_window = gtk_popover_new(dev->display.button);
-    connect_button_press_release(dev->display.button, dev->display.floating_window);
-    g_object_set_data(G_OBJECT(dev->display.button), "dt-darkroom-toolbox-popover",
-                      dev->display.floating_window);
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_focus_accel, dev->display.button,
-                                  N_("Darkroom/Toolbox"),
-                                  N_("Focus picture display options"), 0, 0,
-                                  _("Shows the options popover"));
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
-    gtk_widget_set_margin_bottom(vbox, DT_PIXEL_APPLY_DPI(DT_GUI_BOX_SPACING));
-    gtk_container_add(GTK_CONTAINER(dev->display.floating_window), vbox);
-
-    /** let's fill the encapsulating widgets */
-    GtkWidget *brightness = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL), 0, 100, 5, 50, 0);
-    dt_bauhaus_slider_set(brightness, (int)dt_conf_get_int("display/brightness"));
-    dt_bauhaus_widget_set_label(brightness, N_("Background brightness"));
-    dt_bauhaus_slider_set_format(brightness, "%");
-    g_signal_connect(G_OBJECT(brightness), "value-changed", G_CALLBACK(display_brightness_callback), dev);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(brightness), TRUE, TRUE, 0);
-
-    GtkWidget *borders = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL), 0, 250, 5, 10, 0);
-    dt_bauhaus_slider_set(borders, dt_conf_get_int("plugins/darkroom/ui/border_size"));
-    dt_bauhaus_widget_set_label(borders, N_("Picture margins"));
-    dt_bauhaus_slider_set_format(borders, "px");
-    g_signal_connect(G_OBJECT(borders), "value-changed", G_CALLBACK(display_borders_callback), dev);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(borders), TRUE, TRUE, 0);
+    GtkWidget *vbox = gtk_bin_get_child(GTK_BIN(dev->display.floating_window));
 
     GtkWidget *rendering;
     DT_BAUHAUS_COMBOBOX_NEW_FULL(darktable.bauhaus, rendering, NULL, 
@@ -2227,6 +1672,8 @@ void gui_init(dt_view_t *self)
     g_signal_connect(G_OBJECT(black_and_white), "toggled",
                      G_CALLBACK(display_mask_black_and_white_callback), dev);
     gtk_box_pack_start(GTK_BOX(vbox), black_and_white, FALSE, FALSE, 0);
+
+    gtk_widget_show_all(vbox);
   }
 
   _darkroom_ioporder_button = dtgtk_button_new(dtgtk_cairo_paint_flowchart, 0, NULL);
@@ -2234,237 +1681,10 @@ void gui_init(dt_view_t *self)
   g_signal_connect(G_OBJECT(_darkroom_ioporder_button), "clicked",
                    G_CALLBACK(_darkroom_ioporder_quickbutton_clicked), dev);
   dt_view_manager_module_toolbox_add(darktable.view_manager, _darkroom_ioporder_button, DT_VIEW_DARKROOM);
-  dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel, _darkroom_ioporder_button,
+  dt_accels_new_darkroom_action(dt_dev_toolbox_activate_accel, _darkroom_ioporder_button,
                                 N_("Darkroom/Toolbox"),
                                 N_("Show the pipeline node graph"), 0, 0,
                                 _("Triggers the action"));
-
-  GtkWidget *colorscheme, *mode;
-
-  /* create rawoverexposed popup tool */
-  {
-    // the button
-    dev->rawoverexposed.button = dtgtk_togglebutton_new(dtgtk_cairo_paint_rawoverexposed, 0, NULL);
-    gtk_widget_set_tooltip_text(dev->rawoverexposed.button,
-                                _("toggle raw over exposed indication\nright click for options"));
-    g_signal_connect(G_OBJECT(dev->rawoverexposed.button), "clicked",
-                     G_CALLBACK(_rawoverexposed_quickbutton_clicked), dev);
-    dt_view_manager_module_toolbox_add(darktable.view_manager, dev->rawoverexposed.button, DT_VIEW_DARKROOM);
-    dt_gui_add_help_link(dev->rawoverexposed.button, dt_get_help_url("rawoverexposed"));
-
-    // and the popup window
-    dev->rawoverexposed.floating_window = gtk_popover_new(dev->rawoverexposed.button);
-    connect_button_press_release(dev->rawoverexposed.button, dev->rawoverexposed.floating_window);
-    g_object_set_data(G_OBJECT(dev->rawoverexposed.button), "dt-darkroom-toolbox-popover",
-                      dev->rawoverexposed.floating_window);
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel, dev->rawoverexposed.button,
-                                  N_("Darkroom/Toolbox"),
-                                  N_("Toggle raw over exposed indication"), 0, 0,
-                                  _("Triggers the action"));
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_focus_accel, dev->rawoverexposed.button,
-                                  N_("Darkroom/Toolbox"),
-                                  N_("Focus raw over exposed indication options"), 0, 0,
-                                  _("Shows the options popover"));
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
-    gtk_container_add(GTK_CONTAINER(dev->rawoverexposed.floating_window), vbox);
-
-    /** let's fill the encapsulating widgets */
-    /* mode of operation */
-    DT_BAUHAUS_COMBOBOX_NEW_FULL(darktable.bauhaus, mode, NULL, N_("mode"),
-                                 _("select how to mark the clipped pixels"),
-                                 dev->rawoverexposed.mode, rawoverexposed_mode_callback, dev,
-                                 N_("mark with CFA color"), N_("mark with solid color"), N_("false color"));
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(mode), TRUE, TRUE, 0);
-
-    /* color scheme */
-    // FIXME can't use DT_BAUHAUS_COMBOBOX_NEW_FULL because of (unnecessary?) translation context
-    colorscheme = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(NULL));
-    dt_bauhaus_widget_set_label(colorscheme, N_("color scheme"));
-    dt_bauhaus_combobox_add(colorscheme, C_("solidcolor", "red"));
-    dt_bauhaus_combobox_add(colorscheme, C_("solidcolor", "green"));
-    dt_bauhaus_combobox_add(colorscheme, C_("solidcolor", "blue"));
-    dt_bauhaus_combobox_add(colorscheme, C_("solidcolor", "black"));
-    dt_bauhaus_combobox_set(colorscheme, dev->rawoverexposed.colorscheme);
-    gtk_widget_set_tooltip_text(
-        colorscheme,
-        _("select the solid color to indicate over exposure.\nwill only be used if mode = mark with solid color"));
-    g_signal_connect(G_OBJECT(colorscheme), "value-changed", G_CALLBACK(rawoverexposed_colorscheme_callback), dev);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(colorscheme), TRUE, TRUE, 0);
-
-    /* threshold */
-    GtkWidget *threshold = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL), 0.0, 2.0, 0.01, 1.0, 3);
-    dt_bauhaus_slider_set(threshold, dev->rawoverexposed.threshold);
-    dt_bauhaus_widget_set_label(threshold, N_("clipping threshold"));
-    gtk_widget_set_tooltip_text(
-        threshold, _("threshold of what shall be considered overexposed\n1.0 - white level\n0.0 - black level"));
-    g_signal_connect(G_OBJECT(threshold), "value-changed", G_CALLBACK(rawoverexposed_threshold_callback), dev);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(threshold), TRUE, TRUE, 0);
-
-    gtk_widget_show_all(vbox);
-  }
-
-  /* create overexposed popup tool */
-  {
-    // the button
-    dev->overexposed.button = dtgtk_togglebutton_new(dtgtk_cairo_paint_overexposed, 0, NULL);
-    gtk_widget_set_tooltip_text(dev->overexposed.button,
-                                _("toggle clipping indication\nright click for options"));
-    g_signal_connect(G_OBJECT(dev->overexposed.button), "clicked",
-                     G_CALLBACK(_overexposed_quickbutton_clicked), dev);
-    dt_view_manager_module_toolbox_add(darktable.view_manager, dev->overexposed.button, DT_VIEW_DARKROOM);
-    dt_gui_add_help_link(dev->overexposed.button, dt_get_help_url("overexposed"));
-
-    // and the popup window
-    dev->overexposed.floating_window = gtk_popover_new(dev->overexposed.button);
-    connect_button_press_release(dev->overexposed.button, dev->overexposed.floating_window);
-    g_object_set_data(G_OBJECT(dev->overexposed.button), "dt-darkroom-toolbox-popover",
-                      dev->overexposed.floating_window);
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel, dev->overexposed.button,
-                                  N_("Darkroom/Toolbox"),
-                                  N_("Toggle clipping indication"), 0, 0,
-                                  _("Triggers the action"));
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_focus_accel, dev->overexposed.button,
-                                  N_("Darkroom/Toolbox"),
-                                  N_("Focus clipping indication options"), 0, 0,
-                                  _("Shows the options popover"));
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
-    gtk_container_add(GTK_CONTAINER(dev->overexposed.floating_window), vbox);
-
-    /** let's fill the encapsulating widgets */
-    /* preview mode */
-    DT_BAUHAUS_COMBOBOX_NEW_FULL(darktable.bauhaus, mode, NULL, N_("clipping preview mode"),
-                                 _("select the metric you want to preview\nfull gamut is the combination of all other modes"),
-                                 dev->overexposed.mode, mode_callback, dev,
-                                 N_("full gamut"), N_("any RGB channel"), N_("luminance only"), N_("saturation only"));
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(mode), TRUE, TRUE, 0);
-
-    /* color scheme */
-    DT_BAUHAUS_COMBOBOX_NEW_FULL(darktable.bauhaus, colorscheme, NULL, N_("color scheme"),
-                                 _("select colors to indicate clipping"),
-                                 dev->overexposed.colorscheme, colorscheme_callback, dev,
-                                 N_("black & white"), N_("red & blue"), N_("purple & green"));
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(colorscheme), TRUE, TRUE, 0);
-
-    /* lower */
-    GtkWidget *lower = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL), -32., -4., 1., -12.69, 2);
-    dt_bauhaus_slider_set(lower, dev->overexposed.lower);
-    dt_bauhaus_slider_set_format(lower, _(" EV"));
-    dt_bauhaus_widget_set_label(lower, N_("lower threshold"));
-    gtk_widget_set_tooltip_text(lower, _("clipping threshold for the black point,\n"
-                                         "in EV, relatively to white (0 EV).\n"
-                                         "8 bits sRGB clips blacks at -12.69 EV,\n"
-                                         "8 bits Adobe RGB clips blacks at -19.79 EV,\n"
-                                         "16 bits sRGB clips blacks at -20.69 EV,\n"
-                                         "typical fine-art mat prints produce black at -5.30 EV,\n"
-                                         "typical color glossy prints produce black at -8.00 EV,\n"
-                                         "typical B&W glossy prints produce black at -9.00 EV."
-                                         ));
-    g_signal_connect(G_OBJECT(lower), "value-changed", G_CALLBACK(lower_callback), dev);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(lower), TRUE, TRUE, 0);
-
-    /* upper */
-    GtkWidget *upper = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL), 0.0, 100.0, 0.1, 99.99, 2);
-    dt_bauhaus_slider_set(upper, dev->overexposed.upper);
-    dt_bauhaus_slider_set_format(upper, "%");
-    dt_bauhaus_widget_set_label(upper, N_("upper threshold"));
-    /* xgettext:no-c-format */
-    gtk_widget_set_tooltip_text(upper, _("clipping threshold for the white point.\n"
-                                         "100% is peak medium luminance."));
-    g_signal_connect(G_OBJECT(upper), "value-changed", G_CALLBACK(upper_callback), dev);
-    gtk_box_pack_start(GTK_BOX(vbox), GTK_WIDGET(upper), TRUE, TRUE, 0);
-
-    gtk_widget_show_all(vbox);
-  }
-
-  /* create profile popup tool & buttons (softproof + gamut) */
-  {
-    // the softproof button
-    dev->profile.softproof_button = dtgtk_togglebutton_new(dtgtk_cairo_paint_softproof, 0, NULL);
-    gtk_widget_set_tooltip_text(dev->profile.softproof_button,
-                                _("toggle softproofing\nright click for profile options"));
-    g_signal_connect(G_OBJECT(dev->profile.softproof_button), "clicked",
-                     G_CALLBACK(_softproof_quickbutton_clicked), dev);
-    dt_view_manager_module_toolbox_add(darktable.view_manager, dev->profile.softproof_button, DT_VIEW_DARKROOM);
-    dt_gui_add_help_link(dev->profile.softproof_button, dt_get_help_url("softproof"));
-
-    // the gamut check button
-    dev->profile.gamut_button = dtgtk_togglebutton_new(dtgtk_cairo_paint_gamut_check, 0, NULL);
-    gtk_widget_set_tooltip_text(dev->profile.gamut_button,
-                 _("toggle gamut checking\nright click for profile options"));
-    g_signal_connect(G_OBJECT(dev->profile.gamut_button), "clicked",
-                     G_CALLBACK(_gamut_quickbutton_clicked), dev);
-    dt_view_manager_module_toolbox_add(darktable.view_manager, dev->profile.gamut_button, DT_VIEW_DARKROOM);
-    dt_gui_add_help_link(dev->profile.gamut_button, dt_get_help_url("gamut"));
-
-    // and the popup window, which is shared between the two profile buttons
-    dev->profile.floating_window = gtk_popover_new(NULL);
-    connect_button_press_release(dev->profile.softproof_button, dev->profile.floating_window);
-    connect_button_press_release(dev->profile.gamut_button, dev->profile.floating_window);
-    g_object_set_data(G_OBJECT(dev->profile.softproof_button), "dt-darkroom-toolbox-popover",
-                      dev->profile.floating_window);
-    g_object_set_data(G_OBJECT(dev->profile.gamut_button), "dt-darkroom-toolbox-popover",
-                      dev->profile.floating_window);
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel,
-                                  dev->profile.softproof_button, N_("Darkroom/Toolbox"),
-                                  N_("Toggle softproofing"), 0, 0,
-                                  _("Triggers the action"));
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_focus_accel,
-                                  dev->profile.softproof_button, N_("Darkroom/Toolbox"),
-                                  N_("Focus softproof options"), 0, 0,
-                                  _("Shows the options popover"));
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel,
-                                  dev->profile.gamut_button, N_("Darkroom/Toolbox"),
-                                  N_("Toggle gamut checking"), 0, 0,
-                                  _("Triggers the action"));
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_focus_accel,
-                                  dev->profile.gamut_button, N_("Darkroom/Toolbox"),
-                                  N_("Focus gamut checking options"), 0, 0,
-                                  _("Shows the options popover"));
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
-    gtk_container_add(GTK_CONTAINER(dev->profile.floating_window), vbox);
-
-    /** let's fill the encapsulating widgets */
-    char datadir[PATH_MAX] = { 0 };
-    char confdir[PATH_MAX] = { 0 };
-    dt_loc_get_user_config_dir(confdir, sizeof(confdir));
-    dt_loc_get_datadir(datadir, sizeof(datadir));
-
-    GtkWidget *softproof_profile = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(NULL));
-    dt_bauhaus_widget_set_label(softproof_profile, N_("softproof profile"));
-    dt_bauhaus_combobox_set_entries_ellipsis(softproof_profile, PANGO_ELLIPSIZE_MIDDLE);
-    gtk_box_pack_start(GTK_BOX(vbox), softproof_profile, TRUE, TRUE, 0);
-
-    for(const GList *l = darktable.color_profiles->profiles; l; l = g_list_next(l))
-    {
-      dt_colorspaces_color_profile_t *prof = (dt_colorspaces_color_profile_t *)l->data;
-      // the system display profile is only suitable for display purposes
-      if(prof->out_pos > -1)
-      {
-        dt_bauhaus_combobox_add(softproof_profile, prof->name);
-        if(prof->type == darktable.color_profiles->softproof_type
-          && (prof->type != DT_COLORSPACE_FILE
-              || !strcmp(prof->filename, darktable.color_profiles->softproof_filename)))
-          dt_bauhaus_combobox_set(softproof_profile, prof->out_pos);
-      }
-    }
-
-    char *system_profile_dir = g_build_filename(datadir, "color", "out", NULL);
-    char *user_profile_dir = g_build_filename(confdir, "color", "out", NULL);
-    char *tooltip = g_strdup_printf(_("softproof ICC profiles in %s or %s"), user_profile_dir, system_profile_dir);
-    gtk_widget_set_tooltip_text(softproof_profile, tooltip);
-    dt_free(tooltip);
-    dt_free(system_profile_dir);
-    dt_free(user_profile_dir);
-
-    g_signal_connect(G_OBJECT(softproof_profile), "value-changed", G_CALLBACK(softproof_profile_callback), dev);
-
-    _update_softproof_gamut_checking(dev);
-
-    gtk_widget_show_all(vbox);
-  }
 
   /* create grid changer popup tool */
   {
@@ -2476,16 +1696,17 @@ void gui_init(dt_view_t *self)
     g_object_ref(darktable.view_manager->guides_popover);
     g_signal_connect(G_OBJECT(darktable.view_manager->guides_toggle), "clicked",
                      G_CALLBACK(_guides_quickbutton_clicked), dev);
-    connect_button_press_release(darktable.view_manager->guides_toggle, darktable.view_manager->guides_popover);
-    g_object_set_data(G_OBJECT(darktable.view_manager->guides_toggle), "dt-darkroom-toolbox-popover",
+    dt_dev_toolbox_connect_popover(darktable.view_manager->guides_toggle, darktable.view_manager->guides_popover);
+    dt_dev_toolbox_popover_set_preshow(darktable.view_manager->guides_popover, _guides_popover_preshow, NULL);
+    g_object_set_data(G_OBJECT(darktable.view_manager->guides_toggle), DT_DEV_TOOLBOX_POPOVER_KEY,
                       darktable.view_manager->guides_popover);
     dt_view_manager_module_toolbox_add(darktable.view_manager, darktable.view_manager->guides_toggle,
-                                       DT_VIEW_DARKROOM);
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel,
+                                       DT_VIEW_DARKROOM | DT_VIEW_STUDIO_CAPTURE);
+    dt_accels_new_darkroom_action(dt_dev_toolbox_activate_accel,
                                   darktable.view_manager->guides_toggle, N_("Darkroom/Toolbox"),
                                   N_("Toggle guide lines"), 0, 0,
                                   _("Triggers the action"));
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_focus_accel,
+    dt_accels_new_darkroom_action(dt_dev_toolbox_focus_accel,
                                   darktable.view_manager->guides_toggle, N_("Darkroom/Toolbox"),
                                   N_("Focus guide lines options"), 0, 0,
                                   _("Shows the options popover"));
@@ -2507,11 +1728,12 @@ void gui_init(dt_view_t *self)
     dt_view_manager_module_toolbox_add(darktable.view_manager, _darkroom_autoset_button, DT_VIEW_DARKROOM);
 
     _darkroom_autoset_popover = gtk_popover_new(_darkroom_autoset_button);
-    connect_button_press_release(_darkroom_autoset_button, _darkroom_autoset_popover);
-    g_object_set_data(G_OBJECT(_darkroom_autoset_button), "dt-darkroom-toolbox-popover",
+    dt_dev_toolbox_connect_popover(_darkroom_autoset_button, _darkroom_autoset_popover);
+    dt_dev_toolbox_popover_set_preshow(_darkroom_autoset_popover, _autoset_popover_preshow, NULL);
+    g_object_set_data(G_OBJECT(_darkroom_autoset_button), DT_DEV_TOOLBOX_POPOVER_KEY,
                       _darkroom_autoset_popover);
     /*
-    dt_accels_new_darkroom_action(_darkroom_toolbox_button_activate_accel, _darkroom_autoset_button,
+    dt_accels_new_darkroom_action(dt_dev_toolbox_activate_accel, _darkroom_autoset_button,
                                   N_("Darkroom/Toolbox"),
                                   N_("Show the pipeline node graph"), 0, 0,
                                   _("Triggers the action"));
@@ -3737,7 +2959,7 @@ void configure(dt_view_t *self, int wd, int ht)
     // Reference dimensions before ISO 12646 mode
     dev->roi.orig_height = ht;
     dev->roi.orig_width = wd;
-    _get_final_size_with_iso_12646(dev);
+    dt_dev_toolbox_apply_iso_12646_size(dev);
   }
 }
 

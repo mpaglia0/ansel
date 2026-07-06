@@ -74,6 +74,7 @@ FILE(GLOB SOURCE_FILES
   "common/exif.cc"
   "common/film.c"
   "common/file_location.c"
+  "common/folder_survey.c"
   "common/focus_peaking.c"
   "common/fp_mode.c"
   "common/gaussian.c"
@@ -217,6 +218,8 @@ FILE(GLOB SOURCE_FILES
   "gui/actions/*.c"
   "libs/lib.c"
   "views/view.c"
+  "views/dev_toolbox.c"
+  "views/dev_backbuf.c"
   )
 FILE(GLOB HEADER_FILES "*.h" "common/*.h" "external/OpenCL/CL/*.h" "control/*.h" "iop/*.h" "libs/*.h" "views/*.h")
 

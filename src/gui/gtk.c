@@ -3290,8 +3290,10 @@ void dt_gui_refocus_center()
   gtk_grab_remove(dt_ui_main_window(darktable.gui->ui));
   gtk_widget_grab_focus(dt_ui_main_window(darktable.gui->ui));
 
-  const char *current_view = dt_view_manager_name(darktable.view_manager);
-  if(g_strcmp0(current_view, "lighttable"))
+  // dt_view_manager_name() returns the translated display name (e.g. "Table lumineuse"), not the
+  // internal id: compare against module_name, which is stable and untranslated.
+  const dt_view_t *current_view = dt_view_manager_get_current_view(darktable.view_manager);
+  if(!IS_NULL_PTR(current_view) && !strcmp(current_view->module_name, "lighttable"))
   {
     gtk_widget_grab_focus(darktable.gui->ui->thumbtable_lighttable->grid);
   }

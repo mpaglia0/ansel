@@ -26,11 +26,33 @@ extern "C" {
 #endif
 
 
+/**
+ * @brief Behaviour when a copy-on-import destination path already exists.
+ *
+ * SKIP is value 0 so the default (zero-initialized) behaviour of every existing
+ * caller is preserved: the existing destination is kept and imported as-is.
+ */
+typedef enum dt_import_onconflict_t
+{
+  DT_IMPORT_ONCONFLICT_SKIP = 0,      // keep the existing destination file (legacy behaviour)
+  DT_IMPORT_ONCONFLICT_OVERWRITE = 1, // replace the existing destination with the source
+  DT_IMPORT_ONCONFLICT_UNIQUE = 2     // copy the source under a new, non-colliding name
+} dt_import_onconflict_t;
+
 typedef struct dt_control_import_t
 {
   GList *imgs;
   GDateTime *datetime;
   gboolean copy;
+  gboolean delete_source;
+  gboolean folder_survey;
+
+  // Behaviour when a copy destination path already exists.
+  dt_import_onconflict_t on_conflict;
+
+  // Optional list of style names (owned char*) applied, in order, to each
+  // successfully imported image. All styles are applied in APPEND mode.
+  GList *styles;
 
   // String expanded as $(JOBCODE) in patterns
   char *jobcode;
@@ -55,6 +77,17 @@ typedef struct dt_control_import_t
   // List of pathes of files that couldn't be imported due to filesystem errors or overrides.
   GList *discarded;
 
+  /**
+   * @brief Optional per-file completion method.
+   *
+   * The import worker calls this method after each source file has either been
+   * imported successfully or rejected. The callback data belongs to this
+   * structure and is released with callback_data_free after the complete job.
+   */
+  void (*file_imported)(const char *source, gboolean success, gpointer user_data);
+  gpointer callback_data;
+  GDestroyNotify callback_data_free;
+
 } dt_control_import_t;
 
 
@@ -78,8 +111,9 @@ gchar *dt_build_filename_from_pattern(const char *const filename, const int inde
  * @brief Process a list of images to import with or without copying the files on an arbitrary hard-drive.
  *
  * @param data import informations to transmit through the functions
+ * @return int 0 when the import job was queued, non-zero on failure
  */
-void dt_control_import(dt_control_import_t data);
+int dt_control_import(dt_control_import_t data);
 
 
 #ifdef __cplusplus

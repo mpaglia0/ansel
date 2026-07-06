@@ -1386,7 +1386,8 @@ static gboolean _thumbtable_dnd_import(GtkSelectionData *selection_data)
                                   .discarded = NULL
                                   };
 
-      dt_control_import(data);
+      if(dt_control_import(data))
+        dt_control_log(_("Could not start the import job."));
     }
     else fprintf(stderr,"No files to import. Check your selection or use 'File > Import'.");
   }
@@ -1718,8 +1719,13 @@ dt_thumbtable_t *dt_thumbtable_new(dt_thumbtable_mode_t mode)
 
   g_object_set_data(G_OBJECT(table->grid), DT_ACCELS_WIDGET_TOOLTIP_DISABLED_KEY, GINT_TO_POINTER(1));
   gtk_widget_set_has_tooltip(table->grid, FALSE);
-  gtk_widget_set_can_focus(table->grid, TRUE);
-  gtk_widget_set_focus_on_click(table->grid, TRUE);
+  // The filmstrip must never hold keyboard focus (see its ops' grab_focus comment): clicking one
+  // of its thumbnails would otherwise steal focus away from the current view's own center widget,
+  // and Return then gets swallowed here (raising a plain ACTIVATE/preview) instead of reaching the
+  // view's own key_pressed (e.g. Studio Capture's "open in darkroom").
+  const gboolean can_focus = (table->mode != DT_THUMBTABLE_MODE_FILMSTRIP);
+  gtk_widget_set_can_focus(table->grid, can_focus);
+  gtk_widget_set_focus_on_click(table->grid, can_focus);
   gtk_widget_add_events(table->grid, GDK_LEAVE_NOTIFY_MASK);
   gtk_widget_set_app_paintable(table->grid, TRUE);
   g_signal_connect(G_OBJECT(table->grid), "leave-notify-event", G_CALLBACK(_event_main_leave), table);

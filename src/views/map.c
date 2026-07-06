@@ -2578,13 +2578,19 @@ static void _view_map_selection_changed(gpointer instance, gpointer user_data)
   dt_view_t *self = (dt_view_t *)user_data;
   dt_map_t *lib = (dt_map_t *)self->data;
 
-  dt_view_active_images_reset(FALSE);
-  GList *selection = dt_selection_get_list(darktable.selection);
-  if(selection) dt_view_active_images_set(selection, FALSE);
-
-  /* only redraw when map mode is currently active, otherwise enter() does the magic */
+  /* This handler stays connected for the app's whole lifetime, not just while map is the active
+     view (see init()). active_images is a global, shared "currently displayed/edited image"
+     marker other views (darkroom, Studio Capture) rely on: resyncing it to the selection here
+     regardless of which view is active stomps on whatever they just set, e.g. wiping the
+     filmstrip's highlight the instant any other view calls dt_selection_select_single(), since
+     its internal clear+select briefly raises this signal with an empty selection.
+     Only touch it when map is actually the active view, exactly like the redraw below. */
   if(darktable.view_manager->proxy.map.view)
   {
+    dt_view_active_images_reset(FALSE);
+    GList *selection = dt_selection_get_list(darktable.selection);
+    if(selection) dt_view_active_images_set(selection, FALSE);
+
     const int32_t imgid = dt_selection_get_first_id(darktable.selection);
     dt_control_set_mouse_over_id(imgid);
     dt_control_set_keyboard_over_id(imgid);

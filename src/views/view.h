@@ -75,6 +75,7 @@
 typedef enum
 {
   DT_VIEW_LIGHTTABLE = 1 << 0,
+  DT_VIEW_STUDIO_CAPTURE = 1 << 1,
   DT_VIEW_DARKROOM = 1 << 2,
   DT_VIEW_MAP = 1 << 3,
   DT_VIEW_SLIDESHOW = 1 << 4,
@@ -135,8 +136,8 @@ typedef struct dt_view_image_surface_fetcher_t
   gboolean destroying;
 } dt_view_image_surface_fetcher_t;
 
-#define DT_VIEW_ALL                                                                              \
-  (DT_VIEW_LIGHTTABLE | DT_VIEW_DARKROOM | DT_VIEW_TETHERING | DT_VIEW_MAP | DT_VIEW_SLIDESHOW | \
+#define DT_VIEW_ALL                                                                                   \
+  (DT_VIEW_LIGHTTABLE | DT_VIEW_STUDIO_CAPTURE | DT_VIEW_DARKROOM | DT_VIEW_MAP | DT_VIEW_SLIDESHOW | \
    DT_VIEW_PRINT)
 
 /* maximum zoom factor for the lighttable */

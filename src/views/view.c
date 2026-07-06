@@ -562,9 +562,9 @@ int dt_view_manager_key_pressed(dt_view_manager_t *vm, GdkEventKey *event)
     return 1;
   /* if not handled by any plugin let pass to view handler*/
   else if(v->key_pressed)
-    v->key_pressed(v, event);
+    handled = v->key_pressed(v, event);
 
-  return 0;
+  return handled;
 }
 
 int dt_view_manager_button_released(dt_view_manager_t *vm, double x, double y, int which, uint32_t state)
@@ -874,6 +874,12 @@ void dt_view_image_surface_fetcher_invalidate(dt_view_image_surface_fetcher_t *f
   fetcher->cached_width = 0;
   fetcher->cached_height = 0;
   fetcher->cached_zoom = 0;
+  // Also clear the *requested* imgid, not just the cached one: dt_view_image_get_surface_async()
+  // only enqueues a fetch when imgid/width/height/zoom differ from the previous call. A caller
+  // invalidating because the underlying image changed (e.g. a style applied) but requesting the
+  // exact same imgid/size/zoom afterward would otherwise see "nothing changed" and never
+  // re-enqueue a fetch, leaving the display stuck on the busy message forever.
+  fetcher->imgid = UNKNOWN_IMAGE;
   dt_pthread_mutex_unlock(&fetcher->lock);
 
   _destroy_surface(target);

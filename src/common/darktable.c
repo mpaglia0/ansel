@@ -107,6 +107,7 @@
 
 #include "common/file_location.h"
 #include "common/film.h"
+#include "common/folder_survey.h"
 #include "common/grealpath.h"
 #include "common/image.h"
 #include "common/image_cache.h"
@@ -818,7 +819,8 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
         CHKSIGDBG(DT_SIGNAL_CONTROL_PICKERDATA_READY);
         CHKSIGDBG(DT_SIGNAL_METADATA_UPDATE);
         CHKSIGDBG(DT_SIGNAL_MASK_CHANGED);
-        
+        CHKSIGDBG(DT_SIGNAL_FOLDER_SURVEY_CHANGED);
+
         else
         {
           fprintf(stderr, "unknown signal name: '%s'. use 'ALL' to enable debug for all or use full signal name\n", str);
@@ -1325,6 +1327,13 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
     dt_accels_load_user_config(darktable.gui->accels);
     dt_accels_connect_accels(darktable.gui->accels);
     //gtk_window_add_accel_group(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), darktable.gui->accels->global_accels);
+
+    // Studio capture folder survey: restore the persisted comparison state and,
+    // once the main loop runs and the window is mapped, propose to resume a
+    // session that was monitoring when the application was last closed.
+    dt_folder_survey_init();
+    if(dt_folder_survey_session_was_active())
+      g_idle_add((GSourceFunc)dt_folder_survey_propose_resume, NULL);
   }
 
   dt_gui_splash_close();
@@ -1408,7 +1417,9 @@ void dt_cleanup()
 
     // Stop control workers before unloading views and libs. They can still be
     // processing lighttable-side jobs while shutdown is tearing down modules.
+    dt_folder_survey_stop();
     dt_control_shutdown(darktable.control);
+    dt_folder_survey_cleanup();
 
     _dt_drain_main_context(256);
 

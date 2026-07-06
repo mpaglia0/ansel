@@ -311,7 +311,7 @@ static int process_wavelets(struct dt_iop_module_t *self, const struct dt_dev_pi
   if(self->dev->gui_attached && !dt_dev_pixelpipe_has_preview_output(self->dev, pipe, roi_out))
   {
     dt_iop_atrous_gui_data_t *g = (dt_iop_atrous_gui_data_t *)self->gui_data;
-    g->num_samples = get_samples(g->sample, d, roi_in, piece);
+    if(!IS_NULL_PTR(g)) g->num_samples = get_samples(g->sample, d, roi_in, piece);
     // tries to acquire gdk lock and this prone to deadlock:
     // dt_control_queue_draw(GTK_WIDGET(g->area));
   }
@@ -391,7 +391,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   if(self->dev->gui_attached && !dt_dev_pixelpipe_has_preview_output(self->dev, pipe, roi_out))
   {
     dt_iop_atrous_gui_data_t *g = (dt_iop_atrous_gui_data_t *)self->gui_data;
-    g->num_samples = get_samples(g->sample, d, roi_in, piece);
+    if(!IS_NULL_PTR(g)) g->num_samples = get_samples(g->sample, d, roi_in, piece);
     // dt_control_queue_redraw_widget(GTK_WIDGET(g->area));
     // tries to acquire gdk lock and this prone to deadlock:
     // dt_control_queue_draw(GTK_WIDGET(g->area));
@@ -520,7 +520,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   if(self->dev->gui_attached && !dt_dev_pixelpipe_has_preview_output(self->dev, pipe, roi_out))
   {
     dt_iop_atrous_gui_data_t *g = (dt_iop_atrous_gui_data_t *)self->gui_data;
-    g->num_samples = get_samples(g->sample, d, roi_in, piece);
+    if(!IS_NULL_PTR(g)) g->num_samples = get_samples(g->sample, d, roi_in, piece);
     // dt_control_queue_redraw_widget(GTK_WIDGET(g->area));
     // tries to acquire gdk lock and this prone to deadlock:
     // dt_control_queue_draw(GTK_WIDGET(g->area));

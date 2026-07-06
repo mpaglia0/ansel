@@ -210,7 +210,6 @@ MAKE_ACCEL_WRAPPER(dt_control_remove_images)
 MAKE_ACCEL_WRAPPER(dt_control_delete_images)
 MAKE_ACCEL_WRAPPER(dt_control_quit)
 
-
 void append_file(GtkWidget **menus, GList **lists, const dt_menus_t index)
 {
   add_sub_menu_entry(menus, lists, _("Import..."), index, NULL, GET_ACCEL_WRAPPER(dt_images_import), NULL, NULL,

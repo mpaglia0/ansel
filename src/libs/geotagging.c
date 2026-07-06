@@ -169,9 +169,9 @@ const char *name(struct dt_lib_module_t *self)
 const char **views(dt_lib_module_t *self)
 {
 #ifdef HAVE_MAP
-  static const char *v[] = {"lighttable", "map", NULL};
+  static const char *v[] = {"lighttable", "map", "studio_capture", NULL};
 #else
-  static const char *v[] = {"lighttable", NULL};
+  static const char *v[] = {"lighttable", "studio_capture", NULL};
 #endif
   return v;
 }

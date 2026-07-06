@@ -315,6 +315,11 @@ typedef enum dt_signal_t
   */
   DT_SIGNAL_FILELIST_CHANGED,
 
+  /** \brief Raised when the folder survey starts or stops monitoring.
+    no param, no returned value
+    */
+  DT_SIGNAL_FOLDER_SURVEY_CHANGED,
+
   /* do not touch !*/
   DT_SIGNAL_COUNT
 } dt_signal_t;

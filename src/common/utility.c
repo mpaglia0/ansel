@@ -1060,7 +1060,7 @@ gchar *dt_util_remove_whitespace(const gchar *path)
 {
   gchar **split = g_strsplit(path, G_DIR_SEPARATOR_S, -1);
   for(int i = 0; i < g_strv_length(split); i++)
-    if(g_strdup(split[i]) != NULL ) g_strstrip(split[i]);
+    g_strstrip(split[i]);
 
   char* result = g_strjoinv(G_DIR_SEPARATOR_S, split);
   g_strfreev(split);

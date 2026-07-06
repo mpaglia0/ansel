@@ -59,6 +59,8 @@ MACRO_VIEW(darkroom);
 MACRO_VIEW(print);
 MACRO_VIEW(slideshow);
 MACRO_VIEW(map);
+MACRO_VIEW(studio_capture);
+
 
 void append_views(GtkWidget **menus, GList **lists, const dt_menus_t index)
 {
@@ -78,6 +80,8 @@ void append_views(GtkWidget **menus, GList **lists, const dt_menus_t index)
       callback = view_switch_to_slideshow;
     else if(!g_strcmp0(view->module_name, "map"))
       callback = view_switch_to_map;
+    else if(!g_strcmp0(view->module_name, "studio_capture"))
+      callback = view_switch_to_studio_capture;
 
     guint key = 0;
     if(!g_strcmp0(view->module_name, "lighttable"))
@@ -90,7 +94,8 @@ void append_views(GtkWidget **menus, GList **lists, const dt_menus_t index)
       key = 0;
     else if(!g_strcmp0(view->module_name, "map"))
       key = 0;
-
+    else if(!g_strcmp0(view->module_name, "studio_capture"))
+      key = 0;
 
     add_no_accel_sub_menu_entry(menus, lists, view->name(view), index, view->module_name, callback,
                        NULL, views_active_callback, views_sensitive_callback, key, 0);

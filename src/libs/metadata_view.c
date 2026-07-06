@@ -210,7 +210,7 @@ const char *name(struct dt_lib_module_t *self)
 
 const char **views(dt_lib_module_t *self)
 {
-  static const char *v[] = {"darkroom", "lighttable", "map", "print", "slideshow", NULL};
+  static const char *v[] = {"darkroom", "lighttable", "map", "print", "slideshow", "studio_capture", NULL};
   return v;
 }
 

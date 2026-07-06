@@ -19,14 +19,14 @@
     <type>bool</type>
     <default>false</default>
     <shortdescription>Enable the map view</shortdescription>
-    <longdescription>Check to enable the global map view. If you don't print yourself, keep disabled to save some resources. (needs a restart)</longdescription>
+    <longdescription>Check to enable the global map view. (needs a restart)</longdescription>
   </dtconfig>
   <dtconfig prefs="views" section="otherviews" restart="true">
     <name>/views/slideshow/enable</name>
     <type>bool</type>
     <default>false</default>
     <shortdescription>Enable the slideshow view</shortdescription>
-    <longdescription>Check to enable the global slideshow view. If you don't print yourself, keep disabled to save some resources. (needs a restart)</longdescription>
+    <longdescription>Check to enable the global slideshow view. (needs a restart)</longdescription>
   </dtconfig>
   <dtconfig>
     <name>darkroom/render_size</name>
@@ -814,63 +814,70 @@
     <longdescription>type a date in the form: YYYY:MM:DD[ hh:mm:ss[.sss]] if you want to override the current date/time used when expanding variables:\n$(YEAR), $(MONTH), $(DAY), $(HOUR), $(MINUTE), $(SECONDS), $(MSEC).\nlet the field empty otherwise</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/folder</name>
+    <name>studio_capture/folder</name>
     <type>string</type>
     <default/>
     <shortdescription>folder surveyed for new images</shortdescription>
     <longdescription>the folder and its subfolders are compared with the persisted file list on every scan</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/interval</name>
+    <name>studio_capture/interval</name>
     <type min="1" max="3600">int</type>
     <default>10</default>
     <shortdescription>folder survey frequency in seconds</shortdescription>
     <longdescription>delay between two scans of the configured ingest folder</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/copy</name>
+    <name>studio_capture/copy</name>
     <type>bool</type>
     <default>false</default>
     <shortdescription>copy surveyed images before importing</shortdescription>
     <longdescription>copy new images to the configured project directory instead of adding them to the library at their source location</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/delete_source</name>
+    <name>studio_capture/delete_source</name>
     <type>bool</type>
     <default>false</default>
     <shortdescription>delete surveyed originals after verified copy</shortdescription>
     <longdescription>delete each source image only after the destination has been imported and its complete byte stream matches the original</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/datetime</name>
+    <name>studio_capture/on_conflict</name>
+    <type min="0" max="2">int</type>
+    <default>2</default>
+    <shortdescription>behaviour on destination name conflict for surveyed imports</shortdescription>
+    <longdescription>0 = skip (keep the existing destination), 1 = overwrite, 2 = create a unique filename</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>studio_capture/datetime</name>
     <type>string</type>
     <default/>
     <shortdescription>project date for surveyed imports</shortdescription>
     <longdescription>date used by import naming variables; when empty, the date of the scan is used</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/jobcode</name>
+    <name>studio_capture/jobcode</name>
     <type>string</type>
     <default>no_name</default>
     <shortdescription>jobcode for surveyed imports</shortdescription>
     <longdescription>project name expanded as $(JOBCODE) in folder survey import patterns</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/base_directory_pattern</name>
+    <name>studio_capture/base_directory_pattern</name>
     <type>string</type>
     <default/>
     <shortdescription>base directory for surveyed imports</shortdescription>
     <longdescription>base destination used when surveyed images are copied before import</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/sub_directory_pattern</name>
+    <name>studio_capture/sub_directory_pattern</name>
     <type>string</type>
     <default>$(YEAR)-$(MONTH)-$(DAY)-$(JOBCODE)</default>
     <shortdescription>project directory pattern for surveyed imports</shortdescription>
     <longdescription>subdirectory naming pattern used when surveyed images are copied before import</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>folder_survey/filename_pattern</name>
+    <name>studio_capture/filename_pattern</name>
     <type>string</type>
     <default>$(JOBCODE)-$(FILE.NAME)-$(SEQUENCE).$(FILE.EXTENSION)</default>
     <shortdescription>file naming pattern for surveyed imports</shortdescription>

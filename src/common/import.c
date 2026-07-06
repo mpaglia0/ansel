@@ -995,7 +995,8 @@ static void _process_file_list(gpointer instance, GList *files, int elements, gb
                                 };
 
     // Prepare to catch the end of import signal
-    dt_control_import(data);
+    if(dt_control_import(data))
+      dt_control_log(_("Could not start the import job."));
   }
   else
     dt_control_log(_("No files to import. Check your selection."));

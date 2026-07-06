@@ -508,7 +508,19 @@ fi
 
 cmd_config="CXX=${CXX_COMPILER} CC=${CC_COMPILER} ${ASAN_FLAGS}cmake -G \"$BUILD_GENERATOR\" -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ${CMAKE_MORE_OPTIONS} \"$DT_SRC_DIR\""
 cmd_build="cmake --build "$BUILD_DIR" -- -j$MAKE_TASKS"
-cmd_install="${SUDO}cmake --build \"$BUILD_DIR\" --target $INSTALL_TARGET -- -j$MAKE_TASKS"
+if [ "$TARGET" = "install" ]; then
+	# `cmake --install` only replays the generated install script: unlike
+	# `cmake --build --target install`, it never re-invokes the build system,
+	# so it cannot decide anything is out of date and rebuild it. That matters
+	# specifically when $SUDO is set: a sudo-invoked build-system rebuild
+	# leaves whatever it recompiles root-owned, poisoning the build directory
+	# for every later non-sudo build.
+	cmd_install="${SUDO}cmake --install \"$BUILD_DIR\""
+else
+	# BUILD_PACKAGE builds ("package"/"package_source" targets) are a real build-system target (cpack),
+	# not a plain install: keep the previous form.
+	cmd_install="${SUDO}cmake --build \"$BUILD_DIR\" --target $INSTALL_TARGET -- -j$MAKE_TASKS"
+fi
 
 cat <<EOF
 

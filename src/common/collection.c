@@ -2414,6 +2414,12 @@ static int dt_collection_image_offset_with_collection(const dt_collection_t *col
 
 static inline void _dt_collection_change_view_after_import(const dt_view_t *current_view, gboolean open_single_image)
 {
+  // Studio Capture already shows every newly-imported image itself (see
+  // _studio_image_imported_callback() in views/studio_capture.c), without leaving the atelier:
+  // forcing a switch to darkroom/lighttable here on every auto-imported capture would fight that
+  // and kick the user out of a live shooting session.
+  if(!g_strcmp0(current_view->module_name, "studio_capture")) return;
+
   if(open_single_image)
   {
     if(!g_strcmp0(current_view->module_name, "darkroom")) // if current view IS "darkroom".
@@ -2430,12 +2436,21 @@ static inline gboolean _collection_can_switch_folder(const int32_t imgid, const 
   // Go out if the image is unknown.
   gboolean result = imgid == UNKNOWN_IMAGE;
 
-  // Go out if we are not in lighttable.
-  result |= current_atelier && g_strcmp0(current_atelier->module_name, "lighttable"); // current atelier IS NOT "lighttabke".
+  // Go out if we are not in lighttable or Studio Capture: those are the only two ateliers whose
+  // filmstrip/grid should follow newly-imported images into their folder. Studio Capture's own
+  // filmstrip is driven by the same darktable.collection query as lighttable's grid, so without
+  // this it never picks up an auto-imported capture that lands outside the currently browsed
+  // folder.
+  result |= current_atelier && g_strcmp0(current_atelier->module_name, "lighttable")
+            && g_strcmp0(current_atelier->module_name, "studio_capture");
 
-  // Go out if the Collection module is not showing the "Folders" tab
-  // (should it switch to this tab instead ?)
-  result |= dt_conf_get_int("plugins/lighttable/collect/tab") != 0;
+  // Go out if the Collection module is not showing the "Folders" tab. Only applies to
+  // lighttable, the only atelier with a Collect module UI exposing that tab: Studio Capture has
+  // no such module, so this persisted, lighttable-specific tab selection must not gate it too.
+  const gboolean is_lighttable = current_atelier && !g_strcmp0(current_atelier->module_name, "lighttable");
+  if(is_lighttable)
+    result |= dt_conf_get_int("plugins/lighttable/collect/tab") != 0;
+
   return result;
 }
 
