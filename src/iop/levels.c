@@ -550,6 +550,11 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
 
   if(w == g->mode)
   {
+    /* blackpick/greypick/whitepick live on the "manual" stack page. Switching mode
+       can hide that page while a picker stays active, sampling/drawing on the image
+       for a control the user can no longer see or turn off from this widget. */
+    dt_iop_color_picker_reset(self, FALSE);
+
     if(p->mode == LEVELS_MODE_AUTOMATIC)
       gtk_stack_set_visible_child_name(GTK_STACK(g->mode_stack), "automatic");
     else

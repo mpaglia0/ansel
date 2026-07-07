@@ -11,8 +11,9 @@ buffer is not available yet. It complements:
 
 The code lives in `src/develop/pixelpipe_cache.c` (the cache itself), `src/develop/dev_pixelpipe.c`
 (the GUI fetch wrapper and the cache-wait manager), `src/develop/pixelpipe_hb.c` (the recompute
-that publishes image cachelines), and `src/develop/pixelpipe_raster_masks.c` (raster-mask
-side-band retrieval).
+that publishes image cachelines), `src/develop/pixelpipe_raster_masks.c` (raster-mask side-band
+retrieval), and `src/gui/color_picker_proxy.c` (the module color-picker's own `input_wait` /
+`output_wait` consumer).
 
 ## 1. What the pipeline cache holds
 
@@ -476,16 +477,73 @@ now raises `CACHELINE_READY(requested_hash, producer_node_key)` on that early-re
 **when a GUI cache request was pending** (`cache_request != NONE`), so the manager's
 producer-node match serves the waiter; its restart re-reads the module's current hash
 and hits. It is gated on the pending request so ordinary cache-hit renders add no
-signal traffic. (A *device-only* cached target does not hit this path: the top-level
-peek uses host-only `devid == -1`, and `process_rec`'s fast track requires non-NULL
-host data — a device-only entry falls through and is recomputed to host, which
-publishes and signals normally.)
+signal traffic. This top-level check, in `dt_dev_pixelpipe_process()` before
+`process_rec()` even starts, does not treat a *device-only* cached target as a hit: it
+uses host-only `devid == -1`. That only means `process_rec()` gets invoked next — its own
+handling of an existing device-only entry is the separate mechanism described below.
 
 The color picker additionally re-samples on `DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED`
 (`_iop_color_picker_pipe_finished_callback`) as belt-and-suspenders: a module-only
 `CACHE_REQUEST` still queues the backbuffer continuation in `develop.c`, guaranteeing a
 `PREVIEW_PIPE_FINISHED`. It is gated on the picker still being `update_pending`, so it
 is a no-op once a sample has landed.
+
+### The writable-acquire exact-hit and host-residency policy
+
+`process_rec()`'s cache acquisition for a node's own output tries two lookups in order:
+
+1. `exact_output_cache_hit` (`dt_dev_pixelpipe_cache_ref_entry_by_hash()`) requires
+   non-NULL *host* data — a device-only entry does not satisfy it.
+2. If (1) misses, `dt_dev_pixelpipe_cache_get_writable()` is asked for a *writable*
+   handle on the same hash. Its `EXACT_HIT` status only reflects whether an entry exists
+   for that hash (`_non_threadsafe_cache_get_entry()`), independent of whether it carries
+   host data or of the caller's `cache_ram_output` request.
+
+Host-residency requirements (`piece->cache_output_on_ram`, set by
+`_seal_opencl_cache_policy()` — a color picker or histogram starting to sample a piece,
+`active_in_gui` turning on, etc.) are otherwise only consulted when *creating* a cache
+entry. So the `EXACT_HIT` branch also compares `cache_ram_output` against the entry's
+current residency: when a host copy is wanted and the entry has none, it calls
+`dt_dev_pixelpipe_cache_restore_host_payload(cache, exact_entry, pipe->devid, &data)` —
+the same helper `dt_dev_pixelpipe_cache_peek()` uses for its own device-owning callers —
+to read the GPU payload back to host in place, without recomputing the module.
+`pipe->devid` is a real, locked OpenCL device id at this point in `process_rec()` (the
+lock is taken before the recursion starts).
+
+This matters whenever a module's cachelines were computed device-only before anything
+needed a host copy of them — e.g. focusing a color-picker/histogram-consuming module for
+the first time on an image where the module (and its upstream piece) already rendered
+once, collapsed, before the picker ever engaged `_seal_opencl_cache_policy()`'s host
+requirement for it.
+
+**Field signature** (`-d dev`): `[pipeline] module=X writable-exact-hit ... has_host_data=0
+cache_ram_output=1` followed immediately by `[pipeline] module=X exact-hit was
+device-only, host materialize succeeded ...`, both logged from this branch.
+
+This mechanism is independent of the hash-drift race described earlier in this section
+and does not apply when OpenCL is disabled, since no device-only entries can exist there.
+
+### Check the output wait before the input wait
+
+`_sample_picker_from_cache()` (`color_picker_proxy.c`) needs two cachelines: the target
+module's **input** (the previous enabled piece's output) and its own **output**. It
+checks output first, and only falls back to requesting input on its own when output can
+never resolve (`bypass_cache`/`no_cache`/realtime — the color-equalizer-style "input
+only" case, where there is nothing downstream to recurse through for us).
+
+The reason: `process_rec()` always recurses upstream to obtain a node's input before
+producing that node's own output, so requesting the module's **output** as the
+`CACHE_REQUEST_MODULE` target makes a single recompute produce and cache *both*
+cachelines. Checking input first and returning on a miss without looking at output would
+cost two sequential `CACHE_REQUEST` → `PIPE needs update` → recompute round-trips
+whenever both are cold — the common case right after focusing a module whose input/output
+were never sampled on the current image (fresh image load, or a module that stayed
+collapsed since darkroom opened) — instead of one.
+
+This ordering also means `_sample_picker_from_cache()` only reaches its final
+`wait_output_hash`/`update_pending` cleanup once output is either sampled or structurally
+blocked, so that cleanup can stay unconditional: it is never reached with output "missing
+but expected to arrive later."
 
 ### Remaining fix direction (design, not yet implemented)
 
@@ -516,3 +574,10 @@ the source.
 - As noted in `reorganisation.md`, the long-term direction is to let modules self-trigger their
   `process()` and publish directly to the cache, which would let interactive modules refresh their
   own GUI buffers without a full preview round-trip at all.
+- The writable-acquire `EXACT_HIT` materialize (§8, "The writable-acquire exact-hit and
+  host-residency policy") is synchronous on the worker thread (a GPU→host read), so the first render
+  after a policy tightens (a picker/histogram starts consuming a previously device-only-cached
+  piece) pays that transfer cost once; subsequent hits are already host-resident and skip it.
+  `dt_dev_pixelpipe_cache_get_writable()` has a single call site today (`pixelpipe_hb.c`), so this
+  is not yet a reusable pattern — a second caller needing the same policy-aware-hit behavior should
+  factor it into the cache layer instead of duplicating it.

@@ -4809,6 +4809,9 @@ void gui_init(struct dt_iop_module_t *self)
 
   // Init GTK notebook
   g->notebook = dt_ui_notebook_new();
+  // The CAT page's illuminant picker is read at apply time; reset it if it is
+  // still active once the user switches away from that page.
+  dt_ui_notebook_set_picker_owner(g->notebook, self);
 
   // Page CAT
   self->widget = dt_ui_notebook_page(g->notebook, N_("CAT"), _("chromatic adaptation transform"));

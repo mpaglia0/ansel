@@ -1003,6 +1003,30 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
     dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, FALSE, exact_entry);
     dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, TRUE, exact_entry);
 
+    dt_print(DT_DEBUG_DEV,
+             "[pipeline] module=%s writable-exact-hit output_hash=%" PRIu64 " has_host_data=%d"
+             " cache_ram_output=%d devid=%d\n",
+             module->op, hash, !IS_NULL_PTR(dt_pixel_cache_entry_get_data(exact_entry)), cache_ram_output,
+             pipe->devid);
+
+    /* This entry may predate the current run's host-caching requirement: it was created device-only
+     * (OpenCL, no RAM copy) back when nothing needed a host copy of it, and an exact-hash hit here
+     * short-circuits without ever re-running the module, so `cache_ram_output` newly turning TRUE
+     * (e.g. a color picker or histogram just started sampling this piece) would otherwise never take
+     * effect on an already-cached entry. Materialize the host copy now from the device payload we
+     * already own the OpenCL context for, instead of silently leaving GUI host-only consumers
+     * (dt_dev_pixelpipe_cache_peek_gui, preferred_devid = -1) missing this hash forever. */
+    if(cache_ram_output && IS_NULL_PTR(dt_pixel_cache_entry_get_data(exact_entry)))
+    {
+      void *restored = NULL;
+      const gboolean restored_ok
+          = dt_dev_pixelpipe_cache_restore_host_payload(darktable.pixelpipe_cache, exact_entry, pipe->devid,
+                                                        &restored);
+      dt_print(DT_DEBUG_DEV,
+               "[pipeline] module=%s exact-hit was device-only, host materialize %s output_hash=%" PRIu64 "\n",
+               module->op, restored_ok ? "succeeded" : "failed", hash);
+    }
+
     _trace_cache_owner(pipe, module, "exact-hit-wait", "output", hash,
                        dt_pixel_cache_entry_get_data(exact_entry), exact_entry, FALSE);
 

@@ -877,6 +877,11 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   {
     dt_free(g->deflicker_histogram);
 
+    /* The exposure picker lives on the "manual" stack page. Switching mode can hide
+       that page while the picker stays active, sampling/drawing on the image for a
+       control the user can no longer see or turn off from this widget. */
+    dt_iop_color_picker_reset(self, FALSE);
+
     switch(p->mode)
     {
       case EXPOSURE_MODE_DEFLICKER:

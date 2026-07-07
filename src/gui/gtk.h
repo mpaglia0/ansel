@@ -479,6 +479,17 @@ GtkNotebook *dt_ui_notebook_new();
 
 GtkWidget *dt_ui_notebook_page(GtkNotebook *notebook, const char *text, const char *tooltip);
 
+/** \brief Register an opaque owner for a GtkNotebook's page switches, and relay every
+ * "switch_page" as DT_SIGNAL_CONTROL_NOTEBOOK_TAB_CHANGED(owner).
+ *
+ * This widget layer does not know or care what @p owner is: it is carried through the
+ * signal as-is. Any interested listener (e.g. the color picker, which resets a picker
+ * left active on a page the user just switched away from) connects to that signal and
+ * casts the payload back to whatever type it registered here. Works on any GtkNotebook,
+ * whether created via dt_ui_notebook_new() or a plain gtk_notebook_new().
+ */
+void dt_ui_notebook_set_picker_owner(GtkNotebook *notebook, gpointer owner);
+
 // show a dialog box with 2 buttons in case some user interaction is required BEFORE dt's gui is initialised.
 // this expects gtk_init() to be called already which should be the case during most of dt's init phase.
 gboolean dt_gui_show_standalone_yes_no_dialog(const char *title, const char *markup, const char *no_text,

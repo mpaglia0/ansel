@@ -845,6 +845,10 @@ void gui_init(dt_iop_module_t *self)
   dt_iop_negadoctor_gui_data_t *g = IOP_GUI_ALLOC(negadoctor);
 
   g->notebook = dt_ui_notebook_new();
+  // Each page holds its own pickers (Dmin, D_max, offset, white balance samplers,
+  // black/exposure); reset any active one when the page it lives on is switched
+  // away from.
+  dt_ui_notebook_set_picker_owner(g->notebook, self);
 
   // Page FILM PROPERTIES
   GtkWidget *page1 = self->widget = dt_ui_notebook_page(g->notebook, N_("film properties"), NULL);

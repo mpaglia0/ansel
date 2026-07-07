@@ -264,9 +264,23 @@ static void _studio_dev_setup(dt_studio_capture_t *d, const int32_t imgid)
  *
  * Faithful subset of darkroom's leave: shut the pipes down, wait on each busy
  * lock, drop the nodes and cached buffers, then free history, modules and
- * masks. No dt_iop_gui_cleanup_module(): the viewer never ran dt_iop_gui_init.
- * Safe to call when only the modules were loaded (image load failed): the
- * pipeline teardown is harmless on pipes that never started.
+ * masks. Safe to call when only the modules were loaded (image load failed):
+ * the pipeline teardown is harmless on pipes that never started.
+ *
+ * dt_iop_gui_cleanup_module() runs for every module before dt_free(), even
+ * though this viewer itself never calls dt_iop_gui_init(): darktable.develop
+ * is swapped to point at this view's dev while active (see enter()), and
+ * global menu actions that read darktable.develop directly instead of a
+ * locally-scoped dev (dt_menu_apply_dev_history_update() callers in
+ * gui/actions/edit.c, styles.c) can reach dt_dev_history_gui_update() on
+ * THIS dev -- gui_attached is TRUE here too, so nothing stops it from
+ * running dt_iop_gui_init()/dt_iop_gui_set_expander() on these modules.
+ * Skipping gui_cleanup_module() then left header/expander widgets (each
+ * g_object_weak_ref()-ed back to the module in dt_iop_gui_set_expander())
+ * outliving the dt_free(module) below, use-after-freed the next time
+ * something destroyed those widgets (ASan heap-use-after-free in
+ * _iop_gui_widget_gone(), imageop.c:2020, freed by this loop, allocated by
+ * dt_dev_load_modules() in _studio_dev_setup()).
  */
 static void _studio_dev_teardown(dt_studio_capture_t *d)
 {
@@ -330,14 +344,17 @@ static void _studio_dev_teardown(dt_studio_capture_t *d)
   while(dev->iop)
   {
     dt_iop_module_t *module = (dt_iop_module_t *)(dev->iop->data);
+    if(!dt_iop_is_hidden(module)) dt_iop_gui_cleanup_module(module);
     dt_iop_cleanup_module(module);
     dt_free(module);
     dev->iop = g_list_delete_link(dev->iop, dev->iop);
   }
   while(dev->alliop)
   {
-    dt_iop_cleanup_module((dt_iop_module_t *)dev->alliop->data);
-    dt_free(dev->alliop->data);
+    dt_iop_module_t *module = (dt_iop_module_t *)dev->alliop->data;
+    if(!dt_iop_is_hidden(module)) dt_iop_gui_cleanup_module(module);
+    dt_iop_cleanup_module(module);
+    dt_free(module);
     dev->alliop = g_list_delete_link(dev->alliop, dev->alliop);
   }
   dev->iop = dev->alliop = NULL;

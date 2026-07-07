@@ -982,8 +982,14 @@ static void _generate_blocking(dt_cache_entry_t *entry, dt_mipmap_buffer_t *buf,
     {
       // swap back new image data, may contain updated EXIF & colorspace
       dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'w');
-      *img = buffered_image;
-      dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);
+      // dt_image_cache_get() returns NULL if the image vanished from the DB/cache while this
+      // full-res I/O was in flight (e.g. removed from the library concurrently) -- nothing left
+      // to swap the freshly-read data back into.
+      if(!IS_NULL_PTR(img))
+      {
+        *img = buffered_image;
+        dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);
+      }
     }
     else
     {

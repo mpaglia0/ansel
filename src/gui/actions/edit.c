@@ -295,7 +295,11 @@ static gboolean paste_parts_callback(GtkAccelGroup *group, GObject *acceleratabl
 
 static gboolean load_xmp_callback(GtkAccelGroup *group, GObject *acceleratable, guint keyval, GdkModifierType mods, gpointer user_data)
 {
-  GList *imgs = dt_selection_get_list(darktable.selection);
+  // dt_selection_get_list() only sees the lighttable selection, which is typically empty
+  // while in darkroom (the menu entry's sensitivity check, has_active_images(), already
+  // falls back to the active darkroom image via dt_act_on_get_images_nb() -- fetch the
+  // same way here or this silently no-ops in darkroom).
+  GList *imgs = dt_act_on_get_images();
   if(IS_NULL_PTR(imgs)) return FALSE;
 
   const int act_on_one = g_list_is_singleton(imgs); // list length == 1?

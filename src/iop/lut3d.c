@@ -1396,7 +1396,9 @@ static void button_clicked(GtkWidget *widget, dt_iop_module_t *self)
 
 static void _show_hide_colorspace(dt_iop_module_t *self)
 {
+  if(IS_NULL_PTR(self)) return;
   dt_iop_lut3d_gui_data_t *g = (dt_iop_lut3d_gui_data_t *)self->gui_data;
+  if(IS_NULL_PTR(g) || IS_NULL_PTR(g->colorspace)) return;
   GList *iop_order_list = self->dev->iop_order_list;
   const int order_lut3d = dt_ioppr_get_iop_order(iop_order_list, self->op, self->multi_priority);
   const int order_colorin = dt_ioppr_get_iop_order(iop_order_list, "colorin", -1);
@@ -1413,8 +1415,11 @@ static void _show_hide_colorspace(dt_iop_module_t *self)
 
 void gui_update(dt_iop_module_t *self)
 {
+  if(IS_NULL_PTR(self)) return;
   dt_iop_lut3d_gui_data_t *g = (dt_iop_lut3d_gui_data_t *)self->gui_data;
+    if(IS_NULL_PTR(g)) return;
   dt_iop_lut3d_params_t *p = (dt_iop_lut3d_params_t *)self->params;
+    if(IS_NULL_PTR(p)) return;
   gchar *lutfolder = dt_conf_get_string("plugins/darkroom/lut3d/def_path");
   if (!lutfolder[0])
   {

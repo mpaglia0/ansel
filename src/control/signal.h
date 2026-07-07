@@ -292,6 +292,15 @@ typedef enum dt_signal_t
   */
   DT_SIGNAL_CONTROL_PICKERDATA_READY,
 
+  /** \brief This signal is raised when a GtkNotebook created/registered via
+      dt_ui_notebook_set_picker_owner() switches page. The GTK/GUI layer does not
+      know what the owner pointer represents (kept opaque, `gpointer`); listeners
+      that do (e.g. the color picker) cast it back to their own type.
+      param: gpointer owner -- whatever was passed to dt_ui_notebook_set_picker_owner()
+      no returned value
+  */
+  DT_SIGNAL_CONTROL_NOTEBOOK_TAB_CHANGED,
+
   /* \brief This signal is raised when metadata view needs update */
   DT_SIGNAL_METADATA_UPDATE,
 
@@ -344,6 +353,11 @@ void dt_control_signal_connect(const struct dt_control_signal_t *ctlsig, const d
                                GCallback cb, gpointer user_data);
 /* disconnects a callback from a sink */
 void dt_control_signal_disconnect(const struct dt_control_signal_t *ctlsig, GCallback cb, gpointer user_data);
+/* disconnects every handler registered with user_data, on any signal and any callback function.
+   Safety net for module teardown: guarantees no dangling instance can still be invoked by a
+   later signal broadcast, even if the caller's own gui_cleanup() forgot (or was skipped for) one
+   of several signals it connected in gui_init(). */
+void dt_control_signal_disconnect_all(const struct dt_control_signal_t *ctlsig, gpointer user_data);
 /* blocks a callback */
 void dt_control_signal_block_by_func(const struct dt_control_signal_t *ctlsig, GCallback cb, gpointer user_data);
 /* unblocks a callback */
@@ -378,6 +392,17 @@ void dt_control_signal_unblock_by_func(const struct dt_control_signal_t *ctlsig,
       dt_print(DT_DEBUG_SIGNAL, "[signal] %s:%d, function: %s() disconnect handler %s\n", __FILE__, __LINE__, __FUNCTION__, #cb);\
     }                                                                                                                            \
     dt_control_signal_disconnect(ctlsig, cb, user_data);                                                                         \
+  } while (0)
+
+#define DT_DEBUG_CONTROL_SIGNAL_DISCONNECT_ALL(ctlsig, user_data)                                                                \
+  do                                                                                                                             \
+  {                                                                                                                              \
+    if(darktable.unmuted_signal_dbg_acts & DT_DEBUG_SIGNAL_ACT_DISCONNECT)                                                       \
+    {                                                                                                                            \
+      dt_print(DT_DEBUG_SIGNAL, "[signal] %s:%d, function: %s() disconnect all handlers for %p\n", __FILE__, __LINE__,          \
+               __FUNCTION__, (void *)(user_data));                                                                               \
+    }                                                                                                                            \
+    dt_control_signal_disconnect_all(ctlsig, user_data);                                                                         \
   } while (0)
 
 G_END_DECLS

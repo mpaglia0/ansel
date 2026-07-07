@@ -1273,6 +1273,7 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), g->preview, FALSE, FALSE, 0);
 
   g->tabs = dt_ui_notebook_new();
+  dt_ui_notebook_set_picker_owner(g->tabs, self);
   gtk_box_pack_start(GTK_BOX(self->widget), GTK_WIDGET(g->tabs), FALSE, FALSE, 0);
 
   for(int point = 0; point < DT_SPLITTONING_RGB_POINT_COUNT; point++)
