@@ -2037,8 +2037,12 @@ void dt_iop_gui_cleanup_module(dt_iop_module_t *module)
   if(module->widget)
     while(g_idle_remove_by_data(module->widget));
 
-  // Detach accels
-  if(!dt_iop_is_hidden(module) && !(module->flags() & IOP_FLAGS_DEPRECATED))
+  // Detach accels. accel_path is only ever set by dt_iop_gui_init() (never for a module that was
+  // only backend-loaded, e.g. studio_capture's dev->iop -- see studio-capture.md): a NULL path
+  // here means there is nothing registered to remove, and dt_accels_remove_accel() would
+  // otherwise g_strrstr() every entry in accels->acceleratables against a NULL needle, tripping
+  // a GLib-CRITICAL for each one.
+  if(!dt_iop_is_hidden(module) && !(module->flags() & IOP_FLAGS_DEPRECATED) && !IS_NULL_PTR(mod->accel_path))
   {
     dt_accels_remove_accel(darktable.gui->accels, mod->accel_path, module);
     dt_free(mod->accel_path);
