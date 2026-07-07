@@ -75,6 +75,8 @@ static inline void _image_cache_stmt_mutex_ensure(void)
 
 static inline uint64_t _image_cache_self_hash(const dt_image_t *img)
 {
+  if(IS_NULL_PTR(img) || img->id <= 0) return 0;
+
   struct
   {
     dt_image_orientation_t orientation;
@@ -595,7 +597,7 @@ void dt_image_cache_write_release(dt_image_cache_t *cache, dt_image_t *img, dt_i
       struct dt_image_raw_parameters_t s;
       uint32_t u;
   } flip;
-  if(img->id <= 0) return;
+  if(IS_NULL_PTR(img) || img->id <= 0) return;
 
   const uint64_t self_hash = _image_cache_self_hash(img);
   const gboolean changed = (self_hash != img->self_hash);

@@ -1157,11 +1157,20 @@ static dt_view_surface_value_t _view_image_get_surface_internal(int32_t imgid, i
   }
   else
   {
-    alloc = TRUE;
-    transform = cmsCreateTransform(
-        dt_colorspaces_get_profile(buf.color_space, "", DT_PROFILE_DIRECTION_DISPLAY)->profile, TYPE_RGBA_8, 
-        dt_colorspaces_get_profile(DT_COLORSPACE_DISPLAY, "", DT_PROFILE_DIRECTION_DISPLAY)->profile, TYPE_BGRA_8,
-        INTENT_PERCEPTUAL, 0);
+    const dt_colorspaces_color_profile_t *from_profile
+        = dt_colorspaces_get_profile(buf.color_space, "", DT_PROFILE_DIRECTION_DISPLAY);
+    const dt_colorspaces_color_profile_t *to_profile
+        = dt_colorspaces_get_profile(DT_COLORSPACE_DISPLAY, "", DT_PROFILE_DIRECTION_DISPLAY);
+    // Not every colorspace type has a profile registered for the DISPLAY direction (e.g. a thumbnail
+    // cached with an exotic or not-yet-color-managed tag). Fall back to the same passthrough as the
+    // DISPLAY case above instead of dereferencing NULL (was issue: SIGSEGV in cmsCreateTransform call
+    // building surfaces for the lighttable/filmstrip thumbnail fetcher).
+    if(!IS_NULL_PTR(from_profile) && !IS_NULL_PTR(to_profile))
+    {
+      alloc = TRUE;
+      transform = cmsCreateTransform(from_profile->profile, TYPE_RGBA_8, to_profile->profile, TYPE_BGRA_8,
+                                     INTENT_PERCEPTUAL, 0);
+    }
   }
 
   dt_colorspaces_transform_rgba8_to_bgra8(transform, buf.buf, rgbbuf, buf.width, buf.height);
