@@ -479,6 +479,21 @@ void dt_control_signal_disconnect(const struct dt_control_signal_t *ctlsig, GCal
                                        0, NULL, cb, user_data);
 }
 
+void dt_control_signal_disconnect_all(const struct dt_control_signal_t *ctlsig, gpointer user_data)
+{
+  if(IS_NULL_PTR(ctlsig) || IS_NULL_PTR(user_data)) return;
+  if(darktable.unmuted_signal_dbg_acts & DT_DEBUG_SIGNAL_ACT_DISCONNECT)
+  {
+    dt_print(DT_DEBUG_SIGNAL, "[signal] disconnected all\n");
+    _print_trace("disconnect_all");
+  }
+  // G_SIGNAL_MATCH_DATA only: matches on user_data alone, across every signal id and callback
+  // function ever connected on this sink for that data -- the blanket variant of the (func, data)
+  // matched disconnect above.
+  g_signal_handlers_disconnect_matched(G_OBJECT(ctlsig->sink), G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL,
+                                       user_data);
+}
+
 void dt_control_signal_block_by_func(const struct dt_control_signal_t *ctlsig, GCallback cb, gpointer user_data)
 {
   g_signal_handlers_block_by_func(G_OBJECT(ctlsig->sink), cb, user_data);

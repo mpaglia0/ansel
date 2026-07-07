@@ -1571,6 +1571,18 @@ int dt_iop_load_module(dt_iop_module_t *module, dt_iop_module_so_t *module_so, d
 
 void dt_iop_cleanup_module(dt_iop_module_t *module)
 {
+  // Safety net: dt_iop_cleanup_module() is the one choke point every module teardown path (darkroom
+  // leave(), studio_capture's viewer teardown, dev->alliop reclaim...) calls right before dt_free(module).
+  // Some of those paths skip dt_iop_gui_cleanup_module() entirely (e.g. studio_capture never runs
+  // gui_init on its modules), and dt_iop_gui_cleanup_module() itself only invokes the module's own
+  // gui_cleanup() -- which does the DT_DEBUG_CONTROL_SIGNAL_DISCONNECT() calls -- when gui_data is
+  // non-NULL. Any signal a module connected in gui_init() (module_moved_callback in lut3d.c,
+  // _develop_ui_pipe_started_callback in toneequal.c...) is broadcast globally on darktable.signals,
+  // so a single missed disconnect leaves a dangling self pointer that a later, unrelated dev's signal
+  // raise will invoke -- SIGSEGV on the freed instance. Disconnecting everything keyed on this module's
+  // address here, unconditionally, guarantees no module can be invoked again once freed.
+  dt_control_signal_disconnect_all(darktable.signals, module);
+
   module->cleanup(module);
 
   if(!IS_NULL_PTR(module->common_fields.name))
