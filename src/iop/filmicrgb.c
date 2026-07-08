@@ -360,6 +360,12 @@ typedef struct dt_iop_filmicrgb_data_t
                       // mixing any original chroma back kinks highlight gradients.
   struct dt_iop_filmic_rgb_spline_t spline DT_ALIGNED_ARRAY;
   dt_noise_distribution_t noise_distribution;
+  // Soft-proof state actually used for gamut mapping (see _filmic_get_output_profile()).
+  // Tracked here, not just read at process() time, so runtime_data_hash() picks up
+  // toggling/switching the soft-proof target and re-keys the pipeline cache accordingly.
+  dt_colorspaces_color_mode_t softproof_mode;
+  dt_colorspaces_color_profile_type_t softproof_type;
+  char softproof_filename[512];
 } dt_iop_filmicrgb_data_t;
 
 
@@ -2614,6 +2620,18 @@ static inline void restore_ratios(float *const restrict ratios, const float *con
   dt_omploop_sfence();  // ensure that nontemporal writes complete before we attempt to read the ratios
 }
 
+static const dt_iop_order_iccprofile_info_t *_filmic_get_output_profile(const dt_dev_pixelpipe_t *pipe)
+{
+  if(pipe->type == DT_DEV_PIXELPIPE_FULL && darktable.color_profiles->mode != DT_PROFILE_NORMAL)
+  {
+    const dt_iop_order_iccprofile_info_t *const softproof_profile = dt_ioppr_add_profile_info_to_list(
+        pipe->dev, darktable.color_profiles->softproof_type, darktable.color_profiles->softproof_filename,
+        darktable.color_profiles->softproof_intent);
+    if(!IS_NULL_PTR(softproof_profile)) return softproof_profile;
+  }
+  return dt_ioppr_get_pipe_output_profile_info(pipe);
+}
+
 void tiling_callback(struct dt_iop_module_t *self, const struct dt_dev_pixelpipe_t *pipe, const struct dt_dev_pixelpipe_iop_t *piece, struct dt_develop_tiling_t *tiling)
 {
   const dt_iop_roi_t *const roi_in = &piece->roi_in;
@@ -2642,7 +2660,7 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
   const dt_iop_roi_t *const roi_out = &piece->roi_out;
   const dt_iop_filmicrgb_data_t *const data = (dt_iop_filmicrgb_data_t *)piece->data;
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(pipe);
-  const dt_iop_order_iccprofile_info_t *const export_profile = dt_ioppr_get_pipe_output_profile_info(pipe);
+  const dt_iop_order_iccprofile_info_t *const export_profile = _filmic_get_output_profile(pipe);
 
   const size_t ch = 4;
 
@@ -3055,7 +3073,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
 
   // fetch working color profile
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(pipe);
-  const dt_iop_order_iccprofile_info_t *const export_profile = dt_ioppr_get_pipe_output_profile_info(pipe);
+  const dt_iop_order_iccprofile_info_t *const export_profile = _filmic_get_output_profile(pipe);
   const int use_work_profile = (IS_NULL_PTR(work_profile)) ? 0 : 1;
 
   // See colorbalancergb.c for details
@@ -3962,6 +3980,23 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   d->noise_level = p->noise_level;
   d->noise_distribution = (dt_noise_distribution_t)p->noise_distribution;
 
+  // See _filmic_get_output_profile(): soft-proofing only applies to the interactive
+  // full pipe. Zero the profile identity when inactive so toggling other pipe types
+  // or preferences unrelated to soft-proofing never perturbs the hash.
+  d->softproof_mode = (pipe->type == DT_DEV_PIXELPIPE_FULL) ? darktable.color_profiles->mode : DT_PROFILE_NORMAL;
+
+  memset(d->softproof_filename, 0, sizeof(d->softproof_filename));
+  if(d->softproof_mode != DT_PROFILE_NORMAL)
+  {
+    d->softproof_type = darktable.color_profiles->softproof_type;
+    g_strlcpy(d->softproof_filename, darktable.color_profiles->softproof_filename,
+             sizeof(d->softproof_filename));
+  }
+  else
+  {
+    d->softproof_type = DT_COLORSPACE_NONE;
+  }
+
   // compute the curves and their LUT
   dt_iop_filmic_rgb_compute_spline(p, &d->spline);
 
@@ -4011,6 +4046,16 @@ void gui_focus(struct dt_iop_module_t *self, gboolean in)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->show_highlight_mask), FALSE);
     if(mask_was_shown) dt_dev_pixelpipe_update_history_main(self->dev);
   }
+}
+
+gboolean runtime_data_hash(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,
+                           const dt_dev_pixelpipe_iop_t *piece)
+{
+  // piece->data carries the soft-proof profile identity (see commit_params()), which
+  // is runtime GUI/preference state, not part of module->params: fold it into the hash
+  // so toggling/switching soft-proofing re-keys the pipeline cache instead of leaving
+  // a stale non-proofed render behind.
+  return TRUE;
 }
 
 void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
