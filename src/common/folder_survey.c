@@ -651,6 +651,20 @@ char *dt_folder_survey_destination_preview()
           dt_free(path);
           path = NULL;
         }
+        else
+        {
+          // Full absolute paths get unwieldy in the UI preview: show only the base
+          // directory's own name (not its whole ancestry) plus what's built under it,
+          // e.g. ".../RAW Darktable/Scan/70 nouvel an/example.raw".
+          char *relative = g_file_get_relative_path(base, destination);
+          char *base_name = g_path_get_basename(base_folder);
+          char *short_path = g_build_filename(base_name, relative, NULL);
+          dt_free(path);
+          path = g_strdup_printf(".../%s", short_path);
+          dt_free(short_path);
+          dt_free(base_name);
+          dt_free(relative);
+        }
         g_object_unref(base);
         g_object_unref(destination);
       }
@@ -701,12 +715,12 @@ gboolean dt_folder_survey_can_start(const char **message)
   const char *target = dt_conf_get_string_const("studio_capture/base_directory_pattern");
   if(IS_NULL_PTR(target) || target[0] == '\0' || !g_file_test(target, G_FILE_TEST_IS_DIR))
   {
-    *message = _("The base directory of all projects does not exist.");
+    *message = _("The base directory does not exist.");
     return FALSE;
   }
   if(!dt_util_test_writable_dir(target))
   {
-    *message = _("The base directory of all projects is not writable.");
+    *message = _("The base directory is not writable.");
     return FALSE;
   }
 
@@ -735,7 +749,7 @@ gboolean dt_folder_survey_can_start(const char **message)
   dt_free(canonical_target);
   if(target_inside_source)
   {
-    *message = _("The base directory cannot be inside the surveyed folder.");
+    *message = _("The base directory destination cannot be inside the surveyed folder.");
     return FALSE;
   }
 

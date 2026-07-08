@@ -147,9 +147,12 @@ text byte-for-byte onto the `"0001-01-01 00:00:00.000"` template: a partial
 value is valid (the untyped tail keeps the template's defaults, so `"2026"`
 becomes `2026-01-01 00:00:00.000`), but the format itself — dashes/space/
 colons/dot at those exact character positions — must match, since it's a
-positional overlay, not a tolerant parser. Unlike the regular Import
-dialog's own datetime field, this one has no calendar picker to fall back
-on, so its tooltip spells the format out explicitly.
+positional overlay, not a tolerant parser. Its tooltip spells the format
+out explicitly for whoever types a full date/time by hand. The field also
+carries the same calendar-popover date picker as the regular Import
+dialog (`attach_popover()`, `gui/gtk.c`): picking a day writes it back as
+`YYYY-MM-DD`, which always matches the overlay's expected format and lets
+the untyped time-of-day tail fall back to the template's defaults.
 Every field that affects this check re-evaluates it on change; **on
 conflict** and **delete original file** don't, since they only affect what
 happens to a conflicting/copied file, never whether the session can start.
@@ -333,7 +336,25 @@ in-memory history or pipeline. `_studio_history_changed_callback` — the
 scopes/color-picker samples (sourced from `d->dev`'s preview pipe) refresh
 alongside the center image instead of staying stuck on the pre-style values.
 It skips `dt_dev_history_gui_update()`: that call walks `dev->iop` expecting
-module GUIs to update, which this viewer never initializes.
+module GUIs to update, and this style-apply path never needs any (the
+scopes/color-picker read the pipe, not module widgets).
+
+That said, "this viewer never initializes module GUIs" is not a hard
+guarantee elsewhere: `darktable.develop` is swapped to point at `d->dev`
+for as long as Studio Capture is active (see `enter()`/`leave()` below), and
+a few global menu actions read `darktable.develop` directly instead of a
+locally-scoped `dev` (`dt_menu_apply_dev_history_update()`'s callers in
+`gui/actions/edit.c` and `styles.c` — e.g. "Delete history", "Compress
+history"). Running one of those while Studio Capture is active *does* call
+`dt_dev_history_gui_update()` on `d->dev`, which builds real
+`header`/`expander` widgets (`dt_iop_gui_init()` /
+`dt_iop_gui_set_expander()`) for its modules, each weak-ref'd back to the
+module (`imageop.c`'s `_iop_gui_widget_gone()`). `_studio_dev_teardown()`
+therefore now runs `dt_iop_gui_cleanup_module()` on every module before
+freeing it, exactly like darkroom's `leave()`, instead of assuming there is
+never anything to clean up: skipping it left those widgets outliving
+`dt_free(module)`, use-after-freed the next time something (e.g. a
+darkroom `enter()`) destroyed them.
 
 ## Session resume
 

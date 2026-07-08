@@ -93,6 +93,7 @@
 @define-color grey_95 #f1f1f1;
 @define-color grey_100 #ffffff;
 @define-color danger rgba(240, 50, 40, 0.8);
+@define-color warning_color #FFA500;
 
 /* General Base Colors */
 @define-color selected_bg_color @grey_55;

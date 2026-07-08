@@ -155,6 +155,7 @@ typedef enum dt_gui_color_t
   DT_GUI_COLOR_MAP_LOC_SHAPE_HIGH,
   DT_GUI_COLOR_MAP_LOC_SHAPE_LOW,
   DT_GUI_COLOR_MAP_LOC_SHAPE_DEF,
+  DT_GUI_COLOR_WARNING,
   DT_GUI_COLOR_LAST
 } dt_gui_color_t;
 
@@ -358,6 +359,18 @@ static inline GdkPixbuf *dt_gdk_pixbuf_new_from_file_at_size(const char *filenam
 void dt_gui_add_class(GtkWidget *widget, const gchar *class_name);
 void dt_gui_remove_class(GtkWidget *widget, const gchar *class_name);
 
+/**
+ * @brief Set a symbolic icon on an image widget, optionally forcing a specific color.
+ *
+ * gtk_image_set_from_icon_name() colors symbolic icons from the current CSS "color", but
+ * ansel.css's main theme provider is loaded at GTK_STYLE_PROVIDER_PRIORITY_USER + 1 (gui/gtk.c),
+ * which outranks any per-widget provider added at the more common
+ * GTK_STYLE_PROVIDER_PRIORITY_APPLICATION and silently wins the cascade. Loading the icon as a
+ * pre-tinted pixbuf via GtkIconInfo sidesteps CSS entirely, so the requested color always wins.
+ * Pass color = NULL for the normal (untinted, theme-foreground) rendering.
+ */
+void dt_gui_set_symbolic_icon(GtkWidget *image, const char *icon_name, GtkIconSize size, const GdkRGBA *color);
+
 int dt_gui_gtk_init(dt_gui_gtk_t *gui);
 void dt_gui_gtk_run(dt_gui_gtk_t *gui);
 void dt_gui_gtk_quit();
@@ -494,6 +507,10 @@ void dt_ui_notebook_set_picker_owner(GtkNotebook *notebook, gpointer owner);
 // this expects gtk_init() to be called already which should be the case during most of dt's init phase.
 gboolean dt_gui_show_standalone_yes_no_dialog(const char *title, const char *markup, const char *no_text,
                                               const char *yes_text);
+
+// same as above, but with 3 buttons: returns 0 for first_text, 1 for second_text, 2 for third_text.
+int dt_gui_show_standalone_three_choice_dialog(const char *title, const char *markup, const char *first_text,
+                                               const char *second_text, const char *third_text);
 
 // similar to the one above. this one asks the user for some string. the hint is shown in the empty entry box
 char *dt_gui_show_standalone_string_dialog(const char *title, const char *markup, const char *placeholder,

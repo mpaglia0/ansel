@@ -150,6 +150,38 @@ void dt_gui_remove_class(GtkWidget *widget, const gchar *class_name)
   }
 }
 
+void dt_gui_set_symbolic_icon(GtkWidget *image, const char *icon_name, GtkIconSize size, const GdkRGBA *color)
+{
+  gint width = 16, height = 16;
+  gtk_icon_size_lookup(size, &width, &height);
+  // Icon themes only look up square icons: request the larger dimension,
+  // then scale the result down to the exact width/height below if the two differ.
+  GtkIconInfo *info = gtk_icon_theme_lookup_icon(gtk_icon_theme_get_default(), icon_name, MAX(width, height),
+                                                 GTK_ICON_LOOKUP_FORCE_SYMBOLIC);
+  if(IS_NULL_PTR(info))
+  {
+    gtk_image_set_from_icon_name(GTK_IMAGE(image), icon_name, size);
+    return;
+  }
+
+  GdkPixbuf *pixbuf = IS_NULL_PTR(color)
+      ? gtk_icon_info_load_symbolic_for_context(info, gtk_widget_get_style_context(image), NULL, NULL)
+      : gtk_icon_info_load_symbolic(info, color, color, color, color, NULL, NULL);
+  g_object_unref(info);
+
+  if(!IS_NULL_PTR(pixbuf))
+  {
+    if(gdk_pixbuf_get_width(pixbuf) != width || gdk_pixbuf_get_height(pixbuf) != height)
+    {
+      GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, width, height, GDK_INTERP_BILINEAR);
+      g_object_unref(pixbuf);
+      pixbuf = scaled;
+    }
+    gtk_image_set_from_pixbuf(GTK_IMAGE(image), pixbuf);
+    g_object_unref(pixbuf);
+  }
+}
+
 /* ------------------------------------------------------------------------------------------
  * Widget-callback suppression depth (see common/darktable.h for the rationale and API).
  * ------------------------------------------------------------------------------------------ */
@@ -1985,6 +2017,119 @@ gboolean dt_gui_show_standalone_yes_no_dialog(const char *title, const char *mar
   return result.result == RESULT_YES;
 }
 
+typedef struct _three_choice_result_t
+{
+  int result;
+  GtkWidget *window, *button_first, *button_second, *button_third;
+} _three_choice_result_t;
+
+static void _three_choice_button_handler(GtkButton *button, gpointer data)
+{
+  _three_choice_result_t *result = (_three_choice_result_t *)data;
+
+  if((void *)button == (void *)result->button_first)
+    result->result = 0;
+  else if((void *)button == (void *)result->button_second)
+    result->result = 1;
+  else if((void *)button == (void *)result->button_third)
+    result->result = 2;
+
+  gtk_widget_destroy(result->window);
+  _gtk_main_quit_safe(NULL, NULL);
+}
+
+int dt_gui_show_standalone_three_choice_dialog(const char *title, const char *markup, const char *first_text,
+                                               const char *second_text, const char *third_text)
+{
+  GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+#ifdef GDK_WINDOWING_QUARTZ
+  dt_osx_disallow_fullscreen(window);
+#endif
+
+  // themes not yet loaded, no CSS add some manual padding
+  const int padding = darktable.themes ? 0 : 5;
+
+  gtk_window_set_icon_name(GTK_WINDOW(window), "ansel");
+  gtk_window_set_title(GTK_WINDOW(window), title);
+  g_signal_connect(window, "destroy", G_CALLBACK(_gtk_main_quit_safe), NULL);
+
+  gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
+
+  if(!IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->ui)
+     && !IS_NULL_PTR(darktable.gui->ui->main_window))
+  {
+    GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
+    if(GTK_IS_WINDOW(main_window))
+    {
+      GtkWindow *win = GTK_WINDOW(main_window);
+      gtk_window_set_transient_for(GTK_WINDOW(window), win);
+      gtk_window_set_modal(GTK_WINDOW(window), TRUE);
+      if(gtk_widget_get_visible(GTK_WIDGET(win)))
+      {
+        gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER_ON_PARENT);
+      }
+    }
+  }
+
+  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
+  gtk_container_add(GTK_CONTAINER(window), vbox);
+
+  GtkWidget *mhbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
+  gtk_box_pack_start(GTK_BOX(vbox), mhbox, TRUE, TRUE, padding);
+
+  if(padding)
+  {
+    gtk_box_pack_start(GTK_BOX(mhbox),
+                       gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING), TRUE, TRUE, padding);
+  }
+
+  GtkWidget *label = gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(label), markup);
+  gtk_box_pack_start(GTK_BOX(mhbox), label, TRUE, TRUE, padding);
+
+  if(padding)
+  {
+    gtk_box_pack_start(GTK_BOX(mhbox),
+                       gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING), TRUE, TRUE, padding);
+  }
+
+  GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
+  gtk_box_pack_start(GTK_BOX(vbox), hbox, TRUE, TRUE, 0);
+
+  _three_choice_result_t result = { .result = -1, .window = window };
+
+  GtkWidget *button;
+
+  if(first_text)
+  {
+    button = gtk_button_new_with_label(first_text);
+    result.button_first = button;
+    g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(_three_choice_button_handler), &result);
+    gtk_box_pack_start(GTK_BOX(hbox), button, TRUE, TRUE, 0);
+  }
+
+  if(second_text)
+  {
+    button = gtk_button_new_with_label(second_text);
+    result.button_second = button;
+    g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(_three_choice_button_handler), &result);
+    gtk_box_pack_start(GTK_BOX(hbox), button, TRUE, TRUE, 0);
+  }
+
+  if(third_text)
+  {
+    button = gtk_button_new_with_label(third_text);
+    result.button_third = button;
+    g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(_three_choice_button_handler), &result);
+    gtk_box_pack_start(GTK_BOX(hbox), button, TRUE, TRUE, 0);
+  }
+
+  gtk_widget_show_all(window);
+  gtk_main();
+
+  return result.result;
+}
+
 char *dt_gui_show_standalone_string_dialog(const char *title, const char *markup, const char *placeholder,
                                            const char *no_text, const char *yes_text)
 {
@@ -2216,6 +2361,7 @@ void dt_gui_load_theme(const char *theme)
     [DT_GUI_COLOR_MAP_LOC_SHAPE_HIGH] = { "map_count_circle_color_h", { 1.0, 1.0, 0.8, 1.0 } },
     [DT_GUI_COLOR_MAP_LOC_SHAPE_LOW] = { "map_count_circle_color_l", { 0.0, 0.0, 0.0, 1.0 } },
     [DT_GUI_COLOR_MAP_LOC_SHAPE_DEF] = { "map_count_circle_color_d", { 1.0, 0.0, 0.0, 1.0 } },
+    [DT_GUI_COLOR_WARNING] = { "warning_color", { 1.0, 0.647, 0.0, 1.0 } },
   };
 
   // starting from 1 as DT_GUI_COLOR_BG is not part of this table
@@ -3239,6 +3385,7 @@ GtkBox * attach_popover(GtkWidget *widget, const char *icon, GtkWidget *content)
 
   // Create the info icon button that will trigger the popover
   GtkWidget *button = gtk_menu_button_new();
+  dt_gui_add_class(button, "popover-button");
   GtkWidget *image = gtk_image_new_from_icon_name(icon, GTK_ICON_SIZE_BUTTON);
   gtk_button_set_image(GTK_BUTTON(button), image);
   gtk_widget_set_hexpand(button, FALSE);

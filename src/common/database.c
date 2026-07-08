@@ -2683,10 +2683,17 @@ gboolean dt_database_show_error(const dt_database_t *db)
       db->error_other_pid);
     // clang-format on
 
-    gboolean delete_lockfiles = dt_gui_show_standalone_yes_no_dialog(_("Error starting Ansel"),
-                                        label_text, _("Quit"), _("Delete database lock files and try again"));
+    const int choice = dt_gui_show_standalone_three_choice_dialog(_("Error starting Ansel"), label_text,
+                                        _("Quit"), _("Retry"), _("Delete database lock files and try again"));
 
-    if(delete_lockfiles)
+    if(choice == 1)
+    {
+      // Just try to acquire the lock again: useful once the other instance that held it has
+      // since closed. dt_database_show_error() returning FALSE makes the caller's init loop
+      // (common/darktable.c) re-run dt_database_init() without touching any lock file.
+      error = FALSE;
+    }
+    else if(choice == 2)
     {
       gboolean really_delete_lockfiles =
         dt_gui_show_standalone_yes_no_dialog

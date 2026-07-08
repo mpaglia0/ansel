@@ -3664,32 +3664,35 @@ void dt_iop_gui_init_blendif(GtkBox *blendw, dt_iop_module_t *module, GtkWidget 
 
       // The label is semantically "part of" the slider, even though it's a different widget,
       // so the parent box has no internal spacing between children to keep them grouped.
-      sl->box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));
-      gtk_box_pack_start(GTK_BOX(sl->box), GTK_WIDGET(label_box), FALSE, FALSE, 0);
-      gtk_box_pack_start(GTK_BOX(sl->box), GTK_WIDGET(slider_box), FALSE, FALSE, 0);
+      sl->box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING));
+      GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+      {
+        gtk_box_pack_start(GTK_BOX(channel_box), GTK_WIDGET(label_box), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(channel_box), GTK_WIDGET(slider_box), FALSE, FALSE, 0);
+      }
+      gtk_box_pack_start(GTK_BOX(sl->box), channel_box, FALSE, FALSE, 0);
 
       GtkWidget *display_controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
+      {
+        sl->log_scale = gtk_toggle_button_new_with_label(_("Log scale"));
+        gtk_widget_set_tooltip_text(sl->log_scale,
+                      _("toggle the alternative logarithmic or magnified scale for this channel"));
+        g_signal_connect(G_OBJECT(sl->log_scale), "toggled",
+                        G_CALLBACK(_blendop_blendif_log_scale_toggled), module);
+        gtk_box_pack_start(GTK_BOX(display_controls), sl->log_scale, FALSE, FALSE, 0);
 
-      sl->log_scale = gtk_toggle_button_new_with_label(_("Log scale"));
-      gtk_widget_set_tooltip_text(
-          sl->log_scale,
-          _("toggle the alternative logarithmic or magnified scale for this channel"));
-      g_signal_connect(G_OBJECT(sl->log_scale), "toggled",
-                       G_CALLBACK(_blendop_blendif_log_scale_toggled), module);
-      gtk_box_pack_start(GTK_BOX(display_controls), sl->log_scale, FALSE, FALSE, 0);
-
-      sl->channel_display = dtgtk_togglebutton_new(dtgtk_cairo_paint_eye_toggle, 0, NULL);
-      gtk_widget_set_tooltip_text(
-          sl->channel_display,
-          in_out ? _("display the current channel from the unblended module output")
-                 : _("display the current channel from the module input"));
-      g_signal_connect(G_OBJECT(sl->channel_display), "toggled",
-                       G_CALLBACK(_blendop_blendif_channel_display_toggled), module);
-      gtk_box_pack_start(GTK_BOX(display_controls), sl->channel_display, FALSE, FALSE, 0);
-
+        sl->channel_display = dtgtk_togglebutton_new(dtgtk_cairo_paint_eye_toggle, 0, NULL);
+        gtk_widget_set_tooltip_text(
+            sl->channel_display,
+            in_out ? _("display the current channel from the unblended module output")
+                  : _("display the current channel from the module input"));
+        g_signal_connect(G_OBJECT(sl->channel_display), "toggled",
+                        G_CALLBACK(_blendop_blendif_channel_display_toggled), module);
+        gtk_box_pack_start(GTK_BOX(display_controls), sl->channel_display, FALSE, FALSE, 0);
+      }
       gtk_box_pack_start(GTK_BOX(sl->box), display_controls, FALSE, FALSE, 0);
-
       gtk_box_pack_start(GTK_BOX(bd->blendif_box), GTK_WIDGET(sl->box), FALSE, FALSE, 0);
+
     }
 
     bd->channel_boost_factor_slider = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(module), 0.0f, 18.0f, 0, 0.0f, 3);

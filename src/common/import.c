@@ -1223,7 +1223,7 @@ static void gui_init(dt_lib_import_t *d)
   const guint day = g_date_time_get_day_of_month(now);
   gtk_calendar_select_day(GTK_CALENDAR(calendar), day);
   gtk_calendar_mark_day(GTK_CALENDAR(calendar), day);
-  GtkBox *box_calendar = attach_popover(d->datetime, "appointment-new", calendar);
+  GtkBox *box_calendar = attach_popover(d->datetime, "appointment-new-symbolic", calendar);
   g_signal_connect(G_OBJECT(calendar), "day-selected", G_CALLBACK(_update_date), d->datetime);
 
   // free date
