@@ -272,11 +272,18 @@ static gchar *_header_markup(const dt_sv_logged_event_t *ev)
   gchar *e_op = g_markup_escape_text(ev->op, -1);
   gchar *e_dom = g_markup_escape_text(ev->domain, -1);
   gchar *e_thr = g_markup_escape_text(ev->thread, -1);
-  gchar *e_mn = g_markup_escape_text(ev->mnemonic[0] ? ev->mnemonic : "-", -1);
+  gchar *e_mn_raw = g_markup_escape_text(ev->mnemonic[0] ? ev->mnemonic : "-", -1);
+  // Raster masks are side-band cachelines, not module outputs: dim the domain
+  // badge and tag the title so they read as secondary entries among plain
+  // image cachelines of the same module.
+  const gboolean is_raster_mask
+      = !g_strcmp0(ev->domain, "cacheline") && !g_strcmp0(ev->cache_name, "raster mask");
+  gchar *e_mn = is_raster_mask ? g_strdup_printf("%s - raster mask", e_mn_raw) : g_strdup(e_mn_raw);
+  g_free(e_mn_raw);
   gchar *out = g_strdup_printf(
       "<tt>%9.3f</tt>  <b>%-7s</b>  <span foreground=\"%s\">%-10s</span>  <b>%-16s</b>  "
       "<a href=\"%s\"><tt>%s</tt></a>  <span size=\"small\"><i>%s</i></span>",
-      ev->ts, e_op, _domain_color(ev->domain), e_dom, e_mn, hx, hx, e_thr);
+      ev->ts, e_op, is_raster_mask ? "#b78d45" : _domain_color(ev->domain), e_dom, e_mn, hx, hx, e_thr);
   g_free(hx);
   g_free(e_op);
   g_free(e_dom);
