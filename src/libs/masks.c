@@ -320,6 +320,7 @@ static void _tree_add_exist(GtkButton *button, dt_masks_form_t *grp)
 
   // we add the form in this group
   dt_masks_form_t *form = dt_masks_get_from_id(darktable.develop, id);
+  grp = dt_masks_cow_touch(darktable.develop, grp);
   if(form && dt_masks_group_add_form(grp, form))
   {
     // we save the group
@@ -761,7 +762,9 @@ static void _tree_moveup(GtkButton *button, dt_lib_module_t *self)
       int id = -1;
       _lib_masks_get_values(model, &iter, NULL, &grid, &id);
 
-      dt_masks_form_move(dt_masks_get_from_id(darktable.develop, grid), id, 0);
+      dt_masks_form_t *group_form = dt_masks_get_from_id(darktable.develop, grid);
+      group_form = dt_masks_cow_touch(darktable.develop, group_form);
+      dt_masks_form_move(group_form, id, 0);
     }
   }
   g_list_free_full(items, (GDestroyNotify)gtk_tree_path_free);
@@ -770,6 +773,9 @@ static void _tree_moveup(GtkButton *button, dt_lib_module_t *self)
   lm->gui_reset = 0;
   _lib_masks_recreate_list(self);
 
+  // Without this, the reorder only mutates the live group's points list: it's never recorded
+  // as its own history step, so the next undo/redo silently discards the new order.
+  _add_masks_history_item(lm);
 }
 
 static void _tree_movedown(GtkButton *button, dt_lib_module_t *self)
@@ -794,7 +800,9 @@ static void _tree_movedown(GtkButton *button, dt_lib_module_t *self)
       int id = -1;
       _lib_masks_get_values(model, &iter, NULL, &grid, &id);
 
-      dt_masks_form_move(dt_masks_get_from_id(darktable.develop, grid), id, 1);
+      dt_masks_form_t *group_form = dt_masks_get_from_id(darktable.develop, grid);
+      group_form = dt_masks_cow_touch(darktable.develop, group_form);
+      dt_masks_form_move(group_form, id, 1);
     }
   }
   g_list_free_full(items, (GDestroyNotify)gtk_tree_path_free);
@@ -803,6 +811,9 @@ static void _tree_movedown(GtkButton *button, dt_lib_module_t *self)
   lm->gui_reset = 0;
   _lib_masks_recreate_list(self);
 
+  // Without this, the reorder only mutates the live group's points list: it's never recorded
+  // as its own history step, so the next undo/redo silently discards the new order.
+  _add_masks_history_item(lm);
 }
 
 static void _tree_delete_shape(GtkButton *button, dt_lib_module_t *self)
@@ -837,6 +848,11 @@ static void _tree_delete_shape(GtkButton *button, dt_lib_module_t *self)
 
   lm->gui_reset = 0;
   _lib_masks_recreate_list(self);
+
+  // Without this, the deletion only mutates the live dev->forms: it's never recorded as its
+  // own history step, so the next history navigation (undo/redo) silently discards it and
+  // reverts to whatever forms snapshot was last actually committed.
+  dt_dev_add_history_item(darktable.develop, NULL, FALSE, TRUE);
 }
 
 static void _tree_duplicate_shape(GtkButton *button, dt_lib_module_t *self)
@@ -852,14 +868,52 @@ static void _tree_duplicate_shape(GtkButton *button, dt_lib_module_t *self)
   GtkTreeIter iter;
   if(gtk_tree_model_get_iter(model, &iter, item))
   {
+    dt_iop_module_t *module = NULL;
+    int grid = -1;
     int id = -1;
-    _lib_masks_get_values(model, &iter, NULL, NULL, &id);
+    _lib_masks_get_values(model, &iter, &module, &grid, &id);
 
     const int nid = dt_masks_form_duplicate(darktable.develop, id);
     if(nid > 0)
     {
+      // If the source shape was a member of a group (grid != 0, i.e. not itself a top-level
+      // group node), dt_masks_form_duplicate only cloned the shape into dev->forms -- it does
+      // NOT add it to that group. Without this, the duplicate is an orphan: invisible on
+      // canvas and useless to the module, since nothing outside a group ever gets rendered.
+      dt_masks_form_t *grp = (grid > 0) ? dt_masks_get_from_id(darktable.develop, grid) : NULL;
+      if(grp && (grp->type & DT_MASKS_GROUP))
+      {
+        grp = dt_masks_cow_touch(darktable.develop, grp);
+
+        dt_masks_form_group_t *orig_entry = NULL;
+        for(GList *pts = grp->points; pts; pts = g_list_next(pts))
+        {
+          dt_masks_form_group_t *pt = (dt_masks_form_group_t *)pts->data;
+          if(pt->formid == id) { orig_entry = pt; break; }
+        }
+
+        dt_masks_form_t *dup_form = dt_masks_get_from_id(darktable.develop, nid);
+        dt_masks_form_group_t *new_entry = dup_form ? dt_masks_group_add_form(grp, dup_form) : NULL;
+        if(new_entry && orig_entry)
+        {
+          new_entry->state = orig_entry->state;
+          new_entry->opacity = orig_entry->opacity;
+        }
+
+        if(module) dt_masks_iop_update(module);
+      }
+
       dt_dev_masks_selection_change(darktable.develop, NULL, nid, TRUE);
-      //_lib_masks_recreate_list(self);
+
+      // Without this, the new form only exists in the live dev->forms: it's never recorded as
+      // its own history step, so it silently disappears on the next undo/redo.
+      _add_masks_history_item(lm);
+
+      // _add_masks_history_item briefly sets lm->gui_reset while committing, and
+      // dt_dev_add_history_item's own list-change signal fires synchronously inside that
+      // window -- _lib_masks_recreate_list's gui_reset guard swallows it. Refresh explicitly,
+      // now that gui_reset is back to its prior value, so the new row actually appears.
+      _lib_masks_recreate_list(self);
     }
   }
   g_list_free_full(items, (GDestroyNotify)gtk_tree_path_free);
