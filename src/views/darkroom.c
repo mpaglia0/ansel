@@ -2414,8 +2414,12 @@ void mouse_moved(dt_view_t *self, double x, double y, double pressure, int which
   else if(dt_masks_get_visible_form(dev)
           && dt_masks_events_mouse_moved(dev->gui_module, x, y, pressure, which))
   {
-    dt_gui_throttle_queue(dev, _delayed_history_commit, dev);
+    // There is no shape dragging in creation mode, so no need to commit history.
+    if(!dev->form_gui->creation)
+      dt_gui_throttle_queue(dev, _delayed_history_commit, dev);
+      
     handled = TRUE;
+    
   }
 
   // module

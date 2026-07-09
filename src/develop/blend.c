@@ -50,6 +50,7 @@
 #include "develop/imageop.h"
 #include "develop/masks.h"
 #include "develop/pixelpipe_hb.h"
+#include "develop/supervisor.h"
 #include "develop/tiling.h"
 #include "develop/imageop_math.h"
 #include <inttypes.h>
@@ -918,6 +919,16 @@ int dt_develop_blend_process(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *p
     g_array_append_val(pipe->raster_mask_hashes, mask_hash);
     dt_pixelpipe_cache_free_align(_mask);
 
+    if(created && dt_supervisor_active())
+      dt_supervisor_cacheline_create(mask_hash,
+                                     dt_supervisor_node_key(pipe->type, piece->module->op,
+                                                            piece->module->multi_priority),
+                                     piece->hash, piece->global_hash, piece->module->op,
+                                     piece->module->multi_priority, piece->module->iop_order,
+                                     pipe->type, pipe->imgid, piece->roi_out.width,
+                                     piece->roi_out.height, -1, sizeof(float) * buffsize,
+                                     "raster mask");
+
     dt_print(DT_DEBUG_MASKS,
              "[raster masks] %s mask id 0 for module %s (%s) for pipe %s"
              " with cache hash %" PRIu64 "\n",
@@ -1524,6 +1535,16 @@ int dt_develop_blend_process_cl(struct dt_iop_module_t *self, dt_dev_pixelpipe_t
     g_array_append_val(pipe->raster_mask_hashes, mask_hash);
     dt_pixelpipe_cache_free_align(_mask);
     _mask = NULL;
+
+    if(created && dt_supervisor_active())
+      dt_supervisor_cacheline_create(mask_hash,
+                                     dt_supervisor_node_key(pipe->type, piece->module->op,
+                                                            piece->module->multi_priority),
+                                     piece->hash, piece->global_hash, piece->module->op,
+                                     piece->module->multi_priority, piece->module->iop_order,
+                                     pipe->type, pipe->imgid, piece->roi_out.width,
+                                     piece->roi_out.height, devid, sizeof(float) * buffsize,
+                                     "raster mask");
 
     dt_print(DT_DEBUG_MASKS,
              "[raster masks] %s mask id 0 for module %s (%s) for pipe %s"

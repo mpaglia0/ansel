@@ -115,6 +115,7 @@ typedef struct dt_sv_logged_event_t
   char op[12];
   char domain[16];
   char mnemonic[64]; // human label for the row (module, imgid, widget, pipe, …)
+  char cache_name[32]; // cacheline "name" tag (e.g. "raster mask"), empty for plain module outputs
   uint64_t hash;  // the event's own object hash
   GArray *links;  // of dt_sv_link_t
   gchar *json;    // the full NDJSON record (compact), for the detail view

@@ -446,6 +446,8 @@ static dt_sv_logged_event_t *_extract_event(JsonObject *root, const gchar *json_
   //  - cacheline/node/history: module ("op/instance");  - widget: widget tag;
   //  - backbuf: pipe;  - mipmap/image/thumbnail: image id.
   const char *d = e->domain;
+  if(!g_strcmp0(d, "cacheline") && json_object_has_member(root, "name"))
+    g_strlcpy(e->cache_name, json_object_get_string_member(root, "name"), sizeof(e->cache_name));
   if((!g_strcmp0(d, "cacheline") || !g_strcmp0(d, "node") || !g_strcmp0(d, "history"))
      && json_object_has_member(root, "module"))
     g_strlcpy(e->mnemonic, json_object_get_string_member(root, "module"), sizeof(e->mnemonic));
@@ -964,6 +966,7 @@ void dt_supervisor_cacheline_read(const uint64_t hash, const size_t size)
   char module[128];
   _module_label(e, module, sizeof(module));
   if(strcmp(module, "?") != 0) json_object_set_string_member(root, "module", module);
+  if(e->cl_name[0]) json_object_set_string_member(root, "name", e->cl_name);
   // Expose the full linkage so every related hash is clickable from a read too.
   JsonObject *params = _resolve_locked(e->param_hash);
   if(params) json_object_set_object_member(root, "params", params);

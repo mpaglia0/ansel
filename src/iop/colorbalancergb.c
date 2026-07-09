@@ -1158,14 +1158,14 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   {
     dt_aligned_pixel_t Ych = { 1.f, p->global_C, DEG_TO_RAD(p->global_H), 0.f };
     Ych_to_gradingRGB(Ych, d->global);
-    for(size_t c = 0; c < 4; c++) d->global[c] = (d->global[c] - RGB_norm[c]) + RGB_norm[c] * p->global_Y;
+    for(size_t c = 0; c < 3; c++) d->global[c] = (d->global[c] - RGB_norm[c]) + RGB_norm[c] * p->global_Y;
   }
 
   // shadows
   {
     dt_aligned_pixel_t Ych = { 1.f, p->shadows_C, DEG_TO_RAD(p->shadows_H), 0.f };
     Ych_to_gradingRGB(Ych, d->shadows);
-    for(size_t c = 0; c < 4; c++) d->shadows[c] = 1.f + (d->shadows[c] - RGB_norm[c]) + p->shadows_Y;
+    for(size_t c = 0; c < 3; c++) d->shadows[c] = 1.f + (d->shadows[c] - RGB_norm[c]) + p->shadows_Y;
     d->shadows_weight = 2.f + p->shadows_weight * 2.f;
   }
 
@@ -1173,7 +1173,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   {
     dt_aligned_pixel_t Ych = { 1.f, p->highlights_C, DEG_TO_RAD(p->highlights_H), 0.f };
     Ych_to_gradingRGB(Ych, d->highlights);
-    for(size_t c = 0; c < 4; c++) d->highlights[c] = 1.f + (d->highlights[c] - RGB_norm[c]) + p->highlights_Y;
+    for(size_t c = 0; c < 3; c++) d->highlights[c] = 1.f + (d->highlights[c] - RGB_norm[c]) + p->highlights_Y;
     d->highlights_weight = 2.f + p->highlights_weight * 2.f;
   }
 
@@ -1181,7 +1181,7 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   {
     dt_aligned_pixel_t Ych = { 1.f, p->midtones_C, DEG_TO_RAD(p->midtones_H), 0.f };
     Ych_to_gradingRGB(Ych, d->midtones);
-    for(size_t c = 0; c < 4; c++) d->midtones[c] = 1.f / (1.f + (d->midtones[c] - RGB_norm[c]));
+    for(size_t c = 0; c < 3; c++) d->midtones[c] = 1.f / (1.f + (d->midtones[c] - RGB_norm[c]));
     d->midtones_Y = 1.f / (1.f + p->midtones_Y);
     d->white_fulcrum = exp2f(p->white_fulcrum);
     d->midtones_weight = sqf(d->shadows_weight) * sqf(d->highlights_weight) /
