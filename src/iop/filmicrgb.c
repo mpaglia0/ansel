@@ -156,6 +156,7 @@ typedef enum dt_iop_filmicrgb_colorscience_type_t
   DT_FILMIC_COLORSCIENCE_V7 = 6, // $DESCRIPTION: "v8 (AgX, low bleach)"
   DT_FILMIC_COLORSCIENCE_V8 = 7, // $DESCRIPTION: "v8 (AgX, medium bleach)"
   DT_FILMIC_COLORSCIENCE_V9 = 8, // $DESCRIPTION: "v8 (AgX, high bleach)"
+  DT_FILMIC_COLORSCIENCE_V10 = 9, // $DESCRIPTION: "v8 (AgX, extra bleach)"
 } dt_iop_filmicrgb_colorscience_type_t;
 
 // The three v8 "AgX" variants share the whole pixel path and differ ONLY by the
@@ -166,7 +167,8 @@ typedef enum dt_iop_filmicrgb_colorscience_type_t
 static inline gboolean _filmic_is_agx(const dt_iop_filmicrgb_colorscience_type_t v)
 {
   return v == DT_FILMIC_COLORSCIENCE_V6 || v == DT_FILMIC_COLORSCIENCE_V7
-      || v == DT_FILMIC_COLORSCIENCE_V8 || v == DT_FILMIC_COLORSCIENCE_V9;
+      || v == DT_FILMIC_COLORSCIENCE_V8 || v == DT_FILMIC_COLORSCIENCE_V9 
+      || v == DT_FILMIC_COLORSCIENCE_V10;
 }
 
 typedef enum dt_iop_filmicrgb_spline_version_type_t
@@ -2378,56 +2380,41 @@ static void filmic_agx_prepare_bracket(const dt_iop_order_iccprofile_info_t *con
   float inset_anchor[3], rotation_anchor[3], outset_anchor[3], outset_rotation[3];
   switch(variant)
   {
-    case DT_FILMIC_COLORSCIENCE_V7: // low bleach : --fit-low-bleach
-      // PERCEPTUAL MIDPOINT of no-bleach and high-bleach : the bracket that best
-      // reproduces the average of the two variants' processed outputs (least squares
-      // over skin + reflective + Rec2020-boundary samples). A pure desaturation budget
-      // put it too close to high-bleach (the visible gap no->low exceeded low->high) ;
-      // averaging bisects the hue drift evenly (skin 2.9°->1.9°->0.8°) while keeping
-      // skin chroma, so it does not inherit high-bleach's skin whitening. avg desat
-      // (reflective) 7.2%, skin |mean| hue 1.9°, cond 4.7, Rec2020 gamut-safe.
-      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.487623f;
-      rotation_anchor[0] = -0.0176159f; rotation_anchor[1] = +0.0650293f; rotation_anchor[2] = +0.0044292f;
-      outset_anchor[0]   = 0.479379f; outset_anchor[1] = 0.746078f; outset_anchor[2] = 0.369679f;
-      outset_rotation[0] = -0.0050757f; outset_rotation[1] = +0.1018535f; outset_rotation[2] = +0.0119466f;
+    case DT_FILMIC_COLORSCIENCE_V7: // low bleach
+      // fitted by tools/derive_filmic_agx_primaries.py --fit-bisect no-bleach medium-bleach
+      inset_anchor[0] = +0.6410825f; inset_anchor[1] = +0.6898110f; inset_anchor[2] = +0.3194529f;
+      rotation_anchor[0] = +0.0405734f; rotation_anchor[1] = +0.1631286f; rotation_anchor[2] = +0.0350584f;
+      outset_anchor[0]   = 0.784757f; outset_anchor[1] = 0.789387f; outset_anchor[2] = 0.445403f;
+      outset_rotation[0] = -0.0057845f; outset_rotation[1] = +0.1593207f; outset_rotation[2] = -0.0592955f;
       break;
-    case DT_FILMIC_COLORSCIENCE_V8: // medium bleach : --fit-medium-bleach
-      // Same as above, splits the gap between low-bleach and high-bleach.
-      // avg desat (reflective) 10.6%, skin |mean| hue 1.4°, cond 5.0, Rec2020 gamut-safe.
-      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.595334f;
-      rotation_anchor[0] = -0.0273940f; rotation_anchor[1] = 0.0323704f; rotation_anchor[2] = 0.0236516f;
-      outset_anchor[0]   =  0.576994f; outset_anchor[1] = 0.768241f; outset_anchor[2] = 0.402336f;
-      outset_rotation[0] = -0.0167965f; outset_rotation[1] = 0.0642740f; outset_rotation[2] = 0.0419658f;
+    case DT_FILMIC_COLORSCIENCE_V8: // medium bleach
+      // fitted by tools/derive_filmic_agx_primaries.py --fit-bisect no-bleach extra-bleach
+      inset_anchor[0] = +0.6509540f; inset_anchor[1] = +0.7488775f; inset_anchor[2] = +0.3517703f;
+      rotation_anchor[0] = +0.0278602f; rotation_anchor[1] = +0.1214671f; rotation_anchor[2] = -0.0228829f;
+      outset_anchor[0]   = 0.793082f; outset_anchor[1] = 0.815169f; outset_anchor[2] = 0.460318f;
+      outset_rotation[0] = -0.0053781f; outset_rotation[1] = +0.1187604f; outset_rotation[2] = -0.0794801f;
       break;
-    case DT_FILMIC_COLORSCIENCE_V9: // high bleach : --max-desat 0.05
-      // Best in-bracket hue. avg desat 5.0%, skin |mean| 0.8°, reflective max 6.3°,
-      // cond 6.5. Saturated colors visibly wash out (the strong AgX highlight look).
-      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.747987f;
-      rotation_anchor[0] = -0.0515563f; rotation_anchor[1] = -0.0375649f; rotation_anchor[2] = +0.0222773f;
-      outset_anchor[0]   = 0.724651f; outset_anchor[1] = 0.828507f; outset_anchor[2] = 0.550322f;
-      outset_rotation[0] = -0.0438769f; outset_rotation[1] = -0.0095878f; outset_rotation[2] = +0.0521530f;
+    case DT_FILMIC_COLORSCIENCE_V9: // high bleach
+      // fitted by tools/derive_filmic_agx_primaries.py --fit-bisect medium-bleach extra-bleach
+      inset_anchor[0] = +0.6379749f; inset_anchor[1] = +0.7878689f; inset_anchor[2] = +0.3753822f;
+      rotation_anchor[0] = +0.0106096f; rotation_anchor[1] = +0.0582598f; rotation_anchor[2] = -0.0696729f;
+      outset_anchor[0]   = 0.790237f; outset_anchor[1] = 0.831376f; outset_anchor[2] = 0.465406f;
+      outset_rotation[0] = -0.0080070f; outset_rotation[1] = +0.0571100f; outset_rotation[2] = -0.0912220f;
       break;
-    case DT_FILMIC_COLORSCIENCE_V6: // no bleach (default) : --min-bleach
+    case DT_FILMIC_COLORSCIENCE_V10: // extra bleach
+      // fitted by tools/derive_filmic_agx_primaries.py --fit-extra-bleach --bleach-nudge 0.5
+      inset_anchor[0] = +0.5770235f; inset_anchor[1] = +0.8102094f; inset_anchor[2] = +0.4000390f;
+      rotation_anchor[0] = -0.0081060f; rotation_anchor[1] = -0.0034008f; rotation_anchor[2] = -0.1035236f;
+      outset_anchor[0]   = 0.766420f; outset_anchor[1] = 0.838020f; outset_anchor[2] = 0.465130f;
+      outset_rotation[0] = -0.0122011f; outset_rotation[1] = -0.0021732f; outset_rotation[2] = -0.0971215f;
+      break;
+    case DT_FILMIC_COLORSCIENCE_V6: // no bleach
     default:
-      // Minimum bleach — protects saturation (there is no downstream saturation
-      // recovery, only hue recovery), so hue is allowed to drift ~3-20° and the Ych
-      // slider restores it. avg desat 0.65%, skin |mean| 3.1°, cond 4.7.
-      // COUNTERINTUITIVE : a hard 0% inset is the WORST for saturation (7.7% desat) —
-      // with no inset the outset cannot over-expand without wrecking conditioning, so
-      // bright colors bleach from the raw curve unrecovered. The minimum sits at a
-      // MODERATE inset whose well-conditioned outset un-bleaches. See doc.
-      //
-      // REC2020 GAMUT SAFETY (mandatory) : a strongly over-expanding outset — which
-      // pure minimum-desaturation wants (an earlier fit ran inset 0.20 / outset ratio
-      // ~3) — pushes the Rec2020 blue primary to NEGATIVE luminance in the -10..+1 EV
-      // range, rendering it BLACK (the working space IS Rec2020, so its primaries are
-      // the worst case). --min-bleach constrains the outset to retain >= 25% of the
-      // pre-outset luminance for every Rec2020 primary/secondary across the tonal
-      // range ; the result keeps every boundary color luminance-positive.
-      inset_anchor[0]    = inset_anchor[1] = inset_anchor[2] = 0.335562f;
-      rotation_anchor[0] = -0.0092314f; rotation_anchor[1] = +0.0979124f; rotation_anchor[2] = +0.0034991f;
-      outset_anchor[0]   = 0.349067f; outset_anchor[1] = 0.737216f; outset_anchor[2] = 0.396854f;
-      outset_rotation[0] = +0.0047636f; outset_rotation[1] = +0.1445774f; outset_rotation[2] = +0.0011608f;
+      // fitted by tools/derive_filmic_agx_primaries.py --min-bleach --ab-pull 200
+      inset_anchor[0] = +0.5991055f; inset_anchor[1] = +0.6000000f; inset_anchor[2] = +0.3300009f;
+      rotation_anchor[0] = +0.0571015f; rotation_anchor[1] = +0.1999891f; rotation_anchor[2] = +0.0886110f;
+      outset_anchor[0]   = 0.761433f; outset_anchor[1] = 0.752267f; outset_anchor[2] = 0.465293f;
+      outset_rotation[0] = -0.0034297f; outset_rotation[1] = +0.1952448f; outset_rotation[2] = -0.0480109f;
       break;
   }
 
