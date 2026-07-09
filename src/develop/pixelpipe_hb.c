@@ -540,7 +540,7 @@ void dt_dev_pixelpipe_cleanup(dt_dev_pixelpipe_t *pipe)
 
   if(pipe->forms)
   {
-    g_list_free_full(pipe->forms, (void (*)(void *))dt_masks_free_form);
+    g_list_free_full(pipe->forms, (void (*)(void *))dt_masks_form_unref);
     pipe->forms = NULL;
   }
 }
@@ -1258,7 +1258,7 @@ void dt_dev_pixelpipe_disable_before(dt_dev_pixelpipe_t *pipe, const char *op)
     }                                                                                                             \
     if(pipe->forms)                                                                                               \
     {                                                                                                             \
-      g_list_free_full(pipe->forms, (void (*)(void *))dt_masks_free_form);                                        \
+      g_list_free_full(pipe->forms, (void (*)(void *))dt_masks_form_unref);                                       \
       pipe->forms = NULL;                                                                                         \
     }                                                                                                             \
     dt_pthread_mutex_unlock(&darktable.pipeline_threadsafe);                                                      \
@@ -1498,10 +1498,10 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
   dt_print(DT_DEBUG_DEV, "[pixelpipe] Started %s pipeline recompute at %i×%i px\n", 
            dt_pixelpipe_get_pipe_name(pipe->type), roi.width, roi.height);
 
-  // get a snapshot of the mask list
-  dt_pthread_rwlock_rdlock(&pipe->dev->masks_mutex);
-  pipe->forms = dt_masks_dup_forms_deep(pipe->dev->forms, NULL);
-  dt_pthread_rwlock_unlock(&pipe->dev->masks_mutex);
+  // get a snapshot of the mask list: shared by reference (dt_masks_cow_touch on the GUI side
+  // clones instead of mutating in place whenever refcount > 1, so this snapshot stays frozen
+  // even if dev->forms is edited mid-run), not deep-copied on every single pipeline recompute.
+  pipe->forms = dt_masks_snapshot_current_forms(pipe->dev, FALSE);
 
   // go through the list of modules from the end:
   GList *pieces = g_list_last(pipe->nodes);
@@ -1662,7 +1662,7 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
   // release resources:
   if(pipe->forms)
   {
-    g_list_free_full(pipe->forms, (void (*)(void *))dt_masks_free_form);
+    g_list_free_full(pipe->forms, (void (*)(void *))dt_masks_form_unref);
     pipe->forms = NULL;
   }
   if(pipe->devid >= 0)

@@ -1097,8 +1097,6 @@ void dt_masks_form_move(dt_masks_form_t *grp, int formid, int up);
 int dt_masks_form_duplicate(dt_develop_t *dev, int formid);
 /* returns a duplicate tof form, including the formid */
 dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *form);
-/* duplicate the list of forms, replace item in the list with form with the same formid */
-GList *dt_masks_dup_forms_deep(GList *forms, dt_masks_form_t *form);
 
 /** utils functions */
 int dt_masks_point_in_form_exact(const float *pts, int num_pts, const float *points, int points_start, int points_count);

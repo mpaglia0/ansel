@@ -309,16 +309,6 @@ dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *mask_form)
   return duplicate_form;
 }
 
-static void *_dup_masks_form_cb(const void *formdata, gpointer user_data)
-{
-  // Duplicate the main form struct, optionally substituting the provided override form.
-  dt_masks_form_t *source_form = (dt_masks_form_t *)formdata;
-  dt_masks_form_t *override_form = (dt_masks_form_t *)user_data;
-  const dt_masks_form_t *form_to_copy
-      = (IS_NULL_PTR(override_form) || source_form->formid != override_form->formid) ? source_form : override_form;
-  return (void *)dt_masks_dup_masks_form(form_to_copy);
-}
-
 /**
  * @brief Find a form entry inside a group by form id.
  *
@@ -724,14 +714,6 @@ static gboolean _dt_masks_events_flush_rebuild_if_needed(struct dt_iop_module_t 
   }
 
   return TRUE;
-}
-
-/**
- * @brief Duplicate the list of forms, replacing a single item by formid match.
- */
-GList *dt_masks_dup_forms_deep(GList *form_list, dt_masks_form_t *replacement_form)
-{
-  return (GList *)g_list_copy_deep(form_list, _dup_masks_form_cb, (gpointer)replacement_form);
 }
 
 /**
