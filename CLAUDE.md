@@ -113,6 +113,88 @@ to the GUI, which waits for the pipeline to publish a host copy instead.
 
 ---
 
+## Masks / forms history
+
+### Forms are refcounted, not deep-copied
+
+`dev->forms` (`dt_develop_t`) is the live, mutable `GList` of every mask shape and group
+(`dt_masks_form_t*`) in the current image. Groups don't nest forms directly — a group's `points`
+is a list of `dt_masks_form_group_t` entries (`{formid, parentid, state, opacity}`) referencing
+sibling forms in the same flat `dev->forms` list by ID.
+
+Every history commit that touches masks used to deep-copy the *entire* `dev->forms` list into
+`hist->forms` (`dt_dev_history_item_t`), even when only one shape on one module changed. Forms
+are now refcounted (`dt_masks_form_t.refcount`, `src/develop/masks/masks_history.{h,c}`) instead:
+
+- `dt_masks_snapshot_current_forms()` takes a reference on each current `dev->forms` element
+  instead of copying it. Multiple `hist->forms` snapshots (and `dev->forms` itself) can share the
+  exact same `dt_masks_form_t*`.
+- `dt_masks_cow_touch(dev, form)` is the copy-on-write gate: before *mutating* a form (move,
+  resize, remove a group member...), check its refcount. If it's 1 (only `dev->forms` holds it),
+  mutate in place. If it's shared (an undo/redo or history snapshot also references it), clone it
+  first, splice the clone into `dev->forms` in place of the original, and mutate the clone —
+  never mutate a form that might be observed by a frozen snapshot. Every mutation call site
+  (mouse/keyboard event dispatchers in `masks.c`, `dt_masks_form_delete`, group add/move/ungroup,
+  `blend_gui.c` group operations, the shape-manager panel in `libs/masks.c`) must route through
+  this before touching `form->points` or any other field. `dt_masks_cow_touch` also re-points
+  `dev->form_gui->form_visible` if it was the form that got cloned — that's the only other raw
+  `dt_masks_form_t*` cached outside `dev->forms`.
+- `dt_masks_replace_current_forms()` swaps `dev->forms` wholesale (used when history navigation
+  rebuilds it) by releasing the old references and taking new ones — never a raw deep copy.
+- `pipe->forms` (the pixel-pipeline's own snapshot, taken once per `dt_dev_pixelpipe_process()`
+  call, `pixelpipe_hb.c`) is shared by reference the same way. It has exactly one real consumer
+  (`iop/retouch.c`, read-only), so no COW gate is needed on that side — `dt_masks_cow_touch`
+  already guarantees a GUI-side edit clones instead of mutating a form an in-flight pipeline run
+  is holding.
+
+### A form mutation that never reaches a history commit is invisible to undo/redo
+
+`dt_dev_add_history_item_ext()` (`dev_history.c`) is the only place that turns the current
+`dev->forms` state into a `hist->forms` snapshot, and only when
+`dt_iop_module_needs_mask_history(module)` is true for the committing module. **Any code path
+that mutates `dev->forms` (directly or via `dt_masks_form_delete`/group helpers) must be followed
+by a `dt_dev_add_history_item()` call**, or the mutation only ever exists in live memory.
+
+Undo/redo (`_pop_undo`, `dev_history.c`) replaces `dev->history` with a duplicate of the
+recorded `before_snapshot`/`after_snapshot` (`dt_history_duplicate`, itself ref-sharing) and calls
+`dt_dev_pop_history_items_ext()`, which rebuilds `dev->forms` from the `hist->forms` of the
+**last history item that actually has one** — walking backwards over items with
+`hist->forms == NULL`. If a mutation was never committed, every subsequent history navigation
+silently falls back to whatever was last actually recorded and the live edit is lost. Confirmed
+bug instances, found by auditing every handler in `libs/masks.c` for a trailing
+`dt_dev_add_history_item()`/`_add_masks_history_item()` call: `_tree_delete_shape` (delete),
+`_tree_moveup`/`_tree_movedown` (reorder inside a group — silently lost on next undo/redo), and
+`_tree_duplicate_shape` (the duplicate was also never attached to the source shape's parent group
+via `dt_masks_group_add_form`, so it was an orphan on top of being uncommitted). All four are
+fixed; audit any *new* handler in `libs/masks.c` / `blend_gui.c` that mutates forms without a
+trailing commit before trusting its undo/redo behavior.
+
+### Same-thread rwlock reentrancy
+
+Committing masks more often surfaces a pre-existing, unrelated hazard: `dt_dev_pixelpipe_change()`
+can be re-entered by the same thread while it already holds `history_mutex` as writer (a
+history-commit path resyncing the virtual pipe mid-commit). glibc's default
+`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP` policy self-deadlocks such a thread as soon as a
+second thread is queued for the write lock. Fixed by porting the same-thread recursive-writer
+tracking that already existed in the `_DEBUG` build of `dt_pthread_rwlock_t`
+(`common/dtpthread.h`: `writer` + `writer_depth` fields) into the release path too — a thread
+that already holds the write lock cannot race itself, so letting it re-enter (as reader or
+writer) is safe. `try*` locks keep their "is it locked by anyone?" probe contract and still
+report busy on same-thread reentry, so callers relying on that semantic are unaffected.
+
+### DB/XMP persistence still duplicates content per history step
+
+`masks_history` (SQL table) and `Xmp.darktable.masks_history[N]` (XMP array) store one
+row/entry per (history step, formid), with no dedup — the in-memory refcounting above stops at
+the persistence boundary, so a form shared unchanged across 100 history steps still gets its
+points BLOB serialized 100 times on every commit (`dt_dev_write_history_ext` rewrites the whole
+image's history + masks_history every time). Known, not yet fixed — see
+`doc/masks_history_dedup.md` for the full design (developed on a dedicated branch, merged only
+when Ansel 1.0 is prepared, per explicit instruction not to migrate any user's live DB
+prematurely).
+
+---
+
 ## IOP modules
 
 ### ashift: preview buffer and crop geometry
