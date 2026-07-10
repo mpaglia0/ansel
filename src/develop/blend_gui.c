@@ -1979,6 +1979,7 @@ static void _blendop_masks_all_toggled(GtkCellRendererToggle *cell, gchar *path_
 
     if(!_blendop_masks_find_group_entry(group_form, mask_form->formid, NULL))
     {
+      group_form = dt_masks_cow_touch(darktable.develop, group_form);
       dt_masks_group_add_form(group_form, mask_form);
       dt_masks_set_edit_mode(module, DT_MASKS_EDIT_FULL);
     }
@@ -2164,7 +2165,23 @@ static void _blendop_masks_group_operation_callback(GtkWidget *menu_item, gpoint
   const int parentid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-parentid"));
   const dt_masks_state_t state = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-state"));
 
-  dt_masks_form_group_t *group_entry = dt_masks_form_group_from_parentid(parentid, formid);
+  // apply_operation() below mutates the group_entry in place, memory owned by the parent
+  // group -- touch the parent before resolving the entry, or a shared parent's group_entry
+  // gets mutated behind the back of a snapshot that still references it.
+  dt_masks_form_t *parent_form = dt_masks_get_from_id(darktable.develop, parentid);
+  if(IS_NULL_PTR(parent_form) || !(parent_form->type & DT_MASKS_GROUP)) return;
+  parent_form = dt_masks_cow_touch(darktable.develop, parent_form);
+
+  dt_masks_form_group_t *group_entry = NULL;
+  for(GList *group_node = parent_form->points; group_node; group_node = g_list_next(group_node))
+  {
+    dt_masks_form_group_t *entry = (dt_masks_form_group_t *)group_node->data;
+    if(entry && entry->formid == formid)
+    {
+      group_entry = entry;
+      break;
+    }
+  }
   if(IS_NULL_PTR(group_entry)) return;
 
   const int old_state = group_entry->state;
@@ -2250,6 +2267,10 @@ static gboolean _blendop_masks_group_move_by_index(dt_masks_form_t *group_form, 
   if(move_up && index == 0) return FALSE;
   if(!move_up && (guint)index >= length - 1) return FALSE;
 
+  // Touch before resolving `entry`: cloning group_form also clones its points (fresh
+  // dt_masks_form_group_t blocks), so an entry resolved from the pre-touch list would not
+  // be a member of the (possibly cloned) list touched below.
+  group_form = dt_masks_cow_touch(darktable.develop, group_form);
   dt_masks_form_group_t *entry = (dt_masks_form_group_t *)g_list_nth_data(group_form->points, index);
   if(IS_NULL_PTR(entry)) return FALSE;
 

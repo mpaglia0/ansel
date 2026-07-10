@@ -182,6 +182,7 @@ FILE(GLOB SOURCE_FILES
   "develop/masks/gradient.c"
   "develop/masks/masks.c"
   "develop/masks/masks_gui.c"
+  "develop/masks/masks_history.c"
   "develop/masks/polygon.c"
   "develop/format.c"
   "dtgtk/button.c"

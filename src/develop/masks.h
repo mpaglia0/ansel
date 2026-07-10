@@ -108,6 +108,7 @@ GList darktable.develop->forms
 
 #pragma once
 
+#include "common/atomic.h"
 #include "common/darktable.h"
 #include "common/opencl.h"
 #include "develop/pixelpipe.h"
@@ -398,7 +399,14 @@ typedef struct dt_masks_form_t
   int formid;
   // version of the form
   int version;
+
+  // number of live pointers to this form: dev->forms/allforms, hist->forms
+  // snapshots, undo/redo snapshots. See develop/masks/masks_history.h.
+  dt_atomic_int refcount;
 } dt_masks_form_t;
+
+// dt_masks_form_t must be fully defined above this include.
+#include "develop/masks/masks_history.h"
 
 /** structure used to define all the gui points to draw in viewport*/
 typedef struct dt_masks_form_gui_points_t
@@ -896,10 +904,6 @@ int dt_masks_legacy_params(dt_develop_t *dev, void *params, const int old_versio
 dt_masks_form_t *dt_masks_create(dt_masks_type_t type);
 /** we create a completely new form and add it to darktable.develop->allforms. */
 dt_masks_form_t *dt_masks_create_ext(dt_masks_type_t type);
-/** replace dev->forms with forms */
-void dt_masks_replace_current_forms(dt_develop_t *dev, GList *forms);
-/** snapshot current dev->forms (deep copy) and optionally reset dev->forms_changed */
-GList *dt_masks_snapshot_current_forms(dt_develop_t *dev, gboolean reset_changed);
 /** returns a form with formid == id from a list of forms */
 dt_masks_form_t *dt_masks_get_from_id_ext(GList *forms, int id);
 /** returns a form with formid == id from dev->forms */
@@ -1093,8 +1097,6 @@ void dt_masks_form_move(dt_masks_form_t *grp, int formid, int up);
 int dt_masks_form_duplicate(dt_develop_t *dev, int formid);
 /* returns a duplicate tof form, including the formid */
 dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *form);
-/* duplicate the list of forms, replace item in the list with form with the same formid */
-GList *dt_masks_dup_forms_deep(GList *forms, dt_masks_form_t *form);
 
 /** utils functions */
 int dt_masks_point_in_form_exact(const float *pts, int num_pts, const float *points, int points_start, int points_count);

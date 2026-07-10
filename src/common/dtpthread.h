@@ -386,19 +386,100 @@ static inline int dt_pthread_cond_wait(pthread_cond_t *cond, dt_pthread_mutex_t 
   return pthread_cond_wait(cond, &mutex->mutex);
 };
 
-#define dt_pthread_rwlock_t pthread_rwlock_t
-#define dt_pthread_rwlock_init pthread_rwlock_init
-#define dt_pthread_rwlock_destroy pthread_rwlock_destroy
-#define dt_pthread_rwlock_unlock pthread_rwlock_unlock
-#define dt_pthread_rwlock_rdlock pthread_rwlock_rdlock
-#define dt_pthread_rwlock_wrlock pthread_rwlock_wrlock
-#define dt_pthread_rwlock_tryrdlock pthread_rwlock_tryrdlock
-#define dt_pthread_rwlock_trywrlock pthread_rwlock_trywrlock
+// Same-thread recursive write-lock tracking, mirroring the _DEBUG implementation above.
+// A thread that already holds the write lock cannot race itself: no other thread can be
+// touching the protected data while the write lock is held, so letting that same thread
+// re-enter (as reader or writer) is safe for data validity. Without this, glibc's default
+// PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP policy self-deadlocks such a thread as soon as
+// a second thread is queued waiting for the write lock (new readers, including from the
+// writer's own thread, are blocked once a writer is waiting).
+typedef struct dt_pthread_rwlock_t
+{
+  pthread_rwlock_t lock;
+  pthread_t writer;
+  int writer_depth;
+} dt_pthread_rwlock_t;
 
-#define dt_pthread_rwlock_rdlock_with_caller(A,B,C) pthread_rwlock_rdlock(A)
-#define dt_pthread_rwlock_wrlock_with_caller(A,B,C) pthread_rwlock_wrlock(A)
-#define dt_pthread_rwlock_tryrdlock_with_caller(A,B,C) pthread_rwlock_tryrdlock(A)
-#define dt_pthread_rwlock_trywrlock_with_caller(A,B,C) pthread_rwlock_trywrlock(A)
+static inline int dt_pthread_rwlock_init(dt_pthread_rwlock_t *lock, const pthread_rwlockattr_t *attr)
+{
+  lock->writer = 0;
+  lock->writer_depth = 0;
+  return pthread_rwlock_init(&lock->lock, attr);
+}
+
+static inline int dt_pthread_rwlock_destroy(dt_pthread_rwlock_t *lock)
+{
+  return pthread_rwlock_destroy(&lock->lock);
+}
+
+static inline int dt_pthread_rwlock_unlock(dt_pthread_rwlock_t *rwlock)
+{
+  if(pthread_equal(rwlock->writer, pthread_self()) && rwlock->writer_depth > 1)
+  {
+    rwlock->writer_depth--;
+    return 0;
+  }
+  const gboolean writer_was_self = pthread_equal(rwlock->writer, pthread_self());
+  const int res = pthread_rwlock_unlock(&rwlock->lock);
+  if(writer_was_self)
+  {
+    rwlock->writer_depth = 0;
+    __sync_bool_compare_and_swap(&(rwlock->writer), pthread_self(), 0);
+  }
+  return res;
+}
+
+static inline int dt_pthread_rwlock_rdlock(dt_pthread_rwlock_t *rwlock)
+{
+  if(pthread_equal(rwlock->writer, pthread_self()) && rwlock->writer_depth >= 1)
+  {
+    rwlock->writer_depth++;
+    return 0;
+  }
+  return pthread_rwlock_rdlock(&rwlock->lock);
+}
+
+static inline int dt_pthread_rwlock_wrlock(dt_pthread_rwlock_t *rwlock)
+{
+  if(pthread_equal(rwlock->writer, pthread_self()) && rwlock->writer_depth >= 1)
+  {
+    rwlock->writer_depth++;
+    return 0;
+  }
+  const int res = pthread_rwlock_wrlock(&rwlock->lock);
+  if(!res)
+  {
+    __sync_lock_test_and_set(&(rwlock->writer), pthread_self());
+    rwlock->writer_depth = 1;
+  }
+  return res;
+}
+
+static inline int dt_pthread_rwlock_tryrdlock(dt_pthread_rwlock_t *rwlock)
+{
+  // Keep try* locks honest as "is it locked by anyone?" probes: do NOT report success just
+  // because the current thread already holds the write lock (see dt_pthread_rwlock_rdlock
+  // above for the blocking-call recursion, which is the case this is not).
+  if(pthread_equal(rwlock->writer, pthread_self()) && rwlock->writer_depth >= 1) return EBUSY;
+  return pthread_rwlock_tryrdlock(&rwlock->lock);
+}
+
+static inline int dt_pthread_rwlock_trywrlock(dt_pthread_rwlock_t *rwlock)
+{
+  if(pthread_equal(rwlock->writer, pthread_self()) && rwlock->writer_depth >= 1) return EBUSY;
+  const int res = pthread_rwlock_trywrlock(&rwlock->lock);
+  if(!res)
+  {
+    __sync_lock_test_and_set(&(rwlock->writer), pthread_self());
+    rwlock->writer_depth = 1;
+  }
+  return res;
+}
+
+#define dt_pthread_rwlock_rdlock_with_caller(A,B,C) dt_pthread_rwlock_rdlock(A)
+#define dt_pthread_rwlock_wrlock_with_caller(A,B,C) dt_pthread_rwlock_wrlock(A)
+#define dt_pthread_rwlock_tryrdlock_with_caller(A,B,C) dt_pthread_rwlock_tryrdlock(A)
+#define dt_pthread_rwlock_trywrlock_with_caller(A,B,C) dt_pthread_rwlock_trywrlock(A)
 
 #endif
 

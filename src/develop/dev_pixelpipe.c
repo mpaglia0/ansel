@@ -1662,6 +1662,10 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe)
   else
     _refresh_pipe_detail_mask_state(pipe);
 
+  // A call chain that already holds history_mutex as writer on this same thread can re-enter
+  // here (e.g. history-commit paths that resync the virtual pipe while still holding the write
+  // lock). dt_pthread_rwlock_rdlock is same-thread-recursive for this exact case (see
+  // dtpthread.h), so this proceeds immediately instead of deadlocking or deferring the sync.
   dt_pthread_rwlock_rdlock(&pipe->dev->history_mutex);
 
   // The realtime in-place path settles the format contract and the global hash itself (it must,

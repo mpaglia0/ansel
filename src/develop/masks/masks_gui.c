@@ -544,6 +544,7 @@ static void _masks_move_up_down_callback(gpointer user_data, const int up)
   if(IS_NULL_PTR(fpt)) return;
   dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, fpt->parentid);
   if(IS_NULL_PTR(grp) || !(grp->type & DT_MASKS_GROUP)) return;
+  grp = dt_masks_cow_touch(darktable.develop, grp);
 
   dt_masks_form_move(grp, fpt->formid, up);
 

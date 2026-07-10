@@ -60,6 +60,7 @@
 */
 #include "common/darktable.h"
 #include "common/history.h"
+
 #include "common/undo.h"
 #include "common/history_snapshot.h"
 #include "common/image_cache.h"
@@ -180,7 +181,7 @@ gboolean dt_dev_history_item_update_from_params(dt_develop_t *dev, dt_dev_histor
 
   if(!IS_NULL_PTR(hist->forms))
   {
-    g_list_free_full(hist->forms, (void (*)(void *))dt_masks_free_form);
+    g_list_free_full(hist->forms, (void (*)(void *))dt_masks_form_unref);
     hist->forms = NULL;
   }
   hist->forms = forms;
@@ -535,7 +536,14 @@ GList *dt_history_duplicate(GList *hist)
       memcpy(new->blend_params, old->blend_params, old->blendop_params_size);
     }
 
-    if(old->forms) new->forms = dt_masks_dup_forms_deep(old->forms, NULL);
+    if(old->forms)
+    {
+      // Share references with old->forms instead of deep-copying: forms are refcounted
+      // and cloned on write (dt_masks_cow_touch), not on snapshot (see masks_history.h).
+      new->forms = g_list_copy(old->forms);
+      for(GList *form_node = new->forms; form_node; form_node = g_list_next(form_node))
+        dt_masks_form_ref((dt_masks_form_t *)form_node->data);
+    }
 
     result = g_list_prepend(result, new);
   }
@@ -620,6 +628,7 @@ static void _pop_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data_t da
 
   GList *snapshot = (action == DT_ACTION_UNDO) ? hist->before_snapshot : hist->after_snapshot;
   const int history_end = (action == DT_ACTION_UNDO) ? hist->before_end : hist->after_end;
+
   GList *iop_order_list
       = (action == DT_ACTION_UNDO) ? hist->before_iop_order_list : hist->after_iop_order_list;
 
@@ -1048,7 +1057,7 @@ void dt_dev_free_history_item(gpointer data)
 
   dt_free(item->params);
   dt_free(item->blend_params);
-  g_list_free_full(item->forms, (void (*)(void *))dt_masks_free_form);
+  g_list_free_full(item->forms, (void (*)(void *))dt_masks_form_unref);
   item->forms = NULL;
   dt_free(item);
 }

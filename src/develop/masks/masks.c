@@ -281,6 +281,10 @@ dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *mask_form)
   dt_masks_form_t *duplicate_form = malloc(sizeof(struct dt_masks_form_t));
   memcpy(duplicate_form, mask_form, sizeof(struct dt_masks_form_t));
 
+  // The memcpy above copied the source's live refcount: a fresh clone must
+  // start with exactly one owner (whoever holds the returned pointer).
+  dt_atomic_set_int(&duplicate_form->refcount, 1);
+
   // Duplicate the GList *points payloads into a new list.
   GList *duplicated_points = NULL;
 
@@ -303,16 +307,6 @@ dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *mask_form)
   duplicate_form->points = g_list_reverse(duplicated_points);
 
   return duplicate_form;
-}
-
-static void *_dup_masks_form_cb(const void *formdata, gpointer user_data)
-{
-  // Duplicate the main form struct, optionally substituting the provided override form.
-  dt_masks_form_t *source_form = (dt_masks_form_t *)formdata;
-  dt_masks_form_t *override_form = (dt_masks_form_t *)user_data;
-  const dt_masks_form_t *form_to_copy
-      = (IS_NULL_PTR(override_form) || source_form->formid != override_form->formid) ? source_form : override_form;
-  return (void *)dt_masks_dup_masks_form(form_to_copy);
 }
 
 /**
@@ -723,14 +717,6 @@ static gboolean _dt_masks_events_flush_rebuild_if_needed(struct dt_iop_module_t 
 }
 
 /**
- * @brief Duplicate the list of forms, replacing a single item by formid match.
- */
-GList *dt_masks_dup_forms_deep(GList *form_list, dt_masks_form_t *replacement_form)
-{
-  return (GList *)g_list_copy_deep(form_list, _dup_masks_form_cb, (gpointer)replacement_form);
-}
-
-/**
  * @brief Build and display the on-canvas hint message for masks interactions.
  *
  * Pitfall: set_hint_message() may rely on gui->form_selected, so we may need
@@ -934,6 +920,7 @@ void dt_masks_remove_node(struct dt_iop_module_t *module, dt_masks_form_t *mask_
                           dt_masks_form_gui_t *mask_gui, int form_index, int node_index)
 {
   if(IS_NULL_PTR(mask_form) || IS_NULL_PTR(mask_form->points)) return;
+  mask_form = dt_masks_cow_touch(darktable.develop, mask_form);
   dt_masks_node_brush_t *brush_node = (dt_masks_node_brush_t *)g_list_nth_data(mask_form->points, node_index);
   if(IS_NULL_PTR(brush_node)) return;
   mask_form->points = g_list_remove(mask_form->points, brush_node);
@@ -976,6 +963,7 @@ static gboolean _masks_remove_shape(struct dt_iop_module_t *module, dt_masks_for
     const int edit_mode = mask_gui->edit_mode;
 
     dt_masks_clear_form_gui(darktable.develop);
+    visible_form = dt_masks_cow_touch(darktable.develop, visible_form);
     // Remove the selected shape copy from the visible group before deleting the
     // real group entry below.
     for(GList *forms = visible_form->points; forms; forms = g_list_next(forms))
@@ -1094,6 +1082,7 @@ gboolean dt_masks_remove_or_delete(struct dt_iop_module_t *module, dt_masks_form
     {
       const int edit_mode = mask_gui->edit_mode;
       dt_masks_clear_form_gui(darktable.develop);
+      visible_form = dt_masks_cow_touch(darktable.develop, visible_form);
       // Remove the selected shape copy from the visible group before deleting
       // the real form from the develop mask list below.
       for(GList *forms = visible_form->points; forms; forms = g_list_next(forms))
@@ -1368,6 +1357,9 @@ static dt_masks_form_t *_group_from_module(dt_develop_t *develop, dt_iop_module_
 
 void dt_masks_append_form(dt_develop_t *develop, dt_masks_form_t *mask_form)
 {
+  // dev->forms is its own claim on the object, independent of dev->allforms's claim
+  // (taken at creation, dt_masks_create_ext): take a reference for this list membership.
+  dt_masks_form_ref(mask_form);
   dt_pthread_rwlock_wrlock(&develop->masks_mutex);
   develop->forms = g_list_append(develop->forms, mask_form);
   dt_pthread_rwlock_unlock(&develop->masks_mutex);
@@ -1378,6 +1370,9 @@ void dt_masks_remove_form(dt_develop_t *develop, dt_masks_form_t *mask_form)
   dt_pthread_rwlock_wrlock(&develop->masks_mutex);
   develop->forms = g_list_remove(develop->forms, mask_form);
   dt_pthread_rwlock_unlock(&develop->masks_mutex);
+  // Release dev->forms's claim (see dt_masks_append_form). Does not necessarily free the
+  // object: dev->allforms and/or history snapshots may still reference it.
+  dt_masks_form_unref(mask_form);
 }
 
 void dt_masks_gui_form_save_creation(dt_develop_t *develop, dt_iop_module_t *module, dt_masks_form_t *mask_form,
@@ -1447,6 +1442,7 @@ void dt_masks_gui_form_save_creation(dt_develop_t *develop, dt_iop_module_t *mod
       else
         group_form = _group_create(develop, module, DT_MASKS_GROUP);
     }
+    group_form = dt_masks_cow_touch(develop, group_form);
     // we add the form in this group
     group_entry->formid = mask_form->formid;
     group_entry->parentid = group_form->formid;
@@ -1933,6 +1929,9 @@ dt_masks_form_t *dt_masks_create(dt_masks_type_t type)
   dt_masks_form_t *mask_form = (dt_masks_form_t *)calloc(1, sizeof(dt_masks_form_t));
   if(IS_NULL_PTR(mask_form)) return NULL;
 
+  // Freshly created: exactly one owner (whoever holds the returned pointer).
+  dt_atomic_set_int(&mask_form->refcount, 1);
+
   mask_form->type = type;
   mask_form->version = dt_masks_version();
   mask_form->formid = time(NULL) + form_id_seed++;
@@ -1973,27 +1972,6 @@ dt_masks_form_t *dt_masks_create_ext(dt_masks_type_t type)
   return mask_form;
 }
 
-void dt_masks_replace_current_forms(dt_develop_t *develop, GList *forms)
-{
-  dt_pthread_rwlock_wrlock(&develop->masks_mutex);
-  GList *forms_tmp = dt_masks_dup_forms_deep(forms, NULL);
-
-  while(develop->forms)
-  {
-    darktable.develop->allforms = g_list_append(darktable.develop->allforms, develop->forms->data);
-    develop->forms = g_list_delete_link(develop->forms, develop->forms);
-  }
-
-  develop->forms = forms_tmp;
-  dt_pthread_rwlock_unlock(&develop->masks_mutex);
-
-  for(GList *form_node = develop->forms; form_node; form_node = g_list_next(form_node))
-  {
-    dt_masks_form_t *mask_form = (dt_masks_form_t *)form_node->data;
-    dt_masks_form_update_gravity_center(mask_form);
-  }
-}
-
 dt_masks_form_t *dt_masks_get_from_id_ext(GList *form_list, int form_id)
 {
   for(; form_list; form_list = g_list_next(form_list))
@@ -2021,15 +1999,6 @@ dt_iop_module_t *dt_masks_get_mask_manager(dt_develop_t *develop)
       return module;
   }
   return NULL;
-}
-
-GList *dt_masks_snapshot_current_forms(dt_develop_t *develop, gboolean reset_changed)
-{
-  dt_pthread_rwlock_rdlock(&develop->masks_mutex);
-  GList *forms_snapshot = dt_masks_dup_forms_deep(develop->forms, NULL);
-  dt_pthread_rwlock_unlock(&develop->masks_mutex);
-  if(reset_changed) develop->forms_changed = FALSE;
-  return forms_snapshot;
 }
 
 static void _masks_fill_used_forms(GList *forms_list, const int form_id, int *used_form_ids,
@@ -2427,6 +2396,7 @@ int dt_masks_events_mouse_moved(struct dt_iop_module_t *module, double x, double
     int form_index = 0;
     dt_masks_form_t *dispatch_form
         = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
+    dispatch_form = dt_masks_cow_touch(darktable.develop, dispatch_form);
 
     if(_dt_masks_events_should_update_hover_on_move(mask_gui))
       result = _dt_masks_events_update_hover(dispatch_form, mask_gui, form_index);
@@ -2461,6 +2431,7 @@ int dt_masks_events_button_released(struct dt_iop_module_t *module, double x, do
   int form_index = 0;
   dt_masks_form_t *dispatch_form
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
+  dispatch_form = dt_masks_cow_touch(darktable.develop, dispatch_form);
 
   int result = 0;
   if(!IS_NULL_PTR(dispatch_form) && dispatch_form->functions && dispatch_form->functions->button_released)
@@ -2516,6 +2487,7 @@ int dt_masks_events_button_pressed(struct dt_iop_module_t *module, double x, dou
   int form_index = 0;
   dt_masks_form_t *dispatch_form
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
+  dispatch_form = dt_masks_cow_touch(darktable.develop, dispatch_form);
   _dt_masks_events_update_hover(dispatch_form, mask_gui, form_index);
 
   gboolean return_val = FALSE;
@@ -2567,15 +2539,20 @@ int dt_masks_events_key_pressed(struct dt_iop_module_t *module, GdkEventKey *eve
     int form_index = 0;
     dt_masks_form_t *dispatch_form
         = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
+    dispatch_form = dt_masks_cow_touch(darktable.develop, dispatch_form);
     if(dispatch_form && dispatch_form->functions && dispatch_form->functions->key_pressed)
       return_value = dispatch_form->functions->key_pressed(module, event, dispatch_form,
                                                            parent_id, mask_gui, form_index);
 
     if(!return_value && mask_form->functions->key_pressed)
+    {
+      mask_form = dt_masks_cow_touch(darktable.develop, mask_form);
       return_value = mask_form->functions->key_pressed(module, event, mask_form, 0, mask_gui, 0);
+    }
   }
   else if(mask_form->functions->key_pressed)
   {
+    mask_form = dt_masks_cow_touch(darktable.develop, mask_form);
     return_value = mask_form->functions->key_pressed(module, event, mask_form, 0, mask_gui, 0);
   }
   
@@ -2632,6 +2609,7 @@ int dt_masks_events_mouse_scrolled(struct dt_iop_module_t *module, double x, dou
   int form_index = 0;
   dt_masks_form_t *dispatch_form
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
+  dispatch_form = dt_masks_cow_touch(darktable.develop, dispatch_form);
 
   if(!mask_gui->creation && !dt_masks_is_anything_selected(mask_gui))
     return 0;
@@ -3222,6 +3200,7 @@ static void _menu_add_exist(dt_iop_module_t *module, int form_id)
   {
     group_form = _group_create(darktable.develop, module, DT_MASKS_GROUP);
   }
+  group_form = dt_masks_cow_touch(darktable.develop, group_form);
   // we add the form in this group
   dt_masks_group_add_form(group_form, mask_form);
   // we save the group
@@ -3257,6 +3236,10 @@ void dt_masks_iop_use_same_as(dt_iop_module_t *module, dt_iop_module_t *source_m
   {
     group_form = _group_create(darktable.develop, module, DT_MASKS_GROUP);
   }
+  // Touch once, before the loop: dt_masks_group_add_form mutates group_form->points on every
+  // iteration, so it must already be private by the first call, or later iterations would
+  // append to an orphaned clone instead of the object actually in dev->forms.
+  group_form = dt_masks_cow_touch(darktable.develop, group_form);
   // we copy the src group in this group
   for(GList *group_node = source_group->points; group_node; group_node = g_list_next(group_node))
   {
@@ -3440,6 +3423,7 @@ void dt_masks_form_delete(struct dt_iop_module_t *module, dt_masks_form_t *group
 
   if(!(mask_form->type & (DT_MASKS_CLONE | DT_MASKS_NON_CLONE)) && !IS_NULL_PTR(group_form))
   {
+    group_form = dt_masks_cow_touch(darktable.develop, group_form);
     // we try to remove the form from the masks group
     int removed = 0;
     for(GList *group_node = group_form->points; group_node; group_node = g_list_next(group_node))
@@ -3473,7 +3457,11 @@ void dt_masks_form_delete(struct dt_iop_module_t *module, dt_masks_form_t *group
       dt_masks_form_group_t *group_child = (dt_masks_form_group_t *)mask_form->points->data;
       dt_masks_form_t *child = dt_masks_get_from_id(darktable.develop, group_child->formid);
       dt_masks_form_delete(module, mask_form, child);
-      // no need to do anything to mask_form->points, the recursive call will have removed child from the list
+      // The recursive call passes mask_form as its own group_form parameter and may have
+      // COW-cloned it (see the touch above): re-fetch the live object so this loop keeps
+      // observing the mutation instead of spinning on a stale, now-orphaned copy.
+      mask_form = dt_masks_get_from_id(darktable.develop, form_id);
+      if(IS_NULL_PTR(mask_form)) break;
     }
   }
 
@@ -3495,6 +3483,7 @@ void dt_masks_form_delete(struct dt_iop_module_t *module, dt_masks_form_t *group
         dt_masks_form_t *iop_group = _group_from_module(darktable.develop, iop_module);
         if(iop_group && (iop_group->type & DT_MASKS_GROUP))
         {
+          iop_group = dt_masks_cow_touch(darktable.develop, iop_group);
           int removed = 0;
           GList *shapes = iop_group->points;
           while(shapes)
@@ -3762,7 +3751,16 @@ int dt_masks_form_change_opacity(dt_masks_form_t *mask_form, int parent_id, int 
                                  const int flow)
 {
   if(IS_NULL_PTR(mask_form)) return 0;
-  dt_masks_form_group_t *form_group = dt_masks_form_group_from_parentid(parent_id, mask_form->formid);
+
+  // dt_masks_form_set_interaction_value() below mutates the group_entry in place, which is
+  // memory owned by the parent group, not by mask_form -- touch the parent (not mask_form)
+  // before resolving the entry, or a shared parent's group_entry gets mutated behind the back
+  // of a snapshot that still references it.
+  dt_masks_form_t *parent_form = dt_masks_get_from_id(darktable.develop, parent_id);
+  if(IS_NULL_PTR(parent_form) || !(parent_form->type & DT_MASKS_GROUP)) return 0;
+  parent_form = dt_masks_cow_touch(darktable.develop, parent_form);
+
+  dt_masks_form_group_t *form_group = _masks_group_find_form(parent_form, mask_form->formid);
   if(IS_NULL_PTR(form_group)) return 0;
 
   float amount = scroll_up ? 0.02f : -0.02f;
@@ -3850,6 +3848,11 @@ void dt_masks_group_ungroup(dt_masks_form_t *dest_group, dt_masks_form_t *group_
 {
   if(IS_NULL_PTR(group_form) || IS_NULL_PTR(dest_group)) return;
   if(!(group_form->type & DT_MASKS_GROUP) || !(dest_group->type & DT_MASKS_GROUP)) return;
+
+  // dest_group->points is mutated below (also across recursive calls, which all receive this
+  // same touched pointer by value): safe to self-touch here, unlike group_form which is only
+  // ever read/recursed into, never mutated.
+  dest_group = dt_masks_cow_touch(darktable.develop, dest_group);
 
   for(GList *group_node = group_form->points; group_node; group_node = g_list_next(group_node))
   {
