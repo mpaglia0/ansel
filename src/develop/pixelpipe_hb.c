@@ -477,6 +477,23 @@ void dt_dev_pixelpipe_set_input(dt_dev_pixelpipe_t *pipe, int32_t imgid, int wid
   pipe->imgid = imgid;
   pipe->dev->image_storage = pipe->dev->image_storage;
   pipe->size = size;
+
+  // Nodes may already exist if this pipe was set up before its input size was known: export
+  // pipes call dt_dev_pixelpipe_create_nodes() before dt_dev_pixelpipe_set_input() (see
+  // common/imageio.c), and create_nodes() bakes pipe->iwidth/iheight into each piece at
+  // node-creation time. Without this, every piece stays stuck with whatever (zero) size the
+  // pipe had at that point, so any module reading piece->iwidth/iheight directly (toneequal,
+  // soften, ashift) silently gets 0 during export while darkroom pipes (whose input is set
+  // before their nodes are created) see the real size -- e.g. toneequal's blending radius
+  // collapses to 0 on export only, disabling its local smoothing there regardless of the
+  // module's actual settings.
+  for(GList *nodes = g_list_first(pipe->nodes); nodes; nodes = g_list_next(nodes))
+  {
+    dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)nodes->data;
+    if(IS_NULL_PTR(piece)) continue;
+    piece->iwidth = width;
+    piece->iheight = height;
+  }
 }
 
 void dt_dev_pixelpipe_set_icc(dt_dev_pixelpipe_t *pipe, dt_colorspaces_color_profile_type_t icc_type,

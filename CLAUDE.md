@@ -111,6 +111,18 @@ a real GPU id causes the GUI thread to enqueue a GPU read without owning the dev
 pipeline's OpenCL events → SIGSEGV in `clReleaseEvent`. Device-only entries then report a miss
 to the GUI, which waits for the pipeline to publish a host copy instead.
 
+### `piece->iwidth`/`iheight` go stale on the export pipe specifically
+
+`dt_dev_pixelpipe_create_nodes()` copies `pipe->iwidth`/`iheight` into each `piece->iwidth`/`iheight`
+once, at node-creation time — it is not refreshed on later ROI passes. Darkroom pipes call
+`dt_dev_pixelpipe_set_input()` (which sets `pipe->iwidth`/`iheight`) before creating nodes; the
+export pipe (`common/imageio.c`) does the reverse, so every piece was permanently stuck at 0 there
+(issue #967: `iop/toneequal.c`'s blending radius and `iop/soften.c`'s glow radius silently collapsed
+to 0 on export only, regardless of the module's params, while darkroom rendered correctly). Fixed by
+having `dt_dev_pixelpipe_set_input()` re-sync `iwidth`/`iheight` onto any already-created nodes. See
+`doc/resizing-scaling.md` for the full write-up; any other per-piece field seeded from `pipe->*` at
+node-creation time is exposed to the same ordering hazard.
+
 ---
 
 ## Masks / forms history
