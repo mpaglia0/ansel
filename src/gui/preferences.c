@@ -712,7 +712,12 @@ void dt_gui_preferences_show()
                          GINT_TO_POINTER(dev));
         gtk_grid_attach(GTK_GRID(grid), pinned_memory, 2, line++, 1, 1);
 
-        GtkWidget *headroom_label = gtk_label_new(_("GPU vRAM headroom (MiB)"));
+        // Integrated GPUs have no vRAM of their own: they share system RAM with the OS, the
+        // desktop and every other process. Label the setting accordingly so users don't read
+        // this as a dedicated GPU memory budget on hardware where that concept doesn't apply.
+        GtkWidget *headroom_label = gtk_label_new(device->host_unified_memory
+                                                  ? _("GPU memory headroom, shared with system RAM (MiB)")
+                                                  : _("GPU vRAM headroom (MiB)"));
         gtk_widget_set_halign(headroom_label, GTK_ALIGN_START);
         gtk_widget_set_hexpand(headroom_label, TRUE);
         gtk_widget_set_margin_start(headroom_label, DT_PIXEL_APPLY_DPI(24));
@@ -725,7 +730,11 @@ void dt_gui_preferences_show()
         gtk_widget_set_hexpand(headroom, FALSE);
         gtk_spin_button_set_digits(GTK_SPIN_BUTTON(headroom), 0);
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(headroom), dt_opencl_detected_device_headroom(dev));
-        gtk_widget_set_tooltip_text(headroom, _("GPU memory reserved for the system and other applications"));
+        gtk_widget_set_tooltip_text(headroom, device->host_unified_memory
+                                    ? _("This GPU has no dedicated vRAM -- it shares memory with the "
+                                        "system. Memory reserved here for the OS, desktop and other "
+                                        "applications")
+                                    : _("GPU memory reserved for the system and other applications"));
         g_signal_connect(G_OBJECT(headroom), "value-changed", G_CALLBACK(_opencl_device_headroom_callback),
                          GINT_TO_POINTER(dev));
         gtk_grid_attach(GTK_GRID(grid), headroom, 2, line++, 1, 1);

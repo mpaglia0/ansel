@@ -298,6 +298,8 @@ gboolean dt_opencl_read_device_config(const int devid)
     int forced_headroom = dt_conf_get_int(key_device);
     if(forced_headroom > 0) cl->dev[devid].forced_headroom = forced_headroom;
   }
+  else if(cl->dev[devid].host_unified_memory)
+    cl->dev[devid].forced_headroom = MAX(512ul, (size_t)dt_conf_get_int64("memory_opencl_headroom"));
   else // this is used if updating to 4.0 or fresh installs; see commenting _opencl_get_unused_device_mem()
     cl->dev[devid].forced_headroom = dt_conf_get_int64("memory_opencl_headroom");
 
@@ -524,6 +526,13 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
   // test GPU availability, vendor, memory, image support etc:
   (cl->dlocl->symbols->dt_clGetDeviceInfo)(devid, CL_DEVICE_AVAILABLE, sizeof(cl_bool), &device_available, NULL);
 
+  // Queried early (before dt_opencl_read_device_config() below, which needs it to pick a sane
+  // default headroom on first run) rather than alongside the other capability queries further down.
+  cl_bool host_unified_memory = CL_FALSE;
+  (cl->dlocl->symbols->dt_clGetDeviceInfo)(devid, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(cl_bool),
+                                           &host_unified_memory, NULL);
+  cl->dev[dev].host_unified_memory = (host_unified_memory == CL_TRUE);
+
   err = dt_opencl_get_device_info(cl, devid, CL_DEVICE_VENDOR, (void **)&vendor, &vendor_size);
   if(err != CL_SUCCESS)
   {
@@ -744,6 +753,7 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
       detected->disabled = cl->dev[dev].disabled & 1;
       detected->pinned_memory = cl->dev[dev].pinned_memory;
       detected->forced_headroom = cl->dev[dev].forced_headroom;
+      detected->host_unified_memory = cl->dev[dev].host_unified_memory;
       cl->num_detected_devs++;
     }
   }
