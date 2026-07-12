@@ -2508,6 +2508,8 @@ static gboolean _iop_plugin_header_button_press(GtkWidget *w, GdkEventButton *e,
     }
     else
     {
+      if(module->expander)
+        g_object_set_data(G_OBJECT(module->expander), DT_IOP_HEADER_IGNORE_RELEASE, GINT_TO_POINTER(TRUE));
       dt_iop_gui_rename_module(module);
       return TRUE;
     }
