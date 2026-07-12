@@ -476,7 +476,7 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
   // setting sane/conservative defaults at first
   cl->dev[dev].avoid_atomics = 0;
   cl->dev[dev].micro_nap = 250;
-  cl->dev[dev].pinned_memory = DT_OPENCL_PINNING_OFF;
+  cl->dev[dev].pinned_memory = DT_OPENCL_PINNING_ON;
   cl->dev[dev].clroundup_wd = 16;
   cl->dev[dev].clroundup_ht = 16;
   cl->dev[dev].use_events = 1;
