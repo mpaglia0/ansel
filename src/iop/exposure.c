@@ -556,7 +556,7 @@ void autoset(struct dt_iop_module_t *self, const struct dt_dev_pixelpipe_t *pipe
   dt_iop_exposure_params_t *p = (dt_iop_exposure_params_t *)self->params;
   if(piece->dsc_in.channels != 4) return;
 
-  const dt_iop_order_iccprofile_info_t *const input_profile = dt_ioppr_get_pipe_input_profile_info(pipe);
+  const dt_iop_order_iccprofile_info_t *const input_profile = dt_ioppr_get_pipe_current_profile_info(self, pipe);
   if(IS_NULL_PTR(input_profile)) return;
 
   const float *const restrict in = (float*)i;
@@ -771,18 +771,26 @@ static void _auto_set_exposure(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe)
   dt_print(DT_DEBUG_DEV, "[picker/exposure] RGB=(%g,%g,%g) pipe=%p\n",
            RGB[0], RGB[1], RGB[2], (void *)pipe);
 
-  // Get input profile, assuming we are before colorin
-  const dt_iop_order_iccprofile_info_t *const input_profile = dt_ioppr_get_pipe_input_profile_info(pipe);
+  // Get the profile of whatever colorspace the picked sample actually lives in: exposure's
+  // iop-order is user-configurable, so its input can be raw camera RGB (before colorin) or
+  // already-managed RGB (if reordered after colorin) -- see dt_ioppr_get_pipe_current_profile_info.
+  const dt_iop_order_iccprofile_info_t *const input_profile = dt_ioppr_get_pipe_current_profile_info(self, pipe);
   if(IS_NULL_PTR(input_profile))
   {
     dt_print(DT_DEBUG_DEV, "[picker/exposure] missing input profile\n");
     return;
   }
 
-  // Convert to XYZ
+  // Convert to XYZ. Some profiles (e.g. camera input profiles with a parametric TRC, or a
+  // non-linear work profile) need their input curve applied before the matrix -- a bare
+  // dot_product against matrix_in would silently skip that curve and produce garbage XYZ
+  // for any such profile. dt_ioppr_rgb_matrix_to_xyz (same helper autoset() above uses) applies
+  // the curve first whenever profile_info->nonlinearlut says it's needed.
   dt_aligned_pixel_t XYZ;
   dt_aligned_pixel_t Lab;
-  dot_product(RGB, input_profile->matrix_in, XYZ);
+  dt_ioppr_rgb_matrix_to_xyz(RGB, XYZ, input_profile->matrix_in_transposed, input_profile->lut_in,
+                             input_profile->unbounded_coeffs_in, input_profile->lutsize,
+                             input_profile->nonlinearlut);
   dt_XYZ_to_Lab(XYZ, Lab);
   Lab[1] = Lab[2] = 0.f; // make color grey to get only the equivalent lighness
   dt_Lab_to_XYZ(Lab, XYZ);

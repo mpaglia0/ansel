@@ -1197,13 +1197,18 @@ void dt_mipmap_cache_swap_at_size(dt_mipmap_cache_t *cache, const int32_t imgid,
       // Convert to whatever display space to save thumbnails into Adobe RGB
       transform = darktable.color_profiles->transform_display_to_adobe_rgb;
     }
-    else 
+    else
     {
-      alloc = TRUE;
-      transform = cmsCreateTransform(
-          dt_colorspaces_get_profile(profile, "", DT_PROFILE_DIRECTION_DISPLAY)->profile, TYPE_BGRA_8,
-          dt_colorspaces_get_profile(DT_COLORSPACE_ADOBERGB, "", DT_PROFILE_DIRECTION_DISPLAY)->profile, TYPE_RGBA_8, 
-          INTENT_PERCEPTUAL, 0);
+      const dt_colorspaces_color_profile_t *const profile_in
+          = dt_colorspaces_get_profile(profile, "", DT_PROFILE_DIRECTION_DISPLAY);
+      const dt_colorspaces_color_profile_t *const profile_out
+          = dt_colorspaces_get_profile(DT_COLORSPACE_ADOBERGB, "", DT_PROFILE_DIRECTION_DISPLAY);
+      if(profile_in && profile_out)
+      {
+        alloc = TRUE;
+        transform = cmsCreateTransform(profile_in->profile, TYPE_BGRA_8, profile_out->profile, TYPE_RGBA_8,
+                                        INTENT_PERCEPTUAL, 0);
+      }
     }
 
     // Need to save BGRA back to RGBA. The function name is misleading, 
