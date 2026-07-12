@@ -184,7 +184,7 @@ gboolean dt_opencl_use_pinned_memory(const int devid)
 {
   dt_opencl_t *cl = darktable.opencl;
   if(!cl->inited || devid < 0) return FALSE;
-  return cl->dev[devid].pinned_memory;
+  return cl->dev[devid].pinned_memory & DT_OPENCL_PINNING_ON;
 }
 
 gboolean dt_opencl_is_pinned_memory(cl_mem mem)
@@ -392,6 +392,11 @@ int dt_opencl_set_detected_device_pinned_memory(const int detected, const gboole
 
   dt_opencl_t *cl = darktable.opencl;
   cl->detected_devs[detected].pinned_memory = pinned_memory;
+  // device->config_id is this device's live index into cl->dev[] (assigned at detection time,
+  // see dt_opencl_device_init()) -- apply immediately instead of only on the next restart, since
+  // dt_opencl_use_pinned_memory() reads cl->dev[], never cl->detected_devs[].
+  if(device->config_id >= 0 && device->config_id < cl->num_devs)
+    cl->dev[device->config_id].pinned_memory = pinned_memory;
   return 0;
 }
 
@@ -420,6 +425,15 @@ int dt_opencl_set_detected_device_headroom(const int detected, const size_t head
 
   dt_opencl_t *cl = darktable.opencl;
   cl->detected_devs[detected].forced_headroom = clamped_headroom;
+  // Same live-apply as pinned memory above: device->config_id is this device's index into
+  // cl->dev[], which dt_opencl_get_device_available() actually reads through used_available.
+  // dt_opencl_check_tuning() recomputes that from the value we just wrote, so the new headroom
+  // is in effect before this function returns instead of only after a restart.
+  if(device->config_id >= 0 && device->config_id < cl->num_devs)
+  {
+    cl->dev[device->config_id].forced_headroom = clamped_headroom;
+    dt_opencl_check_tuning(device->config_id);
+  }
   return 0;
 }
 
