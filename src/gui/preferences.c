@@ -97,6 +97,11 @@ static void _opencl_device_enabled_callback(GtkToggleButton *button, gpointer us
   const gboolean device_enabled = gtk_toggle_button_get_active(button);
   if(dt_opencl_set_detected_device_enabled(detected, device_enabled) == 0)
     restart_required = TRUE;
+
+  // Per-device settings (pinned memory, headroom) are meaningless while the GPU itself is
+  // disabled -- grey them out and lock them so the GUI doesn't suggest they still apply.
+  GList *dependents = (GList *)g_object_get_data(G_OBJECT(button), "dependent-widgets");
+  for(GList *l = dependents; l; l = l->next) gtk_widget_set_sensitive(GTK_WIDGET(l->data), device_enabled);
 }
 
 static void _opencl_device_pinned_memory_callback(GtkToggleButton *button, gpointer user_data)
@@ -738,6 +743,22 @@ void dt_gui_preferences_show()
         g_signal_connect(G_OBJECT(headroom), "value-changed", G_CALLBACK(_opencl_device_headroom_callback),
                          GINT_TO_POINTER(dev));
         gtk_grid_attach(GTK_GRID(grid), headroom, 2, line++, 1, 1);
+
+        // Pinned memory and headroom only make sense for a GPU that OpenCL will actually use --
+        // tie their sensitivity to the "Enable" toggle so a disabled device can't leave the user
+        // editing settings that have no effect. _opencl_device_enabled_callback() keeps this in
+        // sync on every toggle.
+        GList *dependents = NULL;
+        dependents = g_list_append(dependents, pinned_memory_label);
+        dependents = g_list_append(dependents, pinned_memory_labdef);
+        dependents = g_list_append(dependents, pinned_memory);
+        dependents = g_list_append(dependents, headroom_label);
+        dependents = g_list_append(dependents, headroom_labdef);
+        dependents = g_list_append(dependents, headroom);
+        g_object_set_data_full(G_OBJECT(enable), "dependent-widgets", dependents, (GDestroyNotify)g_list_free);
+
+        const gboolean device_enabled = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(enable));
+        for(GList *l = dependents; l; l = l->next) gtk_widget_set_sensitive(GTK_WIDGET(l->data), device_enabled);
       }
     }
   }
