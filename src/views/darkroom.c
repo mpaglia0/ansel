@@ -1892,6 +1892,21 @@ void leave(dt_view_t *self)
   dt_atomic_set_int(&dev->preview_pipe->shutdown, TRUE);
   if(dev->virtual_pipe) dt_atomic_set_int(&dev->virtual_pipe->shutdown, TRUE);
   dev->pipelines_started = FALSE;
+
+  /* dev->exit / the shutdown atomics above are only checked by the darkroom worker thread
+   * (dt_dev_darkroom_pipeline(), running in the DT_CTL_WORKER_DARKROOM job) between loop
+   * iterations and between servicing each pipe -- they do not preempt it mid-flight. Below,
+   * this function tears down dev->pipe/preview_pipe nodes, dev->iop and dev->history straight
+   * from the GUI thread. Proceeding before that worker thread has actually returned races it:
+   * dt_dev_pixelpipe_set_input() and the history-hash resync in _resync_pipe_with_history() touch
+   * pipe->nodes and pipe->dev->iop without holding busy_mutex, so the worker can still be
+   * mid-access on structures we are about to free, corrupting unrelated heap state (observed as
+   * a crash inside an IOP module's cleanup_pipe() far away from the actual race). Block here
+   * until the worker has fully exited both pipes' service loop. */
+  while((dt_atomic_get_int(&dev->pipe->running) || dt_atomic_get_int(&dev->preview_pipe->running))
+        && dt_control_running())
+    dt_iop_nap(10000); // 10 ms
+
   dt_dev_pixelpipe_cache_wait_dump_pending("darkroom-leave-before-cleanup");
 
   /* Stop module-owned background threads that may still be mutating the pipe, dev or history (e.g.

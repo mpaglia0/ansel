@@ -111,6 +111,36 @@ a real GPU id causes the GUI thread to enqueue a GPU read without owning the dev
 pipeline's OpenCL events → SIGSEGV in `clReleaseEvent`. Device-only entries then report a miss
 to the GUI, which waits for the pipeline to publish a host copy instead.
 
+### The darkroom worker thread must be joined before view `leave()` tears down pipe state
+
+`dt_dev_darkroom_pipeline()` runs forever in the dedicated `DT_CTL_WORKER_DARKROOM` job thread,
+servicing `dev->preview_pipe` then `dev->pipe` in a loop. `views/darkroom.c`'s `leave()` sets
+`dev->exit = 1` and each pipe's `shutdown` atomic, then — still from the GUI thread — calls
+`dt_dev_pixelpipe_cleanup_nodes()` on `dev->pipe`/`dev->preview_pipe`/`dev->virtual_pipe` and frees
+`dev->iop`/`dev->history`. Neither flag actually preempts the worker: `dev->exit` is only checked
+between loop iterations and between servicing each pipe, and `pipe->shutdown` is never polled inside
+`dt_dev_pixelpipe_process()` to abort mid-flight — it's only read afterwards, in
+`dt_dev_darkroom_pipeline()`, to decide whether the just-produced result is valid.
+
+`leave()`'s `busy_mutex` locks around the pipe-nodes teardown look like they serialize against the
+worker, but `busy_mutex` carries a comment that it must "NEVER be used from the GUI thread" for
+exactly this reason: two worker-thread accesses bypass it entirely — `dt_dev_pixelpipe_set_input()`
+(iterates `pipe->nodes` every loop tick to refresh `piece->iwidth`/`iheight`) and the history-hash
+resync at the top of `_resync_pipe_with_history()` (can re-trigger `dt_dev_pixelpipe_change()`,
+which rebuilds `pipe->nodes` from `pipe->dev->iop`). Either can still be touching a pipe's nodes, or
+`dev->iop`, after `leave()`'s mutex-guarded section already freed them. The resulting heap corruption
+does not crash where it happens — it crashes wherever the next unlucky reader lands (Sentry issue
+133807805: a garbage `xform_cam_Lab` pointer inside `iop/colorin.c`'s `cleanup_pipe()`, reached via
+the worker's *own* next `resync_pipe_with_history()` call, nowhere near the actual race).
+
+Fixed by making `dt_dev_pixelpipe_t.running` (set at the very top/bottom of
+`dt_dev_darkroom_pipeline()`) an actual `dt_atomic_int` — it existed before but was write-only.
+`leave()` now polls it for both `dev->pipe` and `dev->preview_pipe` right after setting
+`dev->exit`/`shutdown`, and blocks until both read `FALSE` before touching any node/iop/history
+teardown. Any other GUI-thread code that tears down darkroom pipe state must wait on this flag the
+same way — `dev->exit`/`pipe->shutdown` alone do not guarantee the worker has stopped touching a
+pipe.
+
 ### `piece->iwidth`/`iheight` go stale on the export pipe specifically
 
 `dt_dev_pixelpipe_create_nodes()` copies `pipe->iwidth`/`iheight` into each `piece->iwidth`/`iheight`
