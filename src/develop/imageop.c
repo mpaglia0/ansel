@@ -2877,17 +2877,29 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
   g_signal_connect(G_OBJECT(hw[IOP_MODULE_PRESETS]), "clicked", G_CALLBACK(_presets_popup_callback), module);
 
   /* add enabled button */
-  hw[IOP_MODULE_SWITCH] = dtgtk_togglebutton_new(dtgtk_cairo_paint_module_switch, 0, module);
+  GtkWidget *switch_button = dtgtk_togglebutton_new(dtgtk_cairo_paint_module_switch, 0, module);
 
-  dt_gui_add_class(hw[IOP_MODULE_SWITCH], "dt_iop_enable_button");
-  dt_iop_gui_set_enable_button_icon(hw[IOP_MODULE_SWITCH], module);
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(hw[IOP_MODULE_SWITCH]), module->enabled);
-  g_signal_connect(G_OBJECT(hw[IOP_MODULE_SWITCH]), "button-press-event",
+  dt_gui_add_class(switch_button, "dt_iop_enable_button");
+  dt_iop_gui_set_enable_button_icon(switch_button, module);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(switch_button), module->enabled);
+  g_signal_connect(G_OBJECT(switch_button), "button-press-event",
                    G_CALLBACK(_iop_plugin_header_child_button_press), module);
-  g_signal_connect(G_OBJECT(hw[IOP_MODULE_SWITCH]), "toggled", G_CALLBACK(_gui_off_callback), module);
+  g_signal_connect(G_OBJECT(switch_button), "toggled", G_CALLBACK(_gui_off_callback), module);
 
-  module->off = DTGTK_TOGGLEBUTTON(hw[IOP_MODULE_SWITCH]);
-  gtk_widget_set_sensitive(GTK_WIDGET(hw[IOP_MODULE_SWITCH]), !module->hide_enable_button);
+  module->off = DTGTK_TOGGLEBUTTON(switch_button);
+  gtk_widget_set_sensitive(GTK_WIDGET(switch_button), !module->hide_enable_button);
+
+  /* Wrap the switch in a plain box so the CSS spacing trick that visually tucks it
+     against the header edge (negative margin, see ansel.css) lives on the wrapper,
+     not on the button itself. dtgtk_togglebutton's custom draw() reinterprets its own
+     CSS margin a second time (as a paint-only offset) to size its icon -- if that same
+     margin also carries a position nudge, the icon gets painted outside the button's
+     real GTK allocation, which is what drives hover/click hit-testing. Keeping the
+     button's own margin at 0 keeps its drawing and its hit-region intrinsically in
+     sync; the wrapper absorbs the nudge at the layout level instead. */
+  hw[IOP_MODULE_SWITCH] = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  dt_gui_add_class(hw[IOP_MODULE_SWITCH], "dt_iop_enable_button_box");
+  gtk_container_add(GTK_CONTAINER(hw[IOP_MODULE_SWITCH]), switch_button);
 
   /* reorder header, for now, iop are always in the right panel */
   for(int i = 0; i <= IOP_MODULE_LABEL; i++)
