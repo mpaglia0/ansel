@@ -90,8 +90,12 @@ void dt_masks_replace_current_forms(dt_develop_t *dev, GList *forms)
 
   g_list_free_full(old_forms, (void (*)(void *))dt_masks_form_unref);
 
+  // Don't recompute gravity_center/area for every form here: this runs on every history
+  // load, undo/redo and history navigation, for every mask of every module in the image,
+  // whether or not the mask editor is even open. Just invalidate -- the one GUI hit-testing
+  // read site (masks.c, group member selection) recomputes lazily on first actual use.
   for(GList *form_node = dev->forms; form_node; form_node = g_list_next(form_node))
-    dt_masks_form_update_gravity_center((dt_masks_form_t *)form_node->data);
+    dt_masks_form_invalidate_gravity_center((dt_masks_form_t *)form_node->data);
 }
 
 GList *dt_masks_snapshot_current_forms(dt_develop_t *dev, gboolean reset_changed)

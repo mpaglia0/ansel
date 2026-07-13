@@ -2142,9 +2142,8 @@ static void _delayed_history_commit(gpointer data)
   // aka drawn masks have changed somehow. This is more expensive
   // but more reliable than handling individually all editing operations
   // in all callbacks in all possible mask types.
-  dt_pthread_rwlock_wrlock(&dev->history_mutex);
+  // (dt_dev_masks_update_hash takes its own, correctly-scoped masks_mutex lock.)
   dt_dev_masks_update_hash(dev);
-  dt_pthread_rwlock_unlock(&dev->history_mutex);
 
   if(dev->forms_changed)
     dt_dev_add_history_item(dev, dev->gui_module, FALSE, TRUE);
@@ -2434,7 +2433,6 @@ void mouse_moved(dt_view_t *self, double x, double y, double pressure, int which
       dt_gui_throttle_queue(dev, _delayed_history_commit, dev);
       
     handled = TRUE;
-    
   }
 
   // module

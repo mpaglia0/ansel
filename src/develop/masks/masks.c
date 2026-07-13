@@ -609,6 +609,9 @@ static gboolean _dt_masks_events_group_update_selection(dt_masks_form_t *group_f
 
     if(inside || hit_border || inside_source)
     {
+      // Lazily computed: only shapes actually hit by this click need it, not every member
+      // of the group on every mouse event.
+      if(!form->gravity_center_valid) dt_masks_form_update_gravity_center(form);
       const float dx = mask_gui->raw_pos[0] - form->gravity_center[0];
       const float dy = mask_gui->raw_pos[1] - form->gravity_center[1];
       const float center_dist2 = dx * dx + dy * dy;
@@ -2138,7 +2141,13 @@ void dt_masks_read_masks_history(dt_develop_t *develop, const int32_t image_id)
       }
     }
 
-    dt_masks_form_update_gravity_center(mask_form);
+    // Not computed here: dt_masks_replace_current_forms() below (via
+    // dt_masks_form_update_gravity_center() in masks_history.c) already computes it for
+    // every form that actually ends up live in dev->forms. Computing it here too would
+    // redundantly do it for every history step's row read from masks_history -- including
+    // every duplicate of a form shared unchanged across many steps (see the un-deduped
+    // masks_history table, doc/masks_history_dedup.md) -- for forms that are either
+    // superseded (never read again) or about to be recomputed anyway.
 
     // if this is a new history entry let's find it
     if(previous_num != history_num)
@@ -3558,11 +3567,18 @@ void dt_masks_form_update_gravity_center(dt_masks_form_t *mask_form)
   mask_form->gravity_center[0] = center_point[0];
   mask_form->gravity_center[1] = center_point[1];
   mask_form->area = area;
+  mask_form->gravity_center_valid = TRUE;
 
   dt_print(DT_DEBUG_MASKS,
            "[masks] gravity center updated: form=%p id=%d type=0x%x ok=%d center=(%f,%f), area=%f\n",
            (void *)mask_form, mask_form->formid, mask_form->type, ok,
            mask_form->gravity_center[0], mask_form->gravity_center[1], mask_form->area);
+}
+
+void dt_masks_form_invalidate_gravity_center(dt_masks_form_t *mask_form)
+{
+  if(IS_NULL_PTR(mask_form)) return;
+  mask_form->gravity_center_valid = FALSE;
 }
 
 /**
@@ -3908,6 +3924,39 @@ uint64_t dt_masks_group_get_hash(uint64_t hash, dt_masks_form_t *mask_form)
     else if(mask_form->functions)
     {
       hash = dt_hash(hash, (char *)point_node->data, mask_form->functions->point_struct_size);
+    }
+  }
+  return hash;
+}
+
+uint64_t dt_masks_form_get_own_hash(uint64_t hash, const dt_masks_form_t *mask_form)
+{
+  if(IS_NULL_PTR(mask_form)) return hash;
+
+  // basic infos
+  hash = dt_hash(hash, (const char *)&mask_form->type, sizeof(dt_masks_type_t));
+  hash = dt_hash(hash, (const char *)&mask_form->formid, sizeof(int));
+  hash = dt_hash(hash, (const char *)&mask_form->version, sizeof(int));
+  hash = dt_hash(hash, (const char *)&mask_form->source, sizeof(float) * 2);
+
+  for(const GList *point_node = mask_form->points; point_node; point_node = g_list_next(point_node))
+  {
+    if(mask_form->type & DT_MASKS_GROUP)
+    {
+      const dt_masks_form_group_t *group_entry = (const dt_masks_form_group_t *)point_node->data;
+      // Membership only (id + state/opacity): the referenced form's own content is hashed
+      // once, separately, when dev->forms reaches that form's own top-level entry. Recursing
+      // into it here would re-hash every grouped shape's full point list a second time.
+      if(dt_masks_get_from_id(darktable.develop, group_entry->formid))
+      {
+        hash = dt_hash(hash, (const char *)&group_entry->formid, sizeof(int));
+        hash = dt_hash(hash, (const char *)&group_entry->state, sizeof(int));
+        hash = dt_hash(hash, (const char *)&group_entry->opacity, sizeof(float));
+      }
+    }
+    else if(mask_form->functions)
+    {
+      hash = dt_hash(hash, (const char *)point_node->data, mask_form->functions->point_struct_size);
     }
   }
   return hash;

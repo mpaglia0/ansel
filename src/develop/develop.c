@@ -1689,12 +1689,19 @@ void dt_dev_append_changed_tag(const int32_t imgid)
 
 void dt_dev_masks_update_hash(dt_develop_t *dev)
 {
+  // dev->forms is protected by masks_mutex, not history_mutex -- this only reads the
+  // forms list, so it must not be wrapped in a history_mutex lock by callers (that would
+  // needlessly exclude the pipeline thread's history reads while this walk runs).
+  dt_pthread_rwlock_rdlock(&dev->masks_mutex);
+
   uint64_t hash = 5381;
   for(GList *form = g_list_first(dev->forms); form; form = g_list_next(form))
   {
     dt_masks_form_t *shape = (dt_masks_form_t *)form->data;
-    hash = dt_masks_group_get_hash(hash, shape);
+    hash = dt_masks_form_get_own_hash(hash, shape);
   }
+
+  dt_pthread_rwlock_unlock(&dev->masks_mutex);
 
   // Keep on accumulating "changed" states until something saves the new stack
   // and resets that to 0
