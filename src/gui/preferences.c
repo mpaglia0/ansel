@@ -97,22 +97,28 @@ static void _opencl_device_enabled_callback(GtkToggleButton *button, gpointer us
   const gboolean device_enabled = gtk_toggle_button_get_active(button);
   if(dt_opencl_set_detected_device_enabled(detected, device_enabled) == 0)
     restart_required = TRUE;
+
+  // Per-device settings (pinned memory, headroom) are meaningless while the GPU itself is
+  // disabled -- grey them out and lock them so the GUI doesn't suggest they still apply.
+  GList *dependents = (GList *)g_object_get_data(G_OBJECT(button), "dependent-widgets");
+  for(GList *l = dependents; l; l = l->next) gtk_widget_set_sensitive(GTK_WIDGET(l->data), device_enabled);
 }
 
 static void _opencl_device_pinned_memory_callback(GtkToggleButton *button, gpointer user_data)
 {
+  // Applies immediately (dt_opencl_set_detected_device_pinned_memory() updates the live device
+  // state, not just conf) -- unlike "Enable" above, no restart needed.
   const int detected = GPOINTER_TO_INT(user_data);
   const gboolean pinned_memory = gtk_toggle_button_get_active(button);
-  if(dt_opencl_set_detected_device_pinned_memory(detected, pinned_memory) == 0)
-    restart_required = TRUE;
+  dt_opencl_set_detected_device_pinned_memory(detected, pinned_memory);
 }
 
 static void _opencl_device_headroom_callback(GtkSpinButton *button, gpointer user_data)
 {
+  // Applies immediately, same as pinned memory above.
   const int detected = GPOINTER_TO_INT(user_data);
   const size_t headroom = gtk_spin_button_get_value_as_int(button);
-  if(dt_opencl_set_detected_device_headroom(detected, headroom) == 0)
-    restart_required = TRUE;
+  dt_opencl_set_detected_device_headroom(detected, headroom);
 }
 
 // Values for the accelerators/presets treeview
@@ -630,36 +636,34 @@ void dt_gui_preferences_show()
       }
       g_list_free(children);
 
+      // title + enable + pinned memory + headroom, per device -- how many grid rows the
+      // per-GPU blocks below need, now that they're attached directly into the shared grid.
+      const int device_rows = detected_devices * 4;
+
       if(insert_line < 0)
         insert_line = line;
       else
       {
         children = gtk_container_get_children(GTK_CONTAINER(grid));
-        // Shift all generated rows below the insertion point down, leaving one row
-        // for the indented box that contains all per-GPU option blocks.
+        // Shift all generated rows below the insertion point down, leaving room for the
+        // per-GPU option rows attached directly below.
         for(GList *child = children; child; child = g_list_next(child))
         {
           int top = 0;
           gtk_container_child_get(GTK_CONTAINER(grid), GTK_WIDGET(child->data), "top-attach", &top, NULL);
           if(top >= insert_line)
             gtk_container_child_set(GTK_CONTAINER(grid), GTK_WIDGET(child->data), "top-attach",
-                                    top + 1, NULL);
+                                    top + device_rows, NULL);
         }
         g_list_free(children);
         line = insert_line;
       }
 
-      GtkWidget *devices_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
-      gtk_widget_set_margin_start(devices_box, DT_PIXEL_APPLY_DPI(24));
-      gtk_widget_set_hexpand(devices_box, TRUE);
-      GtkWidget *devices_grid = gtk_grid_new();
-      gtk_grid_set_column_spacing(GTK_GRID(devices_grid), DT_GUI_BOX_SPACING);
-      gtk_widget_set_hexpand(devices_grid, TRUE);
-      gtk_box_pack_start(GTK_BOX(devices_box), devices_grid, FALSE, FALSE, 0);
-
-      // Create one block per detected GPU. The OpenCL subsystem owns the device-specific
-      // configuration keys and keeps the global OpenCL preference in sync.
-      int devices_line = 0;
+      // Create one block per detected GPU, attached directly into the shared grid (not a nested
+      // grid of our own) so its label/control columns get auto-sized together with the rest of
+      // the tab and line up with every other preference row, instead of drifting off on their own
+      // independently-sized columns. The OpenCL subsystem owns the device-specific configuration
+      // keys and keeps the global OpenCL preference in sync.
       for(int dev = 0; dev < detected_devices; dev++)
       {
         const dt_opencl_detected_device_t *device = dt_opencl_get_detected_device(dev);
@@ -672,32 +676,38 @@ void dt_gui_preferences_show()
         GtkWidget *title_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
         gtk_box_pack_start(GTK_BOX(title_box), device_title, FALSE, FALSE, 0);
         gtk_widget_set_margin_top(title_box, dev > 0 ? DT_PIXEL_APPLY_DPI(8) : 0);
+        // title_box spans all 3 grid columns below, so indenting it here is self-contained: it
+        // doesn't feed into column 0's width negotiation the way a single-column label would,
+        // so the per-parameter rows' controls stay aligned with the rest of the tab.
+        gtk_widget_set_margin_start(title_box, DT_PIXEL_APPLY_DPI(24));
         gtk_widget_set_name(title_box, "pref_subsection");
-        gtk_grid_attach(GTK_GRID(devices_grid), title_box, 0, devices_line++, 3, 1);
+        gtk_grid_attach(GTK_GRID(grid), title_box, 0, line++, 3, 1);
         dt_free(label_text);
 
         GtkWidget *enable_label = gtk_label_new(_("Enable"));
         gtk_widget_set_halign(enable_label, GTK_ALIGN_START);
         gtk_widget_set_hexpand(enable_label, TRUE);
-        gtk_grid_attach(GTK_GRID(devices_grid), enable_label, 0, devices_line, 1, 1);
+        gtk_widget_set_margin_start(enable_label, DT_PIXEL_APPLY_DPI(24));
+        gtk_grid_attach(GTK_GRID(grid), enable_label, 0, line, 1, 1);
         GtkWidget *enable_labdef = gtk_label_new("");
         gtk_widget_set_name(enable_labdef, "preference_non_default");
-        gtk_grid_attach(GTK_GRID(devices_grid), enable_labdef, 1, devices_line, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), enable_labdef, 1, line, 1, 1);
 
         GtkWidget *enable = gtk_check_button_new();
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), dt_opencl_detected_device_enabled(dev));
         gtk_widget_set_tooltip_text(enable, _("Enable or disable OpenCL processing for this GPU"));
         g_signal_connect(G_OBJECT(enable), "toggled", G_CALLBACK(_opencl_device_enabled_callback),
                          GINT_TO_POINTER(dev));
-        gtk_grid_attach(GTK_GRID(devices_grid), enable, 2, devices_line++, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), enable, 2, line++, 1, 1);
 
         GtkWidget *pinned_memory_label = gtk_label_new(_("pinned memory"));
         gtk_widget_set_halign(pinned_memory_label, GTK_ALIGN_START);
         gtk_widget_set_hexpand(pinned_memory_label, TRUE);
-        gtk_grid_attach(GTK_GRID(devices_grid), pinned_memory_label, 0, devices_line, 1, 1);
+        gtk_widget_set_margin_start(pinned_memory_label, DT_PIXEL_APPLY_DPI(24));
+        gtk_grid_attach(GTK_GRID(grid), pinned_memory_label, 0, line, 1, 1);
         GtkWidget *pinned_memory_labdef = gtk_label_new("");
         gtk_widget_set_name(pinned_memory_labdef, "preference_non_default");
-        gtk_grid_attach(GTK_GRID(devices_grid), pinned_memory_labdef, 1, devices_line, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), pinned_memory_labdef, 1, line, 1, 1);
 
         GtkWidget *pinned_memory = gtk_check_button_new();
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pinned_memory),
@@ -705,27 +715,51 @@ void dt_gui_preferences_show()
         gtk_widget_set_tooltip_text(pinned_memory, _("Use pinned host memory for OpenCL transfers on this GPU"));
         g_signal_connect(G_OBJECT(pinned_memory), "toggled", G_CALLBACK(_opencl_device_pinned_memory_callback),
                          GINT_TO_POINTER(dev));
-        gtk_grid_attach(GTK_GRID(devices_grid), pinned_memory, 2, devices_line++, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), pinned_memory, 2, line++, 1, 1);
 
-        GtkWidget *headroom_label = gtk_label_new(_("GPU vRAM headroom (MiB)"));
+        // Integrated GPUs have no vRAM of their own: they share system RAM with the OS, the
+        // desktop and every other process. Label the setting accordingly so users don't read
+        // this as a dedicated GPU memory budget on hardware where that concept doesn't apply.
+        GtkWidget *headroom_label = gtk_label_new(device->host_unified_memory
+                                                  ? _("GPU memory headroom, shared with system RAM (MiB)")
+                                                  : _("GPU vRAM headroom (MiB)"));
         gtk_widget_set_halign(headroom_label, GTK_ALIGN_START);
         gtk_widget_set_hexpand(headroom_label, TRUE);
-        gtk_grid_attach(GTK_GRID(devices_grid), headroom_label, 0, devices_line, 1, 1);
+        gtk_widget_set_margin_start(headroom_label, DT_PIXEL_APPLY_DPI(24));
+        gtk_grid_attach(GTK_GRID(grid), headroom_label, 0, line, 1, 1);
         GtkWidget *headroom_labdef = gtk_label_new("");
         gtk_widget_set_name(headroom_labdef, "preference_non_default");
-        gtk_grid_attach(GTK_GRID(devices_grid), headroom_labdef, 1, devices_line, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), headroom_labdef, 1, line, 1, 1);
 
         GtkWidget *headroom = gtk_spin_button_new_with_range(0, G_MAXINT, 1);
         gtk_widget_set_hexpand(headroom, FALSE);
         gtk_spin_button_set_digits(GTK_SPIN_BUTTON(headroom), 0);
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(headroom), dt_opencl_detected_device_headroom(dev));
-        gtk_widget_set_tooltip_text(headroom, _("GPU memory reserved for the system and other applications"));
+        gtk_widget_set_tooltip_text(headroom, device->host_unified_memory
+                                    ? _("This GPU has no dedicated vRAM -- it shares memory with the "
+                                        "system. Memory reserved here for the OS, desktop and other "
+                                        "applications")
+                                    : _("GPU memory reserved for the system and other applications"));
         g_signal_connect(G_OBJECT(headroom), "value-changed", G_CALLBACK(_opencl_device_headroom_callback),
                          GINT_TO_POINTER(dev));
-        gtk_grid_attach(GTK_GRID(devices_grid), headroom, 2, devices_line++, 1, 1);
-      }
+        gtk_grid_attach(GTK_GRID(grid), headroom, 2, line++, 1, 1);
 
-      gtk_grid_attach(GTK_GRID(grid), devices_box, 0, line++, 3, 1);
+        // Pinned memory and headroom only make sense for a GPU that OpenCL will actually use --
+        // tie their sensitivity to the "Enable" toggle so a disabled device can't leave the user
+        // editing settings that have no effect. _opencl_device_enabled_callback() keeps this in
+        // sync on every toggle.
+        GList *dependents = NULL;
+        dependents = g_list_append(dependents, pinned_memory_label);
+        dependents = g_list_append(dependents, pinned_memory_labdef);
+        dependents = g_list_append(dependents, pinned_memory);
+        dependents = g_list_append(dependents, headroom_label);
+        dependents = g_list_append(dependents, headroom_labdef);
+        dependents = g_list_append(dependents, headroom);
+        g_object_set_data_full(G_OBJECT(enable), "dependent-widgets", dependents, (GDestroyNotify)g_list_free);
+
+        const gboolean device_enabled = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(enable));
+        for(GList *l = dependents; l; l = l->next) gtk_widget_set_sensitive(GTK_WIDGET(l->data), device_enabled);
+      }
     }
   }
 

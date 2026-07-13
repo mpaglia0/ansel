@@ -124,14 +124,19 @@
 @define-color plugin_label_color @grey_95;
 @define-color collapsible_bg_color @grey_55;
 
+/* orange accent -- shared across the UI (bauhaus slider values, module enable
+   buttons, selection highlights, checkmarks...), not specific to any one widget */
+@define-color orange_dark #bf8000;
+@define-color orange_light #ffbf40;
+
 /* Bauhaus Controls */
 @define-color bauhaus_bg @recessed_color_bg;
 @define-color bauhaus_fg shade(@fg_color, 0.95);
 @define-color bauhaus_border @recessed_color_border;
 @define-color bauhaus_indicator_border @grey_50;
 @define-color bauhaus_fill @grey_70;
-@define-color bauhaus_value #bf8000;
-@define-color bauhaus_value_text #ffbf40;
+@define-color bauhaus_value @orange_dark;
+@define-color bauhaus_value_text @orange_light;
 @define-color bauhaus_bg_hover @grey_80;
 @define-color bauhaus_bg_focus @grey_80;
 @define-color bauhaus_fg_hover @grey_100;
@@ -668,8 +673,16 @@ dialog .sidebar row:selected:hover label,
   background-color: @danger;
 }
 
-#module-header .dt_module_btn.dt_iop_enable_button {
+/* Wraps the enable togglebutton (see imageop.c) so the visual nudge below lands on
+   the wrapper's layout, not on the button's own CSS margin -- the button's custom
+   draw() reinterprets its own margin a second time as a paint-only offset, which
+   would paint its icon outside its real GTK allocation (the box hover/click hit-test
+   against) if the button carried this margin itself. */
+#module-header .dt_iop_enable_button_box {
   margin: 0 3px 0 -6px;
+}
+
+#module-header .dt_module_btn.dt_iop_enable_button {
   color: @grey_50;
   background: transparent;
   border-color: transparent;
@@ -681,16 +694,19 @@ dialog .sidebar row:selected:hover label,
   margin: 0 3px 0 -6px;
 }
 
+#module-header .dt_iop_enable_button:checked {
+  color: @orange_dark;
+}
+
 #module-header .dt_iop_enable_button:hover,
 #module-header .dt_iop_enable_button:active,
-#module-header .dt_iop_enable_button:checked,
 #module-header .dt_iop_enable_button:selected {
-  color: @button_fg;
+  color: @orange_light;
 }
 
 #module-header .dt_iop_enable_button.dt_iop_enable_forced_on,
 #picker-grey {
-  color: @grey_50;
+  color: @orange_light;
 }
 
 .dt_gslider,
@@ -921,7 +937,7 @@ calendar:selected {
 }
 
 calendar.highlight {
-  color: @bauhaus_value_text;
+  color: @orange_light;
 }
 
 popover spinbutton {
@@ -1619,14 +1635,14 @@ treeview *:checked:not(check) {
 
 /*
 treeview *:checked:not(check) {
-  background-color: alpha(@bauhaus_value, 0.42);
+  background-color: alpha(@orange_dark, 0.42);
   color: @grey_10;
   caret-color: @fg_color;
 }
 */
 
 treeview *:selected:not(check) {
-  background-color: alpha(@bauhaus_value, 0.5);
+  background-color: alpha(@orange_dark, 0.5);
 }
 
 /* Drag-and-drop target row (collect.c folder/tag rows, set via gtk_tree_view_set_drag_dest_row).
@@ -1635,7 +1651,7 @@ treeview *:selected:not(check) {
  * must style the border, overriding the global `treeview { border: none }` reset above. Mirrors
  * Adwaita's `treeview.view:drop(active)`. */
 treeview.view:drop(active) {
-  border: 2px solid @bauhaus_value;
+  border: 2px solid @orange_dark;
 }
 
 /* Inactive/Disabled Toggle Overrides */
@@ -1715,7 +1731,7 @@ treeview check:checked,
 treeview check:selected,
 menuitem check:checked,
 menuitem check:selected {
-  color: @bauhaus_value_text;
+  color: @orange_light;
   border: 1px solid @recessed_color_border;
 }
 

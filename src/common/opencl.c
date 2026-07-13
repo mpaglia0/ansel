@@ -184,7 +184,7 @@ gboolean dt_opencl_use_pinned_memory(const int devid)
 {
   dt_opencl_t *cl = darktable.opencl;
   if(!cl->inited || devid < 0) return FALSE;
-  return cl->dev[devid].pinned_memory;
+  return cl->dev[devid].pinned_memory & DT_OPENCL_PINNING_ON;
 }
 
 gboolean dt_opencl_is_pinned_memory(cl_mem mem)
@@ -298,6 +298,8 @@ gboolean dt_opencl_read_device_config(const int devid)
     int forced_headroom = dt_conf_get_int(key_device);
     if(forced_headroom > 0) cl->dev[devid].forced_headroom = forced_headroom;
   }
+  else if(cl->dev[devid].host_unified_memory)
+    cl->dev[devid].forced_headroom = MAX(512ul, (size_t)dt_conf_get_int64("memory_opencl_headroom"));
   else // this is used if updating to 4.0 or fresh installs; see commenting _opencl_get_unused_device_mem()
     cl->dev[devid].forced_headroom = dt_conf_get_int64("memory_opencl_headroom");
 
@@ -392,6 +394,11 @@ int dt_opencl_set_detected_device_pinned_memory(const int detected, const gboole
 
   dt_opencl_t *cl = darktable.opencl;
   cl->detected_devs[detected].pinned_memory = pinned_memory;
+  // device->config_id is this device's live index into cl->dev[] (assigned at detection time,
+  // see dt_opencl_device_init()) -- apply immediately instead of only on the next restart, since
+  // dt_opencl_use_pinned_memory() reads cl->dev[], never cl->detected_devs[].
+  if(device->config_id >= 0 && device->config_id < cl->num_devs)
+    cl->dev[device->config_id].pinned_memory = pinned_memory;
   return 0;
 }
 
@@ -420,6 +427,15 @@ int dt_opencl_set_detected_device_headroom(const int detected, const size_t head
 
   dt_opencl_t *cl = darktable.opencl;
   cl->detected_devs[detected].forced_headroom = clamped_headroom;
+  // Same live-apply as pinned memory above: device->config_id is this device's index into
+  // cl->dev[], which dt_opencl_get_device_available() actually reads through used_available.
+  // dt_opencl_check_tuning() recomputes that from the value we just wrote, so the new headroom
+  // is in effect before this function returns instead of only after a restart.
+  if(device->config_id >= 0 && device->config_id < cl->num_devs)
+  {
+    cl->dev[device->config_id].forced_headroom = clamped_headroom;
+    dt_opencl_check_tuning(device->config_id);
+  }
   return 0;
 }
 
@@ -460,7 +476,7 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
   // setting sane/conservative defaults at first
   cl->dev[dev].avoid_atomics = 0;
   cl->dev[dev].micro_nap = 250;
-  cl->dev[dev].pinned_memory = DT_OPENCL_PINNING_OFF;
+  cl->dev[dev].pinned_memory = DT_OPENCL_PINNING_ON;
   cl->dev[dev].clroundup_wd = 16;
   cl->dev[dev].clroundup_ht = 16;
   cl->dev[dev].use_events = 1;
@@ -509,6 +525,13 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
 
   // test GPU availability, vendor, memory, image support etc:
   (cl->dlocl->symbols->dt_clGetDeviceInfo)(devid, CL_DEVICE_AVAILABLE, sizeof(cl_bool), &device_available, NULL);
+
+  // Queried early (before dt_opencl_read_device_config() below, which needs it to pick a sane
+  // default headroom on first run) rather than alongside the other capability queries further down.
+  cl_bool host_unified_memory = CL_FALSE;
+  (cl->dlocl->symbols->dt_clGetDeviceInfo)(devid, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof(cl_bool),
+                                           &host_unified_memory, NULL);
+  cl->dev[dev].host_unified_memory = (host_unified_memory == CL_TRUE);
 
   err = dt_opencl_get_device_info(cl, devid, CL_DEVICE_VENDOR, (void **)&vendor, &vendor_size);
   if(err != CL_SUCCESS)
@@ -730,6 +753,7 @@ static int dt_opencl_device_init(dt_opencl_t *cl, const int dev, cl_device_id *d
       detected->disabled = cl->dev[dev].disabled & 1;
       detected->pinned_memory = cl->dev[dev].pinned_memory;
       detected->forced_headroom = cl->dev[dev].forced_headroom;
+      detected->host_unified_memory = cl->dev[dev].host_unified_memory;
       cl->num_detected_devs++;
     }
   }

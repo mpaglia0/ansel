@@ -568,7 +568,7 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
   dt_dev_pixelpipe_t *const pipes[] = { dev->preview_pipe, dev->pipe };
 
   for(size_t i = 0; i < G_N_ELEMENTS(pipes); i++)
-    pipes[i]->running = 1;
+    dt_atomic_set_int(&pipes[i]->running, TRUE);
 
   // Infinite loop: run for as long as the worker thread is running.
   while(!dev->exit && dt_control_running())
@@ -799,7 +799,7 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
   }
 
   for(size_t i = 0; i < G_N_ELEMENTS(pipes); i++)
-    pipes[i]->running = 0;
+    dt_atomic_set_int(&pipes[i]->running, FALSE);
 }
 
 static int32_t dt_dev_process_job_run(dt_job_t *job)
