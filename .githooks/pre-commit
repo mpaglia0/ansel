@@ -17,8 +17,8 @@
 #   You should have received a copy of the GNU General Public License
 #   along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 #   
- Hash using its key as a search Regex, and its value as associated
- error message.
+#   Hash using its key as a search Regex, and its value as associated
+#   error message.
 #   
 declare -A PATTERNS;
 PATTERNS['src/external/rawspeed']="use --no-verify to change rawspeed";
