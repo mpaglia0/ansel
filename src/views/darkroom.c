@@ -2850,8 +2850,10 @@ int scrolled(dt_view_t *self, double x, double y, int up, int state, int delta_y
   if(dt_masks_get_visible_form(dev)
      && dt_masks_events_mouse_scrolled(dev->gui_module, x, y, up, state, delta_y))
   {
-    // Scroll on masks changes their size, therefore mask parameters and image output.
-    dt_gui_throttle_queue(dev, _delayed_history_commit, dev);
+    dt_control_queue_redraw_center();
+    if(!dev->form_gui->creation)
+      dt_gui_throttle_queue(dev, _delayed_history_commit, dev);
+
     return TRUE;
   }
 
