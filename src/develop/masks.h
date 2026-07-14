@@ -388,6 +388,11 @@ typedef struct dt_masks_form_t
   // cached center of gravity
   // in normalized coordinates in raw input space
   float gravity_center[2];
+  // FALSE means gravity_center/area are stale and must be recomputed before being read
+  // (see dt_masks_form_update_gravity_center() / dt_masks_form_invalidate_gravity_center()).
+  // Lets bulk paths (loading history, undo/redo) defer the actual computation to the one
+  // GUI hit-testing read site instead of paying it for every form up front.
+  gboolean gravity_center_valid;
 
   // cached shape area, taken as a weight estimator to get
   // the gravity center of multi-shapes by combining
@@ -1090,6 +1095,10 @@ void dt_masks_iop_update(struct dt_iop_module_t *module);
 void dt_masks_iop_combo_populate(GtkWidget *w, void *module);
 void dt_masks_iop_use_same_as(struct dt_iop_module_t *module, struct dt_iop_module_t *src);
 uint64_t dt_masks_group_get_hash(uint64_t hash, dt_masks_form_t *form);
+/** Same as dt_masks_group_get_hash(), but hashes only the form's own content: for a group,
+ * member references (id/state/opacity) instead of recursing into each member's content.
+ * Meant for walking a flat list where every member already gets its own top-level call. */
+uint64_t dt_masks_form_get_own_hash(uint64_t hash, const dt_masks_form_t *form);
 
 void dt_masks_form_delete(struct dt_iop_module_t *module, dt_masks_form_t *grp, dt_masks_form_t *form);
 int dt_masks_form_change_opacity(dt_masks_form_t *form, int parentid, int up, const int flow);
@@ -1157,6 +1166,10 @@ float dt_masks_form_get_interaction_value(dt_masks_form_group_t *form_group,
                                           dt_masks_interaction_t interaction);
 gboolean dt_masks_form_get_gravity_center(const struct dt_masks_form_t *form, float center[2], float *area);
 void dt_masks_form_update_gravity_center(struct dt_masks_form_t *form);
+/** Marks gravity_center/area stale instead of recomputing them right away. Use for bulk
+ * paths (loading history, undo/redo) that swap in many forms at once; the one GUI
+ * hit-testing read site recomputes lazily on first actual use. */
+void dt_masks_form_invalidate_gravity_center(struct dt_masks_form_t *form);
 int dt_masks_center_view_on_form(struct dt_develop_t *dev, const struct dt_masks_form_t *form);
 float dt_masks_form_set_interaction_value(dt_masks_form_group_t *form_group,
                                           dt_masks_interaction_t interaction,

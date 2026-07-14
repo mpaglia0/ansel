@@ -2073,6 +2073,11 @@ gboolean dt_dev_read_history_ext(dt_develop_t *dev, const int32_t imgid)
 
   dt_dev_masks_list_change(dev);
   dt_dev_masks_update_hash(dev);
+  // The call above seeds dev->forms_hash from a freshly-zeroed dev, which always compares
+  // as "changed" the first time -- that's establishing the baseline against what was just
+  // loaded from disk, not a pending edit. Clear it so the first mask interaction (even a
+  // no-op selection click) doesn't trigger a spurious history commit + full DB rewrite.
+  dev->forms_changed = FALSE;
 
   dt_dev_set_history_end_ext(dev, history_end);
   // Note: dt_dev_set_history_end already updates dev->history_hash
