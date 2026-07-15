@@ -130,6 +130,7 @@ void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)
   memset(dev, 0, sizeof(dt_develop_t));
   dt_dev_set_history_hash(dev, DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_pthread_rwlock_init(&dev->history_mutex, NULL);
+  dt_pthread_rwlock_set_name(&dev->history_mutex, "history_mutex"); // find_history_mutex_blocker, temporary
   dt_pthread_rwlock_init(&dev->masks_mutex, NULL);
   dt_pthread_mutex_init(&dev->transient_params_mutex, NULL);
 
@@ -163,14 +164,50 @@ void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)
   dev->proxy.wb_is_D65 = TRUE; // don't display error messages until we know for sure it's FALSE
   dev->proxy.wb_coeffs[0] = 0.f;
 
-  dev->rawoverexposed.mode = dt_conf_get_int("darkroom/ui/rawoverexposed/mode");
-  dev->rawoverexposed.colorscheme = dt_conf_get_int("darkroom/ui/rawoverexposed/colorscheme");
-  dev->rawoverexposed.threshold = dt_conf_get_float("darkroom/ui/rawoverexposed/threshold");
+  // Overlay toolbar prefs have been found corrupted on disk (heap-looking int garbage, zeroed
+  // floats). An out-of-enum mode/colorscheme indexes the fixed-size color tables of
+  // iop/rawoverexposed.c out of bounds and selects diverging CPU/OpenCL preview paths (the CL
+  // switch defaults to false color), painting the whole image as a CFA checkerboard. An invalid
+  // enum means the whole stored group is untrustworthy: restore the group defaults instead of
+  // clamping, so a corrupted threshold does not survive as a legal-looking value.
+  const int raw_mode = dt_conf_get_int("darkroom/ui/rawoverexposed/mode");
+  const int raw_colorscheme = dt_conf_get_int("darkroom/ui/rawoverexposed/colorscheme");
+  const float raw_threshold = dt_conf_get_float("darkroom/ui/rawoverexposed/threshold");
+  if(raw_mode >= DT_DEV_RAWOVEREXPOSED_MODE_MARK_CFA && raw_mode <= DT_DEV_RAWOVEREXPOSED_MODE_FALSECOLOR
+     && raw_colorscheme >= DT_DEV_RAWOVEREXPOSED_RED && raw_colorscheme <= DT_DEV_RAWOVEREXPOSED_BLACK
+     && raw_threshold >= 0.f && raw_threshold <= 2.f)
+  {
+    dev->rawoverexposed.mode = raw_mode;
+    dev->rawoverexposed.colorscheme = raw_colorscheme;
+    dev->rawoverexposed.threshold = raw_threshold;
+  }
+  else
+  {
+    dev->rawoverexposed.mode = DT_DEV_RAWOVEREXPOSED_MODE_MARK_CFA;
+    dev->rawoverexposed.colorscheme = DT_DEV_RAWOVEREXPOSED_RED;
+    dev->rawoverexposed.threshold = 1.f;
+  }
 
-  dev->overexposed.mode = dt_conf_get_int("darkroom/ui/overexposed/mode");
-  dev->overexposed.colorscheme = dt_conf_get_int("darkroom/ui/overexposed/colorscheme");
-  dev->overexposed.lower = dt_conf_get_float("darkroom/ui/overexposed/lower");
-  dev->overexposed.upper = dt_conf_get_float("darkroom/ui/overexposed/upper");
+  const int over_mode = dt_conf_get_int("darkroom/ui/overexposed/mode");
+  const int over_colorscheme = dt_conf_get_int("darkroom/ui/overexposed/colorscheme");
+  const float over_lower = dt_conf_get_float("darkroom/ui/overexposed/lower");
+  const float over_upper = dt_conf_get_float("darkroom/ui/overexposed/upper");
+  if(over_mode >= DT_CLIPPING_PREVIEW_GAMUT && over_mode <= DT_CLIPPING_PREVIEW_SATURATION
+     && over_colorscheme >= DT_DEV_OVEREXPOSED_BLACKWHITE && over_colorscheme <= DT_DEV_OVEREXPOSED_PURPLEGREEN
+     && over_lower >= -32.f && over_lower <= -4.f && over_upper >= 0.f && over_upper <= 100.f)
+  {
+    dev->overexposed.mode = over_mode;
+    dev->overexposed.colorscheme = over_colorscheme;
+    dev->overexposed.lower = over_lower;
+    dev->overexposed.upper = over_upper;
+  }
+  else
+  {
+    dev->overexposed.mode = DT_CLIPPING_PREVIEW_GAMUT;
+    dev->overexposed.colorscheme = DT_DEV_OVEREXPOSED_REDBLUE;
+    dev->overexposed.lower = -12.69f;
+    dev->overexposed.upper = 99.99f;
+  }
 
   if(dev->gui_attached)
   {
@@ -281,14 +318,21 @@ void dt_dev_cleanup(dt_develop_t *dev)
 
   dt_pthread_rwlock_destroy(&dev->masks_mutex);
 
-  dt_conf_set_int("darkroom/ui/rawoverexposed/mode", dev->rawoverexposed.mode);
-  dt_conf_set_int("darkroom/ui/rawoverexposed/colorscheme", dev->rawoverexposed.colorscheme);
-  dt_conf_set_float("darkroom/ui/rawoverexposed/threshold", dev->rawoverexposed.threshold);
+  // Overlay toolbar prefs may only be persisted by a gui_attached develop: transient devs
+  // (export, styles, snapshots, history copies) never expose the toolbar, run on worker
+  // threads, and would keep re-writing these keys on every background job — one corrupted
+  // or racing write is then resurrected as the user's settings at every later startup.
+  if(dev->gui_attached)
+  {
+    dt_conf_set_int("darkroom/ui/rawoverexposed/mode", dev->rawoverexposed.mode);
+    dt_conf_set_int("darkroom/ui/rawoverexposed/colorscheme", dev->rawoverexposed.colorscheme);
+    dt_conf_set_float("darkroom/ui/rawoverexposed/threshold", dev->rawoverexposed.threshold);
 
-  dt_conf_set_int("darkroom/ui/overexposed/mode", dev->overexposed.mode);
-  dt_conf_set_int("darkroom/ui/overexposed/colorscheme", dev->overexposed.colorscheme);
-  dt_conf_set_float("darkroom/ui/overexposed/lower", dev->overexposed.lower);
-  dt_conf_set_float("darkroom/ui/overexposed/upper", dev->overexposed.upper);
+    dt_conf_set_int("darkroom/ui/overexposed/mode", dev->overexposed.mode);
+    dt_conf_set_int("darkroom/ui/overexposed/colorscheme", dev->overexposed.colorscheme);
+    dt_conf_set_float("darkroom/ui/overexposed/lower", dev->overexposed.lower);
+    dt_conf_set_float("darkroom/ui/overexposed/upper", dev->overexposed.upper);
+  }
 }
 
 static gboolean _update_darkroom_roi(dt_develop_t *dev, dt_dev_pixelpipe_t *pipe, int *x, int *y, int *wd, int *ht,

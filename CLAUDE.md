@@ -141,6 +141,22 @@ teardown. Any other GUI-thread code that tears down darkroom pipe state must wai
 same way — `dev->exit`/`pipe->shutdown` alone do not guarantee the worker has stopped touching a
 pipe.
 
+### History items are refcounted; `history_mutex` resync contention is a known issue
+
+`dt_dev_history_item_t` now carries a `refcount` and must be constructed exclusively through
+`dt_dev_history_item_create()` — never a bare `calloc` (mirrors the masks-forms rule below;
+`dt_dev_history_cow_touch()` clones a shared item before an in-place mutation, mirroring
+`dt_masks_cow_touch()`).
+
+`dt_dev_pixelpipe_change()` (worker thread, called from `dt_dev_darkroom_pipeline()`) holds
+`dev->history_mutex` as **reader** for the entire O(nodes × history) pipe resync — measured over
+200ms under mask-heavy history during active editing — which starves the GUI-thread writer
+(`dt_dev_add_history_item_ext()`) for the same duration on every edit (a scroll on exposure, a
+mask drag). Still open. See `doc/reorganisation.md` ("History item refcounting and the
+`history_mutex` contention") for the full diagnosis and status, and the named-rwlock diagnostic
+in `common/dtpthread.h` (`dt_pthread_rwlock_set_name()`, opt-in per lock, combine with
+`-d history`) to reproduce the measurement.
+
 ### `piece->iwidth`/`iheight` go stale on the export pipe specifically
 
 `dt_dev_pixelpipe_create_nodes()` copies `pipe->iwidth`/`iheight` into each `piece->iwidth`/`iheight`

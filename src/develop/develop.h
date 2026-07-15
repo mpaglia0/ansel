@@ -274,6 +274,12 @@ typedef struct dt_develop_t
   // history stack
   GList *history;
 
+  // Set to 1 while a dt_dev_write_history() background job is queued or running for this
+  // dev, 0 otherwise. Lets dt_dev_write_history() skip queuing a redundant full history+masks
+  // rewrite when one is already in flight -- the pending job reads dev->history live when it
+  // runs, so it always picks up whatever was last committed. See dev_history.c.
+  dt_atomic_int history_write_pending;
+
   // operations pipeline
   int32_t iop_instance;
   GList *iop;

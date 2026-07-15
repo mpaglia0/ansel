@@ -16,6 +16,7 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
+#include "common/atomic.h"
 #include "common/history.h"
 #include "common/history_merge.h"
 
@@ -63,6 +64,12 @@ typedef struct dt_dev_history_item_t
   int num; // num of history on database
 
   uint64_t hash; // module params hash.
+
+  // Refcount, mirroring dt_masks_form_t: dev->history holds one reference per element. See
+  // dt_dev_history_cow_touch(): before mutating an item in place (the "reuse previous entry"
+  // path), check refcount -- if shared with something else holding a reference, clone first
+  // and mutate the clone instead.
+  dt_atomic_int refcount;
 } dt_dev_history_item_t;
 
 
@@ -76,11 +83,40 @@ typedef struct dt_dev_history_item_t
 void dt_dev_history_free_history(struct dt_develop_t *dev);
 
 /**
- * @brief Free a single history item (used as GList free callback).
+ * @brief Allocate a fresh, blank history item with refcount 1.
+ *
+ * The only correct way to create a new (not duplicated-from-an-existing-one) history item --
+ * centralizes the calloc + refcount init so no caller pokes dt_dev_history_item_t::refcount
+ * directly. Returns NULL on allocation failure.
+ */
+dt_dev_history_item_t *dt_dev_history_item_create(void);
+
+/**
+ * @brief Release a reference to a history item (used as GList free callback).
+ *
+ * Decrements refcount; only frees params/blend_params/forms and the item itself once the
+ * last reference drops.
  *
  * @param data Pointer to @ref dt_dev_history_item_t.
  */
 void dt_dev_free_history_item(gpointer data);
+
+/**
+ * @brief Take a reference on a history item. Pair with dt_dev_free_history_item().
+ */
+dt_dev_history_item_t *dt_dev_history_item_ref(dt_dev_history_item_t *item);
+
+/**
+ * @brief Copy-on-write gate for mutating a history item in place.
+ *
+ * If @p hist is exclusively owned by dev->history (refcount <= 1), returns it unchanged --
+ * safe to mutate directly. If it's shared with an outstanding snapshot (a slow reader like a
+ * pipe resync or the background DB-write job), clones it, splices the clone into dev->history
+ * in place of the original (and re-points any pipe's last_history_item that referenced it),
+ * releases the original reference, and returns the clone. Callers must mutate the *returned*
+ * pointer, never the one passed in.
+ */
+dt_dev_history_item_t *dt_dev_history_cow_touch(struct dt_develop_t *dev, dt_dev_history_item_t *hist);
 
 /**
  * @brief Fill/refresh a history item from explicit params and apply them to the module.

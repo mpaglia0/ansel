@@ -905,7 +905,7 @@ static int _styles_rebuild_history_from_items(dt_develop_t *dev_src, GList *appl
         = dt_dev_get_module_instance(dev_src, style_item->operation, multi_name, style_item->multi_priority);
     if(IS_NULL_PTR(module)) continue;
 
-    dt_dev_history_item_t *hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));
+    dt_dev_history_item_t *hist = dt_dev_history_item_create();
     if(IS_NULL_PTR(hist)) return 1;
 
     dev_src->history = g_list_append(dev_src->history, hist);

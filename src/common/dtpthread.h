@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _DEBUG
 
@@ -398,13 +399,40 @@ typedef struct dt_pthread_rwlock_t
   pthread_rwlock_t lock;
   pthread_t writer;
   int writer_depth;
+  // Temporary diagnostic hook (find_history_mutex_blocker): NULL for every lock except the
+  // ones explicitly named via dt_pthread_rwlock_set_name(). Zero overhead for unnamed locks
+  // (one pointer compare). last_holder_tid is best-effort/racy by design -- it's a debug hint
+  // for "who was probably holding this right before I blocked", not a correctness primitive.
+  const char *name;
+  long last_holder_tid;
+  gboolean last_holder_was_writer;
+  // Tracks the reader holding this lock the longest, to tell apart "the writer is queued
+  // behind a reader that grabbed it a moment ago" from "some reader has been sitting on this
+  // for the whole wait" -- the single last_holder_tid above can't distinguish those, since it
+  // reflects whoever *most recently acquired*, not whoever has been holding it longest.
+  int active_reader_count;
+  double oldest_active_reader_since;
+  long oldest_active_reader_tid;
 } dt_pthread_rwlock_t;
 
 static inline int dt_pthread_rwlock_init(dt_pthread_rwlock_t *lock, const pthread_rwlockattr_t *attr)
 {
   lock->writer = 0;
   lock->writer_depth = 0;
+  lock->name = NULL;
+  lock->last_holder_tid = 0;
+  lock->last_holder_was_writer = FALSE;
+  lock->active_reader_count = 0;
+  lock->oldest_active_reader_since = 0.0;
+  lock->oldest_active_reader_tid = 0;
   return pthread_rwlock_init(&lock->lock, attr);
+}
+
+// Opt-in: call once after dt_pthread_rwlock_init() to enable wait-time diagnostics on this
+// specific lock instance. Temporary, for find_history_mutex_blocker -- remove once resolved.
+static inline void dt_pthread_rwlock_set_name(dt_pthread_rwlock_t *lock, const char *name)
+{
+  lock->name = name;
 }
 
 static inline int dt_pthread_rwlock_destroy(dt_pthread_rwlock_t *lock)
@@ -420,6 +448,16 @@ static inline int dt_pthread_rwlock_unlock(dt_pthread_rwlock_t *rwlock)
     return 0;
   }
   const gboolean writer_was_self = pthread_equal(rwlock->writer, pthread_self());
+  if(rwlock->name && !writer_was_self)
+  {
+    // A reader unlocking (writer_was_self is only true for a thread that took the write lock;
+    // recursive-writer-as-reader re-entry already returned above via writer_depth).
+    if(__sync_fetch_and_sub(&rwlock->active_reader_count, 1) == 1)
+    {
+      rwlock->oldest_active_reader_since = 0.0;
+      rwlock->oldest_active_reader_tid = 0;
+    }
+  }
   const int res = pthread_rwlock_unlock(&rwlock->lock);
   if(writer_was_self)
   {
@@ -429,12 +467,57 @@ static inline int dt_pthread_rwlock_unlock(dt_pthread_rwlock_t *rwlock)
   return res;
 }
 
+// Diagnostic-only. This header is included too early in the chain (darktable.h includes it
+// before declaring dt_debug_thread_t/darktable_t/dt_print) for dt_print() to be callable
+// directly from the inline functions below -- so the actual logging is delegated to these two
+// non-inline helpers, implemented in dtpthread.c (which, being a .c file and not part of the
+// header cycle, can include common/darktable.h and call dt_print(DT_DEBUG_HISTORY, ...) there).
+// This makes the traces respect `-d history` like every other diagnostic instead of always
+// firing via a raw fprintf. Only ever called for locks opted in via dt_pthread_rwlock_set_name();
+// zero-cost (one pointer compare) for every other lock. Temporary, for
+// find_history_mutex_blocker -- remove once resolved.
+void _dt_pthread_rwlock_diag_log_rdlock(const char *name, unsigned long tid, double wait_ms,
+                                         unsigned long prev_holder, gboolean prev_was_writer);
+void _dt_pthread_rwlock_diag_log_wrlock(const char *name, unsigned long tid, double wait_ms,
+                                         unsigned long prev_holder, gboolean prev_was_writer,
+                                         int active_readers, unsigned long oldest_reader_tid,
+                                         double oldest_reader_age_ms);
+
+static inline double _dt_pthread_rwlock_diag_now(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
 static inline int dt_pthread_rwlock_rdlock(dt_pthread_rwlock_t *rwlock)
 {
   if(pthread_equal(rwlock->writer, pthread_self()) && rwlock->writer_depth >= 1)
   {
     rwlock->writer_depth++;
     return 0;
+  }
+  if(rwlock->name)
+  {
+    const double _start = _dt_pthread_rwlock_diag_now();
+    const long _prev_holder = rwlock->last_holder_tid;
+    const gboolean _prev_was_writer = rwlock->last_holder_was_writer;
+    const int res = pthread_rwlock_rdlock(&rwlock->lock);
+    const double _wait_ms = (_dt_pthread_rwlock_diag_now() - _start) * 1000.0;
+    if(_wait_ms > 1.0)
+      _dt_pthread_rwlock_diag_log_rdlock(rwlock->name, (unsigned long)pthread_self(), _wait_ms,
+                                          (unsigned long)_prev_holder, _prev_was_writer);
+    if(!res)
+    {
+      rwlock->last_holder_tid = (long)pthread_self();
+      rwlock->last_holder_was_writer = FALSE;
+      if(__sync_fetch_and_add(&rwlock->active_reader_count, 1) == 0)
+      {
+        rwlock->oldest_active_reader_since = _dt_pthread_rwlock_diag_now();
+        rwlock->oldest_active_reader_tid = (long)pthread_self();
+      }
+    }
+    return res;
   }
   return pthread_rwlock_rdlock(&rwlock->lock);
 }
@@ -445,6 +528,29 @@ static inline int dt_pthread_rwlock_wrlock(dt_pthread_rwlock_t *rwlock)
   {
     rwlock->writer_depth++;
     return 0;
+  }
+  if(rwlock->name)
+  {
+    const double _start = _dt_pthread_rwlock_diag_now();
+    const long _prev_holder = rwlock->last_holder_tid;
+    const gboolean _prev_was_writer = rwlock->last_holder_was_writer;
+    const int _readers_now = rwlock->active_reader_count;
+    const long _oldest_reader_tid = rwlock->oldest_active_reader_tid;
+    const double _oldest_reader_age_ms
+        = _readers_now > 0 ? (_start - rwlock->oldest_active_reader_since) * 1000.0 : 0.0;
+    const int res = pthread_rwlock_wrlock(&rwlock->lock);
+    const double _wait_ms = (_dt_pthread_rwlock_diag_now() - _start) * 1000.0;
+    if(_wait_ms > 1.0)
+      _dt_pthread_rwlock_diag_log_wrlock(rwlock->name, (unsigned long)pthread_self(), _wait_ms,
+                                          (unsigned long)_prev_holder, _prev_was_writer, _readers_now,
+                                          (unsigned long)_oldest_reader_tid, _oldest_reader_age_ms);
+    if(!res)
+    {
+      __sync_lock_test_and_set(&(rwlock->writer), pthread_self());
+      rwlock->last_holder_tid = (long)pthread_self();
+      rwlock->last_holder_was_writer = TRUE;
+    }
+    return res;
   }
   const int res = pthread_rwlock_wrlock(&rwlock->lock);
   if(!res)
