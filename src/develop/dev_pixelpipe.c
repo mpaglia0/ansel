@@ -1666,6 +1666,7 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe)
   // here (e.g. history-commit paths that resync the virtual pipe while still holding the write
   // lock). dt_pthread_rwlock_rdlock is same-thread-recursive for this exact case (see
   // dtpthread.h), so this proceeds immediately instead of deadlocking or deferring the sync.
+  const double _history_mutex_hold_start = dt_get_wtime();
   dt_pthread_rwlock_rdlock(&pipe->dev->history_mutex);
 
   // The realtime in-place path settles the format contract and the global hash itself (it must,
@@ -1707,6 +1708,11 @@ void dt_dev_pixelpipe_change(dt_dev_pixelpipe_t *pipe)
     dt_dev_pixelpipe_sync_no_history(pipe);
   }
   dt_dev_pixelpipe_set_history_hash(pipe, dt_dev_get_history_hash(pipe->dev));
+  const double _history_mutex_hold_ms = (dt_get_wtime() - _history_mutex_hold_start) * 1000.0;
+  if(_history_mutex_hold_ms > 1.0)
+    dt_print(DT_DEBUG_HISTORY,
+             "[dt_dev_pixelpipe_change] tid %lu pipe %s held history_mutex for %.2f ms (status 0x%x)\n",
+             (unsigned long)pthread_self(), type, _history_mutex_hold_ms, (unsigned)status);
   dt_pthread_rwlock_unlock(&pipe->dev->history_mutex);
 
   // Re-establish the buffer-format contract of the whole chain once, after whichever sync path

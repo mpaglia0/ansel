@@ -167,8 +167,8 @@ Here is a complete image lifecycle, assuming it is already imported into databas
   - Pipeline :
     1. create pipeline nodes for current history (handling multi-instanciation) through `dt_dev_pixelpipe_create_nodes()`,
     2. write the history items from `dt_develop_t.history` to `dt_dev_pixelpipe_iop_t` pipe pieces (nodes) through `dt_dev_pixelpipe_synch_all()` (update hashes internally),
-    3. validate the compatibility of previous/next module through `_seal_opencl_cache_policy()` by checking input/output between pieces `dt_iop_buffer_dsc_t`,
-    4. seal the module output RAM caching policy with `_seal_opencl_cache_policy()`,
+    3. validate the compatibility of previous/next module by checking input/output between pieces `dt_iop_buffer_dsc_t`, auto-disabling incompatible modules, through `dt_dev_pixelpipe_propagate_formats()`,
+    4. seal the module output RAM/OpenCL caching policy per node with `_seal_opencl_cache_policy()`,
     5. process modules if the pipeline history hash is not up-to-date with the development history hash ; modules write their image output and any requested raster-mask side-band output directly into pipeline cache,
     6. publish the final module output as the backbuffer hash `dt_dev_pixelpipe_t.backbuf` (this is descriptive, there is no buffer copy).
 5. On user parameter changes in GUI :
@@ -177,7 +177,7 @@ Here is a complete image lifecycle, assuming it is already imported into databas
     2. snapshot the internal module parameters in undo/redo stack and in the history entry,
     3. snapshot the state of pipeline forms (drawn masks) `dt_develop_t.forms`,
     4. update the global history hash and request a new pipeline <- history resynchronization (partial or complete),
-    5. immediately write the changed history in database from a parallel thread to not freeze the GUI.
+    5. request an asynchronous history write to database from a parallel thread (job) to not freeze the GUI — coalesced so rapid-fire commits (drag, scroll) collapse into a single write job instead of one per commit.
   2. pipeline will catch the global history hash change and figure out if it needs to run a new render,
   3. the pipeline rendering is recursive, so we call it from the last module :
     - if the hash of the last module output is found in pipeline cache, the rendering returns immediately and promote this output as `dt_dev_pixelpipe_t.backbuf`,
@@ -187,6 +187,32 @@ Notes: XMP files are interfaced with the library database, they are never used d
 
 
 ## Conclusion - Perspectives
+
+### History item refcounting and the `history_mutex` contention
+
+`dt_dev_history_item_t` is now refcounted the same way `dt_masks_form_t` already was (see
+`masks_history.c`): `dt_dev_history_item_create()` is the only constructor (initializes
+`refcount` to 1), `dt_dev_history_item_ref()` takes a reference, `dt_dev_free_history_item()` is
+unref-and-free-at-zero, and `dt_dev_history_cow_touch()` clones a shared item before mutating it
+in place (mirrors `dt_masks_cow_touch()`). This exists so that any future code that needs to hold
+a snapshot of `dev->history` across a slow operation (pipe resync, DB write job) can do so
+without a deep copy and without racing a GUI-thread mutation of the same item.
+
+The refcounting was introduced to attack a real, measured problem: `dt_dev_pixelpipe_change()`
+(the worker-thread resync function, called from `dt_dev_darkroom_pipeline()`) holds
+`dev->history_mutex` as a *reader* for the entire O(nodes × history) resync of a pipe, which
+routinely takes tens of ms and, under mask-heavy history stacks combined with active editing, has
+been measured over 200ms. Because `dt_dev_add_history_item_ext()` (the GUI-thread commit path)
+needs the *writer* lock on the same `history_mutex`, and the writer-preferring rwlock policy
+blocks new readers once a writer is queued, every GUI edit (a scroll on exposure, a mask drag)
+can stall for the full duration of whatever resync the worker thread happens to be mid-flight on.
+This is directly observable with the named-rwlock diagnostic added to `dt_pthread_rwlock_t`
+(`common/dtpthread.h`: `dt_pthread_rwlock_set_name()` + wait-time logging, opt-in per lock —
+`dev->history_mutex` is named in `dt_dev_init()`) combined with `-d history`.
+
+**Status: open.** The refcounting/COW infrastructure above is a prerequisite for resyncing a
+pipe against a snapshot of `dev->history` instead of holding `history_mutex` for the whole
+resync, which is the direction to pursue to remove this stall.
 
 The history is so far incrusted into the `dt_develop_t` object, with its own `history_end` and `history_mutex` lock. It mixes both module parameters history, and masks/forms history in a weird fashion. The history use to be scattered all over the software, with parts handled in SQL and parts handled in C. Now that everything is handled in C and the history handling methods have been contained in `history.c` and `dev_history.c`, it might be a good idea to move it entirely out of the `dt_develop_t` object to have it managed globally, like the pipeline cache, but behind an API that allows to track precisely the lifecycle of data and concurrent accesses. Writing history to database and to XMP is currently handled in separate, short-lived threads, this completely enclosed architecture would allow to have all history tasks (including reading) handled in parallel, while ensuring thread safety. 
 

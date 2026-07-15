@@ -130,6 +130,7 @@ void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)
   memset(dev, 0, sizeof(dt_develop_t));
   dt_dev_set_history_hash(dev, DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_pthread_rwlock_init(&dev->history_mutex, NULL);
+  dt_pthread_rwlock_set_name(&dev->history_mutex, "history_mutex"); // find_history_mutex_blocker, temporary
   dt_pthread_rwlock_init(&dev->masks_mutex, NULL);
   dt_pthread_mutex_init(&dev->transient_params_mutex, NULL);
 

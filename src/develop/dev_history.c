@@ -304,7 +304,7 @@ int dt_dev_history_item_from_source_history_item(dt_develop_t *dev_dest, dt_deve
     return 1;
   }
 
-  dt_dev_history_item_t *hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));
+  dt_dev_history_item_t *hist = dt_dev_history_item_create();
   if(IS_NULL_PTR(hist))
   {
     dt_print(DT_DEBUG_HISTORY | DT_DEBUG_VERBOSE,
@@ -518,6 +518,7 @@ GList *dt_history_duplicate(GList *hist)
     dt_dev_history_item_t *new = (dt_dev_history_item_t *)malloc(sizeof(dt_dev_history_item_t));
 
     memcpy(new, old, sizeof(dt_dev_history_item_t));
+    dt_atomic_set_int(&new->refcount, 1); // independent deep copy, not a shared reference
 
     dt_iop_module_t *module = (old->module) ? old->module : dt_iop_get_module(old->op_name);
 
@@ -865,7 +866,7 @@ gboolean dt_dev_add_history_item_ext(dt_develop_t *dev, struct dt_iop_module_t *
   if(is_new_item)
   {
     // Create a new history entry
-    hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));
+    hist = dt_dev_history_item_create();
     dev->history = g_list_append(dev->history, hist);
     hist->num = g_list_index(dev->history, hist);
     dt_print(DT_DEBUG_HISTORY, "[dt_dev_add_history_item_ext] new history entry added for %s at position %i\n",
@@ -873,8 +874,10 @@ gboolean dt_dev_add_history_item_ext(dt_develop_t *dev, struct dt_iop_module_t *
   }
   else
   {
-    // Reuse previous history entry
-    hist = (dt_dev_history_item_t *)last->data;
+    // Reuse previous history entry. Copy-on-write: a slow reader (pipe resync snapshot, DB
+    // write job snapshot) may still be holding a reference to this exact item -- clone before
+    // mutating if so, never mutate a shared item in place.
+    hist = dt_dev_history_cow_touch(dev, (dt_dev_history_item_t *)last->data);
 
     dt_print(DT_DEBUG_HISTORY, "[dt_dev_add_history_item_ext] history entry reused for %s at position %i\n",
              module->name(), hist->num);
@@ -966,7 +969,16 @@ void dt_dev_add_history_item_real(dt_develop_t *dev, dt_iop_module_t *module, gb
   dt_atomic_set_int(&dev->preview_pipe->shutdown, TRUE);
 
   dt_dev_undo_start_record(dev);
+  // Measures time actually spent blocked waiting for the lock (e.g. behind the
+  // background dt_dev_write_history() job holding it as reader) -- not time spent
+  // doing work while holding it. Threshold avoids logging the common sub-ms case.
+  const double _wrlock_wait_start = dt_get_wtime();
   dt_pthread_rwlock_wrlock(&dev->history_mutex);
+  const double _wrlock_wait_ms = (dt_get_wtime() - _wrlock_wait_start) * 1000.0;
+  if(_wrlock_wait_ms > 1.0)
+    dt_print(DT_DEBUG_HISTORY,
+             "[dt_dev_add_history_item_real] tid %lu (GUI thread) blocked %.2f ms acquiring history_mutex\n",
+             (unsigned long)pthread_self(), _wrlock_wait_ms);
   add_new_pipe_node = dt_dev_add_history_item_ext(dev, module, enable, FALSE);
   dt_pthread_rwlock_unlock(&dev->history_mutex);
   dt_dev_undo_end_record(dev);
@@ -1050,16 +1062,113 @@ void dt_dev_add_history_item_real(dt_develop_t *dev, dt_iop_module_t *module, gb
   dt_dev_write_history(dev, TRUE);
 }
 
+dt_dev_history_item_t *dt_dev_history_item_create(void)
+{
+  dt_dev_history_item_t *item = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));
+  if(IS_NULL_PTR(item)) return NULL;
+  dt_atomic_set_int(&item->refcount, 1);
+  return item;
+}
+
 void dt_dev_free_history_item(gpointer data)
 {
   dt_dev_history_item_t *item = (dt_dev_history_item_t *)data;
   if(IS_NULL_PTR(item)) return; // nothing to free
+
+  // Despite the name (kept so every existing g_list_free_full/GDestroyNotify call site gets
+  // refcount-safety for free), this is now dev_history's unref: dev->history and a form cloned
+  // by dt_dev_history_cow_touch each hold their own reference. Only the last one out actually
+  // frees the buffers.
+  if(dt_atomic_sub_int(&item->refcount, 1) != 1) return;
 
   dt_free(item->params);
   dt_free(item->blend_params);
   g_list_free_full(item->forms, (void (*)(void *))dt_masks_form_unref);
   item->forms = NULL;
   dt_free(item);
+}
+
+dt_dev_history_item_t *dt_dev_history_item_ref(dt_dev_history_item_t *item)
+{
+  if(IS_NULL_PTR(item)) return NULL;
+  dt_atomic_add_int(&item->refcount, 1);
+  return item;
+}
+
+// Same per-field duplication as dt_history_duplicate(), factored out for cow-touch's
+// single-item clone: fresh struct, own params/blend_params buffers, forms shared by reference
+// (already refcounted, cloned on write by dt_masks_cow_touch -- not on this snapshot).
+static dt_dev_history_item_t *_dt_dev_history_item_duplicate_one(const dt_dev_history_item_t *old)
+{
+  dt_dev_history_item_t *new_item = (dt_dev_history_item_t *)malloc(sizeof(dt_dev_history_item_t));
+  memcpy(new_item, old, sizeof(dt_dev_history_item_t));
+  dt_atomic_set_int(&new_item->refcount, 1); // fresh object: reset, don't inherit old's refcount
+
+  new_item->params = NULL;
+  if(old->params && old->params_size > 0)
+  {
+    new_item->params = malloc(old->params_size);
+    memcpy(new_item->params, old->params, old->params_size);
+  }
+
+  new_item->blend_params = NULL;
+  if(old->blend_params && old->blendop_params_size > 0)
+  {
+    new_item->blend_params = malloc(old->blendop_params_size);
+    memcpy(new_item->blend_params, old->blend_params, old->blendop_params_size);
+  }
+
+  new_item->forms = NULL;
+  if(old->forms)
+  {
+    new_item->forms = g_list_copy(old->forms);
+    for(GList *form_node = new_item->forms; form_node; form_node = g_list_next(form_node))
+      dt_masks_form_ref((dt_masks_form_t *)form_node->data);
+  }
+
+  return new_item;
+}
+
+dt_dev_history_item_t *dt_dev_history_cow_touch(dt_develop_t *dev, dt_dev_history_item_t *hist)
+{
+  if(IS_NULL_PTR(dev) || IS_NULL_PTR(hist)) return hist;
+  if(dt_atomic_get_int(&hist->refcount) <= 1) return hist;
+
+  // dt_pthread_rwlock_wrlock is same-thread-recursive (dtpthread.h), so this is safe whether
+  // or not the caller already holds history_mutex as writer (dt_dev_add_history_item_real
+  // does; other callers of dt_dev_add_history_item_ext may not).
+  dt_pthread_rwlock_wrlock(&dev->history_mutex);
+
+  GList *node = g_list_find(dev->history, hist);
+  if(IS_NULL_PTR(node))
+  {
+    // Not (yet) a member of dev->history: nothing to splice.
+    dt_pthread_rwlock_unlock(&dev->history_mutex);
+    return hist;
+  }
+
+  dt_dev_history_item_t *clone = _dt_dev_history_item_duplicate_one(hist);
+  node->data = clone;
+
+  // Raw pointer cache outside dev->history: each pipe's own last-synced-item marker (used by
+  // dt_dev_pixelpipe_synch_top to bound the resync range). dt_dev_pixelpipe_change() holds
+  // history_mutex for its whole resync, same as this splice, so a plain compare-and-assign is
+  // enough -- no concurrent access is possible.
+  dt_dev_pixelpipe_t *const pipes[] = { dev->pipe, dev->preview_pipe, dev->virtual_pipe };
+  for(size_t i = 0; i < G_N_ELEMENTS(pipes); i++)
+    if(pipes[i] && pipes[i]->last_history_item == hist)
+      pipes[i]->last_history_item = clone;
+
+  dt_pthread_rwlock_unlock(&dev->history_mutex);
+
+  dt_dev_free_history_item(hist); // releases dev->history's old reference (unref semantics)
+
+  return clone;
+}
+
+void dt_dev_history_release_snapshot(GList *snapshot)
+{
+  g_list_free_full(snapshot, dt_dev_free_history_item);
 }
 
 void dt_dev_history_free_history(dt_develop_t *dev)
@@ -1406,7 +1515,18 @@ static int _dt_dev_write_history_job_run(dt_job_t *job)
   dt_develop_t *d = dt_control_job_get_params(job);
   if(IS_NULL_PTR(d)) return 1;
   dt_pthread_rwlock_rdlock(&d->history_mutex);
+  const double _write_start = dt_get_wtime();
   dt_dev_write_history_ext(d, d->image_storage.id);
+  const double _write_ms = (dt_get_wtime() - _write_start) * 1000.0;
+  if(_write_ms > 1.0)
+    dt_print(DT_DEBUG_HISTORY,
+             "[_dt_dev_write_history_job_run] tid %lu full history+masks rewrite for image %i took %.2f ms\n",
+             (unsigned long)pthread_self(), d->image_storage.id, _write_ms);
+  // Clear before unlocking: dt_dev_add_history_item_real() always ends with a
+  // dt_dev_write_history() call after it releases its own write lock, and that call
+  // must never see history_write_pending still set from a write whose read already
+  // finished -- otherwise the commit it just made would silently never get queued.
+  dt_atomic_set_int(&d->history_write_pending, 0);
   dt_pthread_rwlock_unlock(&d->history_mutex);
   dt_dev_history_notify_change(d, d->image_storage.id);
   return 0;
@@ -1424,14 +1544,21 @@ void dt_dev_write_history(dt_develop_t *dev, gboolean async)
     return;
   }
 
+  // Coalesce: a write already queued or running for this dev will read dev->history/
+  // dev->forms live when it (finally) runs, so it necessarily picks up whatever is
+  // committed by the time this call happens. Queuing another one would just repeat the
+  // exact same full history+masks_history rewrite for no additional freshness.
+  if(dt_atomic_exch_int(&dev->history_write_pending, 1) != 0) return;
+
   dt_job_t *job = dt_control_job_create(&_dt_dev_write_history_job_run, "write history %d",
                                         dev->image_storage.id);
   dt_control_job_set_params(job, dev, NULL);
 
   if(dt_control_add_job(darktable.control, DT_JOB_QUEUE_USER_BG, job) != 0)
   {
-    // scheduling failed: dispose job and run synchronously
+    // scheduling failed: dispose job, clear the flag we just set, and run synchronously
     dt_control_job_dispose(job);
+    dt_atomic_set_int(&dev->history_write_pending, 0);
     dt_dev_write_history(dev, FALSE);
   }
 }
@@ -1837,7 +1964,7 @@ static void _process_history_db_entry(dt_develop_t *dev, const int32_t imgid, co
   int iop_order = dt_ioppr_get_iop_order(dev->iop_order_list, operation, multi_priority);
 
   // Init a bare minimal history entry
-  dt_dev_history_item_t *hist = (dt_dev_history_item_t *)calloc(1, sizeof(dt_dev_history_item_t));
+  dt_dev_history_item_t *hist = dt_dev_history_item_create();
   hist->module = NULL;
   hist->num = num;
   hist->iop_order = iop_order;
