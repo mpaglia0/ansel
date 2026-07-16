@@ -1714,7 +1714,7 @@ static void row_activated(GtkTreeView *view, GtkTreePath *path, GdkEventButton *
   get_number_of_rules(d);
   dt_lib_collect_rule_t *active_rule = get_active_rule(d);
   active_rule->typing = FALSE;
-  const int item = d->view_rule;
+  const int item = _combo_get_active_collection(active_rule->combo);
 
   gchar *text;
   gboolean order_request = FALSE;
