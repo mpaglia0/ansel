@@ -169,6 +169,25 @@ having `dt_dev_pixelpipe_set_input()` re-sync `iwidth`/`iheight` onto any alread
 `doc/resizing-scaling.md` for the full write-up; any other per-piece field seeded from `pipe->*` at
 node-creation time is exposed to the same ordering hazard.
 
+### `basebuffer` must crop using `roi_out`, not `roi_in`
+
+`iop/basebuffer.c` is the first module in the pipe: it slices the requested window out of the
+full-resolution mipmap-cache payload. Its `modify_roi_in()` unconditionally requests the whole
+image (`{0, 0, pipe->iwidth, pipe->iheight}`) — `roi_in` never carries an offset, since basebuffer
+needs the full frame available to crop from. The window actually requested downstream lives in
+`piece->roi_out`, not `piece->roi_in`. `process()`/`process_cl()` must read the crop offset (and
+the destination copy size) from `roi_out`, and use `pipe->iwidth`/`iheight` — not `roi_in->width`/
+`height`, which is always the full frame too — for the source row stride. Reading the offset from
+`roi_in` instead always crops from the sensor's true `(0,0)`: harmless whenever the requested
+window is itself near `(0,0)` (a fit-to-screen view, a barely-cropping module), silently wrong by
+the full requested offset otherwise (e.g. `iop/lens.cc`'s `scale` slider, whose backward-pass
+`roi_in.x/y` grows with the zoom amount) — every downstream module still looks internally
+consistent (sizes match, ROI planning round-trips cleanly), because each of them only reads
+buffer-relative pixels and never re-derives its own absolute position from `pipe->iwidth`/
+`iheight`. Parametric masks/forms don't go through this buffer-cropping path at all, so they stay
+correctly positioned even when the base image content is offset — a mismatch between a mask and
+the image it's drawn on is a symptom of this class of bug, not of the masking code.
+
 ---
 
 ## Masks / forms history

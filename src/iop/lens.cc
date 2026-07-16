@@ -955,10 +955,11 @@ int distort_transform(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     {
       float DT_ALIGNED_ARRAY buf[6];
       modifier->ApplySubpixelGeometryDistortion(points[i], points[i + 1], 1, 1, buf);
-      points[i] = buf[0];
+      // take green channel distortion, like distort_mask() does, so x and y come from the
+      // same color channel's distortion field instead of mixing red's x with green's y.
+      points[i] = buf[2];
       points[i + 1] = buf[3];
     }
-    
   }
 
   delete modifier;
@@ -985,10 +986,11 @@ int distort_backtransform(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe,
     {
       float DT_ALIGNED_ARRAY buf[6];
       modifier->ApplySubpixelGeometryDistortion(points[i], points[i + 1], 1, 1, buf);
-      points[i] = buf[0];
+      // take green channel distortion, like distort_mask() does, so x and y come from the
+      // same color channel's distortion field instead of mixing red's x with green's y.
+      points[i] = buf[2];
       points[i + 1] = buf[3];
     }
-    
   }
 
   delete modifier;

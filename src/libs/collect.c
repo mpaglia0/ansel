@@ -762,9 +762,12 @@ static gint sort_folder_tag(gconstpointer a, gconstpointer b)
 }
 
 // Sort key so that "not tagged" & "darktable|" come first, sub-tags directly behind their parent.
+// Tag names are displayed with their raw case, so the key is folded here to keep sorting
+// case-insensitive/alphabetical instead of splitting on ASCII case (all-uppercase first).
 static char *tag_collate_key(char *tag)
 {
-  const size_t len = strlen(tag);
+  gchar *folded = g_utf8_casefold(tag, -1);
+  const size_t len = strlen(folded);
   char *result = g_malloc(len + 2);
   if(!g_strcmp0(tag, _("not tagged")))
     *result = '\1';
@@ -772,9 +775,10 @@ static char *tag_collate_key(char *tag)
     *result = '\2';
   else
     *result = '\3';
-  memcpy(result + 1, tag, len + 1);
+  memcpy(result + 1, folded, len + 1);
   for(char *iter = result + 1; *iter; iter++)
     if(*iter == '|') *iter = '\1';
+  g_free(folded);
   return result;
 }
 
