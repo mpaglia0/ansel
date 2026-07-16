@@ -1811,7 +1811,7 @@ GList *dt_collection_get_property_values(const dt_collection_properties_t proper
                               " FROM (SELECT tagid, COUNT(*) as count"
                               "   FROM main.images AS mi JOIN main.tagged_images ON id = imgid"
                               "   WHERE %s GROUP BY tagid)"
-                              " JOIN (SELECT LOWER(name) AS name, id AS tag_id FROM data.tags)"
+                              " JOIN (SELECT name, id AS tag_id FROM data.tags)"
                               "   ON tagid = tag_id GROUP BY name", where_ext);
       query = dt_util_dstrcat(query, " UNION ALL "
                                      "SELECT '%s' AS name, 0 as id, COUNT(*) AS count "
