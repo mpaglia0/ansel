@@ -1516,7 +1516,18 @@ gchar *dt_history_item_get_label(const struct dt_iop_module_t *module)
     label = g_strdup(module->name());
   else
   {
-    label = g_strdup_printf("%s %s", module->name(), module->multi_name);
+    // multi_name is free-typed user text (dt_iop_gui_rename_module()), but this label is
+    // rendered through gtk_label_set_markup_with_mnemonic() so that module->name()'s own
+    // mnemonic keeps working. Escape it for markup and double its underscores so it prints
+    // literally instead of breaking markup parsing ("&") or being eaten as a mnemonic ("_").
+    gchar *escaped_multi_name = g_markup_escape_text(module->multi_name, -1);
+    gchar **underscore_parts = g_strsplit(escaped_multi_name, "_", -1);
+    gchar *safe_multi_name = g_strjoinv("__", underscore_parts);
+    g_strfreev(underscore_parts);
+    dt_free(escaped_multi_name);
+
+    label = g_strdup_printf("%s %s", module->name(), safe_multi_name);
+    dt_free(safe_multi_name);
   }
   return label;
 }
