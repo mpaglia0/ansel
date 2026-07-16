@@ -91,7 +91,6 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
             const void *const ivoid, void *const ovoid)
 {
   const dt_iop_roi_t *const roi_out = &piece->roi_out;
-  const dt_iop_roi_t *const roi_in = &piece->roi_in;
   dt_mipmap_buffer_t buf;
 
   dt_mipmap_cache_get(darktable.mipmap_cache, &buf, pipe->imgid, pipe->size, DT_MIPMAP_BLOCKING, 'r');
@@ -99,15 +98,18 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
   // Catch out-of-bounds here because roi_in -> roi_out conversions
   // use float scaling that may not always respect initial size.
 
-  // Crop rectangle offset
-  const size_t x = MAX(roi_in->x, 0);
-  const size_t y = MAX(roi_in->y, 0);
+  // Crop rectangle offset. roi_in is always the full sensor buffer here (modify_roi_in()
+  // always requests it whole, so basebuffer can crop any region from it) : the region
+  // actually requested downstream lives in roi_out.
+  const size_t x = MAX(roi_out->x, 0);
+  const size_t y = MAX(roi_out->y, 0);
 
-  // Crop rectangle size
-  const size_t in_width = MIN(roi_in->width, pipe->iwidth - x);
-  const size_t in_height = MIN(roi_in->height, pipe->iheight - y);
-  const size_t in_stride = in_width * piece->dsc_in.bpp;
+  // Crop rectangle size, and stride of the full source buffer we are cropping from
+  const size_t in_width = MIN((size_t)roi_out->width, pipe->iwidth - x);
+  const size_t in_height = MIN((size_t)roi_out->height, pipe->iheight - y);
+  const size_t in_stride = pipe->iwidth * piece->dsc_in.bpp;
   const size_t out_stride = roi_out->width * piece->dsc_out.bpp;
+  const size_t row_bytes = in_width * piece->dsc_in.bpp;
 
   // Crop offset translated in memory sizes
   const size_t y_offset = y * in_stride;
@@ -119,8 +121,8 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
   const void *const restrict input = buf.buf;
 
   __OMP_PARALLEL_FOR__()
-  for(size_t j = 0; j < MIN(roi_out->height, in_height); j++)
-    memcpy(ovoid + j * out_stride, input + x_offset + y_offset + j * in_stride, MIN(in_stride, out_stride));
+  for(size_t j = 0; j < in_height; j++)
+    memcpy(ovoid + j * out_stride, input + x_offset + y_offset + j * in_stride, MIN(row_bytes, out_stride));
 
   dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
 
@@ -131,7 +133,6 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
 int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_iop_t *piece, cl_mem dev_in, cl_mem dev_out)
 {
   const dt_iop_roi_t *const roi_out = &piece->roi_out;
-  const dt_iop_roi_t *const roi_in = &piece->roi_in;
   dt_mipmap_buffer_t buf;
 
   dt_mipmap_cache_get(darktable.mipmap_cache, &buf, pipe->imgid, pipe->size, DT_MIPMAP_BLOCKING, 'r');
@@ -139,13 +140,14 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   // Catch out-of-bounds here because roi_in -> roi_out conversions
   // use float scaling that may not always respect initial size.
 
-  // Crop rectangle offset
-  const size_t x = MAX(roi_in->x, 0);
-  const size_t y = MAX(roi_in->y, 0);
+  // Crop rectangle offset. roi_in is always the full sensor buffer here (modify_roi_in()
+  // always requests it whole, so basebuffer can crop any region from it) : the region
+  // actually requested downstream lives in roi_out.
+  const size_t x = MAX(roi_out->x, 0);
+  const size_t y = MAX(roi_out->y, 0);
 
-  // Crop rectangle size
-  const size_t in_width = MIN(roi_in->width, pipe->iwidth - x);
-  const size_t in_stride = in_width * piece->dsc_in.bpp;
+  // Stride of the full source buffer we are cropping from
+  const size_t in_stride = pipe->iwidth * piece->dsc_in.bpp;
 
   // Crop offset translated in memory sizes
   const size_t y_offset = y * in_stride;
@@ -156,8 +158,10 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
    * cache ownership and lifetime visible in the recursion instead of in a hidden bootstrap path. */
   const void *const restrict input = buf.buf;
 
-  size_t origin[] = { x, y, 0 };
-  size_t region[] = { MIN(roi_out->width, roi_in->width), MIN(roi_out->height, roi_in->height), 1 };
+  // dev_out is a fresh, roi_out-sized device buffer: the write always starts at its own origin.
+  // The crop offset only applies to where we start reading from the host-side full buffer above.
+  size_t origin[] = { 0, 0, 0 };
+  size_t region[] = { MIN((size_t)roi_out->width, pipe->iwidth - x), MIN((size_t)roi_out->height, pipe->iheight - y), 1 };
 
   int err = dt_opencl_write_host_to_device_raw(pipe->devid, input + x_offset + y_offset, dev_out, origin,
                                                region, in_stride, CL_TRUE);
