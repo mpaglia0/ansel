@@ -2614,7 +2614,14 @@ static const dt_iop_order_iccprofile_info_t *_filmic_get_output_profile(const dt
     const dt_iop_order_iccprofile_info_t *const softproof_profile = dt_ioppr_add_profile_info_to_list(
         pipe->dev, darktable.color_profiles->softproof_type, darktable.color_profiles->softproof_filename,
         darktable.color_profiles->softproof_intent);
-    if(!IS_NULL_PTR(softproof_profile)) return softproof_profile;
+    // LUT-only (non matrix-shaper) profiles - typical of printer/inkjet ICC profiles - are
+    // flagged by NAN matrices. The gamut-mapping code below only knows how to use 3x3
+    // matrices, so using a NAN one silently poisons the whole image with NaN pixels. Fall
+    // back to the pipe output profile in that case; the actual soft-proof color conversion
+    // still happens correctly downstream, in colorout, which supports full lcms2 transforms.
+    if(!IS_NULL_PTR(softproof_profile) && !isnan(softproof_profile->matrix_in[0][0])
+       && !isnan(softproof_profile->matrix_out[0][0]))
+      return softproof_profile;
   }
   return dt_ioppr_get_pipe_output_profile_info(pipe);
 }
