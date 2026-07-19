@@ -798,7 +798,6 @@ GList *dt_ioppr_get_iop_order_rules()
     { .op_prev = "basebuffer",  .op_next = "rawprepare"  },
     { .op_prev = "rawprepare",  .op_next = "invert"      },
     { .op_prev = "invert",      .op_next = "temperature" },
-    { .op_prev = "temperature", .op_next = "highlights"  },
     { .op_prev = "highlights",  .op_next = "cacorrect"   },
     { .op_prev = "cacorrect",   .op_next = "hotpixels"   },
     { .op_prev = "hotpixels",   .op_next = "rawdenoise"  },

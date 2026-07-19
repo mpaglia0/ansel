@@ -1754,19 +1754,21 @@ int dt_history_merge(dt_develop_t *dev_dest, dt_develop_t *dev_src, const int32_
   // image, so a single high-level decision applies uniformly to every image in the batch.
   if(_hm_try_merge_iop_order_topologically(dev_dest, dev_src, mod_list, merge_iop_order))
   {
-    // If it failed with source IOP order, retry with destination order
+    // If it failed with source IOP order, retry with destination order. If it was already
+    // destination order (or the retry also fails), there is no further fallback: the missing
+    // source instances never get created in dev_dest->iop, so continuing would build a temp
+    // history against a NULL destination module. Abort instead of falling through.
+    gboolean recovered = FALSE;
     if(merge_iop_order)
     {
       used_source_order = FALSE;
-      if(_hm_try_merge_iop_order_topologically(dev_dest, dev_src, mod_list, FALSE))
-      {
-        // It's unlikely that it fail again, but if it does, there is nothing we can do.
-        // The only mathematically valid way to insert new instances is through topology.
-        // Abort then.
-        cleanup_reason = "_hm_try_merge_iop_order_topologically() retry";
-        cleanup_line = __LINE__;
-        goto cleanup;
-      }
+      recovered = !_hm_try_merge_iop_order_topologically(dev_dest, dev_src, mod_list, FALSE);
+    }
+    if(!recovered)
+    {
+      cleanup_reason = "_hm_try_merge_iop_order_topologically()";
+      cleanup_line = __LINE__;
+      goto cleanup;
     }
   }
 
