@@ -85,6 +85,7 @@
 #include "common/debug.h"
 #include "common/iop_order.h"
 #include "common/topological_sort.h"
+#include "control/control.h"
 #include "develop/blend.h"
 #include "develop/dev_history.h"
 #include "develop/develop.h"
@@ -1667,6 +1668,27 @@ static void _hm_apply_cached_order(dt_develop_t *dev_dest, GList *order_ids)
   g_hash_table_destroy(placed);
 }
 
+// Translate an internal `cleanup_reason` tag from `dt_history_merge()` into a message the user
+// can actually act on. Returns NULL for reasons that aren't user-facing failures (e.g. a
+// deliberate cancel from the merge report dialog).
+static const char *_hm_failure_message(const char *cleanup_reason)
+{
+  if(IS_NULL_PTR(cleanup_reason)) return NULL;
+
+  if(!g_strcmp0(cleanup_reason, "_hm_show_merge_report_popup() revert"))
+    return NULL; // user-initiated cancel, not a failure
+
+  if(!g_strcmp0(cleanup_reason, "_hm_try_merge_iop_order_topologically()"))
+    return _("Could not paste: the pasted modules require a pipeline order that conflicts "
+             "with this image's current module order.");
+
+  if(!g_strcmp0(cleanup_reason, "dt_dev_history_item_from_source_history_item()"))
+    return _("Could not paste: one of the pasted modules could not be recreated on the "
+             "destination image.");
+
+  return _("Could not paste: an internal error occurred while preparing the merge.");
+}
+
 int dt_history_merge(dt_develop_t *dev_dest, dt_develop_t *dev_src, const int32_t dest_imgid,
                      const GList *mod_list, const gboolean merge_iop_order,
                      const dt_history_merge_strategy_t strategy, const gboolean force_new_modules,
@@ -1877,6 +1899,11 @@ cleanup:
   if(cleanup_reason)
     dt_print(DT_DEBUG_HISTORY | DT_DEBUG_VERBOSE, "[dt_history_merge] cleanup from line %d: %s\n",
              cleanup_line, cleanup_reason);
+  if(rc)
+  {
+    const char *msg = _hm_failure_message(cleanup_reason);
+    if(msg) dt_control_log("%s", msg);
+  }
   if(src_last_by_id) g_hash_table_destroy(src_last_by_id);
   if(dst_last_before_by_id) g_hash_table_destroy(dst_last_before_by_id);
   if(mod_list_ids) g_hash_table_destroy(mod_list_ids);
