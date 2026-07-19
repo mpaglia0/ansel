@@ -260,15 +260,19 @@ static void _export_list_save(GtkWidget *dialog, GtkTextBuffer *buffer)
   GtkComboBox *combo = GTK_COMBO_BOX(g_object_get_data(G_OBJECT(buffer), "combo"));
   const int mode = gtk_combo_box_get_active(combo);
 
-  // GtkFileChooserNative uses the platform-native save dialog on Windows and macOS
-  GtkFileChooserNative *chooser
-      = gtk_file_chooser_native_new(_("Ansel - Save image list"), GTK_WINDOW(dialog),
-                                    GTK_FILE_CHOOSER_ACTION_SAVE, _("_Save"), _("_Cancel"));
+  // Deliberately the GTK-drawn chooser, NOT GtkFileChooserNative: on Windows the
+  // native IFileDialog runs in-process and loads every installed shell extension
+  // into Ansel; extensions shipping their own OpenMP runtime (Intel libiomp5md)
+  // collide with ours and abort the app with OMP error #15.
+  GtkWidget *chooser
+      = gtk_file_chooser_dialog_new(_("Ansel - Save image list"), GTK_WINDOW(dialog),
+                                    GTK_FILE_CHOOSER_ACTION_SAVE, _("_Cancel"), GTK_RESPONSE_CANCEL,
+                                    _("_Save"), GTK_RESPONSE_ACCEPT, NULL);
   gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(chooser), TRUE);
   gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(chooser),
                                     mode == DT_EXPORT_LIST_FILENAMES ? "ansel-image-files.txt"
                                                                      : "ansel-image-ids.txt");
-  if(gtk_native_dialog_run(GTK_NATIVE_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
+  if(gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT)
   {
     gchar *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
     gchar *text = _export_list_build(imgids, mode, TRUE);
@@ -281,7 +285,7 @@ static void _export_list_save(GtkWidget *dialog, GtkTextBuffer *buffer)
     g_free(text);
     g_free(filename);
   }
-  g_object_unref(chooser);
+  gtk_widget_destroy(chooser);
 }
 
 static void _export_list_response(GtkWidget *dialog, gint response_id, gpointer user_data)
