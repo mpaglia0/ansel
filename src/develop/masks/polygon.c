@@ -55,9 +55,6 @@
 #define HARDNESS_MIN 0.0005f
 #define HARDNESS_MAX 1.0f
 
-#define GAMMA_MIN 0.1f
-#define GAMMA_MAX 10.0f
-
 #define BORDER_MIN 0.00005f
 #define BORDER_MAX 0.5f
 
@@ -1125,7 +1122,6 @@ static void _add_node_to_segment(struct dt_iop_module_t *module,
   dt_masks_node_polygon_t *point1 = (dt_masks_node_polygon_t *)next_pt->data;
   new_node->border[0] = point0->border[0] * (1.0f - t) + point1->border[0] * t;
   new_node->border[1] = point0->border[1] * (1.0f - t) + point1->border[1] * t;
-  new_node->gamma = point0->gamma * (1.0f - t) + point1->gamma * t;
 
   mask_form->points = g_list_insert(mask_form->points, new_node, selected_segment + 1);
   _polygon_init_ctrl_points(mask_form);
@@ -1249,21 +1245,6 @@ static float _polygon_get_interaction_value(const dt_masks_form_t *mask_form,
 
       return hardness_count > 0 ? hardness_sum / (float)hardness_count : NAN;
     }
-    case DT_MASKS_INTERACTION_GAMMA:
-    {
-      float gamma_sum = 0.0f;
-      int gamma_count = 0;
-
-      for(const GList *point_node = mask_form->points; point_node; point_node = g_list_next(point_node))
-      {
-        const dt_masks_node_polygon_t *node = (const dt_masks_node_polygon_t *)point_node->data;
-        if(IS_NULL_PTR(node)) continue;
-        gamma_sum += node->gamma;
-        gamma_count++;
-      }
-
-      return gamma_count > 0 ? gamma_sum / (float)gamma_count : NAN;
-    }
     default:
       return NAN;
   }
@@ -1301,9 +1282,6 @@ static int _change_size(dt_masks_form_t *mask_form, int parent_id, dt_masks_form
 static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
                             struct dt_iop_module_t *module, int form_index, const float amount,
                             const dt_masks_increment_t increment, int flow);
-static int _change_gamma(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
-                         struct dt_iop_module_t *module, int form_index, const float amount,
-                         const dt_masks_increment_t increment, int flow);
 
 static float _polygon_set_interaction_value(dt_masks_form_t *mask_form,
                                             dt_masks_interaction_t interaction, float value,
@@ -1320,9 +1298,6 @@ static float _polygon_set_interaction_value(dt_masks_form_t *mask_form,
       return _polygon_get_interaction_value(mask_form, interaction);
     case DT_MASKS_INTERACTION_HARDNESS:
       if(!_change_hardness(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
-      return _polygon_get_interaction_value(mask_form, interaction);
-    case DT_MASKS_INTERACTION_GAMMA:
-      if(!_change_gamma(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
       return _polygon_get_interaction_value(mask_form, interaction);
     default:
       return NAN;
@@ -1685,30 +1660,6 @@ static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_
   return 1;
 }
 
-static int _change_gamma(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
-                         struct dt_iop_module_t *module, int form_index, const float amount,
-                         const dt_masks_increment_t increment, int flow)
-{
-  int node_index = 0;
-
-  for(GList *node_iter = mask_form->points; node_iter; node_iter = g_list_next(node_iter), node_index++)
-  {
-    if(dt_masks_gui_change_affects_selected_node_or_all(mask_gui, node_index))
-    {
-      dt_masks_node_polygon_t *node = (dt_masks_node_polygon_t *)node_iter->data;
-      if(!node) continue;
-
-      node->gamma = CLAMPF(dt_masks_apply_increment(node->gamma, amount, increment, flow),
-                           GAMMA_MIN, GAMMA_MAX);
-    }
-  }
-
-  // Rebuild the cached GUI geometry.
-  dt_masks_gui_form_create(mask_form, mask_gui, form_index, module);
-
-  return 1;
-}
-
 /**
  * @brief Handle mouse wheel updates for polygon size/hardness/opacity.
  */
@@ -1807,8 +1758,7 @@ static int _polygon_events_button_pressed(struct dt_iop_module_t *module, double
         polygon_node->ctrl1[0] = polygon_node->ctrl1[1] = polygon_node->ctrl2[0] = polygon_node->ctrl2[1] = -1.0;
         polygon_node->border[0] = polygon_node->border[1] = MAX(HARDNESS_MIN, masks_border);
         polygon_node->state = DT_MASKS_POINT_STATE_NORMAL;
-        polygon_node->gamma = 1.0f;
-
+  
         if(node_count == 0)
         {
           // create the first node
@@ -1818,7 +1768,6 @@ static int _polygon_events_button_pressed(struct dt_iop_module_t *module, double
           polygon_first_node->ctrl1[0] = polygon_first_node->ctrl1[1] = polygon_first_node->ctrl2[0] = polygon_first_node->ctrl2[1] = -1.0;
           polygon_first_node->border[0] = polygon_first_node->border[1] = MAX(HARDNESS_MIN, masks_border);
           polygon_first_node->state = DT_MASKS_POINT_STATE_NORMAL;
-          polygon_first_node->gamma = 1.0f;
           mask_form->points = g_list_append(mask_form->points, polygon_first_node);
 
           if(mask_form->type & DT_MASKS_CLONE)
@@ -2472,7 +2421,7 @@ static int _polygon_get_area(const dt_iop_module_t *const module, dt_dev_pixelpi
  * @brief Write a falloff segment into the mask buffer.
  */
 /*static*/ void _polygon_falloff(float *const restrict buffer, int *p0, int *p1,
-                                 int posx, int posy, int buffer_width, const float gamma)
+                                 int posx, int posy, int buffer_width)
 {
   // segment length
   int l = sqrtf(sqf(p1[0] - p0[0]) + sqf(p1[1] - p0[1])) + 1;
@@ -2486,7 +2435,7 @@ static int _polygon_get_area(const dt_iop_module_t *const module, dt_dev_pixelpi
     // position
     const int x = (int)((float)i * lx * inv_l) + p0[0] - posx;
     const int y = (int)((float)i * ly * inv_l) + p0[1] - posy;
-    const float op = powf(1.0f - (float)i * inv_l, gamma);
+    const float op = 1.0f - (float)i * inv_l;
     const size_t idx = y * buffer_width + x;
     buffer[idx] = fmaxf(buffer[idx], op);
     if(x > 0)
@@ -2687,7 +2636,6 @@ static int _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpi
   }
 
   // now we fill the falloff
-  const float gamma = ((dt_masks_node_polygon_t *)mask_form->points->data)->gamma;
   int p0[2] = { 0 }, p1[2] = { 0 };
   float pf1[2] = { 0.0f };
   int prev0[2] = { 0 }, prev1[2] = { 0 };
@@ -2727,14 +2675,14 @@ static int _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpi
                        (int)floorf(prev0[1] + t * (p0[1] - prev0[1]) + 0.5f) };
         int mp1[2] = { (int)floorf(prev1[0] + t * (p1[0] - prev1[0]) + 0.5f),
                        (int)floorf(prev1[1] + t * (p1[1] - prev1[1]) + 0.5f) };
-        _polygon_falloff(bufptr, mp0, mp1, *posx, *posy, *width, gamma);
+        _polygon_falloff(bufptr, mp0, mp1, *posx, *posy, *width);
       }
     }
 
     // and we draw the falloff
     if(last0[0] != p0[0] || last0[1] != p0[1] || last1[0] != p1[0] || last1[1] != p1[1])
     {
-      _polygon_falloff(bufptr, p0, p1, *posx, *posy, *width, gamma);
+      _polygon_falloff(bufptr, p0, p1, *posx, *posy, *width);
       last0[0] = p0[0];
       last0[1] = p0[1];
       last1[0] = p1[0];
@@ -3067,7 +3015,7 @@ fallback_passes:
 }
 
 /** we write a falloff segment respecting limits of buffer */
-static inline void _polygon_falloff_roi(float *buffer, int *p0, int *p1, int bw, int bh, const float gamma)
+static inline void _polygon_falloff_roi(float *buffer, int *p0, int *p1, int bw, int bh)
 {
   // segment length
   const int l = sqrt((p1[0] - p0[0]) * (p1[0] - p0[0]) + (p1[1] - p0[1]) * (p1[1] - p0[1])) + 1;
@@ -3090,7 +3038,7 @@ static inline void _polygon_falloff_roi(float *buffer, int *p0, int *p1, int bw,
     // position
     const int x = (int)((float)i * lx * inv_l) + p0[0];
     const int y = (int)((float)i * ly * inv_l) + p0[1];
-    const float op = powf(1.0f - (float)i * inv_l, gamma);
+    const float op = 1.0f - (float)i * inv_l;
     if(!inside && (x < 0 || x >= bw || y < 0 || y >= bh)) continue;
     float *buf = buffer + (size_t)y * bw + x;
     if(inside)
@@ -3390,7 +3338,6 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
       return 1;
     }
 
-    const float gamma = ((dt_masks_node_polygon_t *)mask_form->points->data)->gamma;
     int dindex = 0;
     int p0[2], p1[2];
     float pf1[2];
@@ -3480,7 +3427,7 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
     }
     __OMP_PARALLEL_FOR__(if(dindex > 4096))
     for(int n = 0; n < dindex; n += 4)
-      _polygon_falloff_roi(buffer, dpoints + n, dpoints + n + 2, width, height, gamma);
+      _polygon_falloff_roi(buffer, dpoints + n, dpoints + n + 2, width, height);
 
     dt_pixelpipe_cache_free_align(dpoints);
 
