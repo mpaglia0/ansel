@@ -188,6 +188,66 @@ buffer-relative pixels and never re-derives its own absolute position from `pipe
 correctly positioned even when the base image content is offset — a mismatch between a mask and
 the image it's drawn on is a symptom of this class of bug, not of the masking code.
 
+### Demosaic's Bayer/X-Trans phase is computed fresh per crop, not snapped
+
+Once `basebuffer` honors the real crop offset, that offset reaches `demosaic` unrounded — it is
+almost never a multiple of the sensor's repeating pattern (2 px for Bayer, 6×6 px for X-Trans).
+Getting the per-pixel color identity wrong for such an offset produces wrong colors or, if the
+wrongness compounds, fully scrambled blocks of pixels. The phase handling is split across two
+places, each owning a different, non-overlapping part of the total shift:
+
+- `iop/rawprepare.c`'s `_update_output_cfa_descriptor()` folds in only the **fixed sensor border
+  trim** (`d->x`/`d->y`, constant for a given camera/image, independent of how the user pans,
+  zooms, or crops). It writes the result to `piece->dsc_out.filters`/`xtrans`, which propagates
+  forward to demosaic's `piece->dsc_in` through the normal `input_format()`/`output_format()`
+  contract — never through a shared, pipe-wide field.
+- `iop/demosaic.c`'s `process()`/`process_cl()` fold in the **dynamic, ROI-dependent** part, fresh
+  on every call, from the module's own current `roi_in->x/y`. This must happen in `process()`/
+  `process_cl()`, not in `modify_roi_in()`/`output_format()`: those ROI-planning callbacks run
+  before `piece->dsc_in` is guaranteed to be populated for this resync. It also must never write
+  back into `piece->dsc_in`/`dsc_out` — those are sealed contracts, read-only once processing
+  starts (see the `dt_dev_pixelpipe_iop_t` doc comment in `pixelpipe_hb.h`). The result — a locally
+  rotated `xtrans_raw`-derived table, or a `filters` value passed through
+  `dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y)` — is a plain local
+  variable, discarded at the end of the call, recomputed next time.
+
+Every demosaic algorithm falls into exactly one of two categories, and mixing them up is the
+recurring failure mode here:
+
+- **Self-correcting**: the algorithm takes `roi_in`/explicit `x,y` alongside the filters/xtrans
+  table and adds the offset itself at each color lookup (`FCxtrans(row, col, roi_in, xtrans)`,
+  `FC(row + roi_in->y, col + roi_in->x, filters)`). These must receive the **unshifted**
+  `piece->dsc_in.filters`/`xtrans` (`xtrans_raw` in `process()`) — passing them an already-shifted
+  table double-applies the offset. VNG, Markesteijn/FDC, passthrough-color, the X-Trans downsample
+  path, and green-equilibration (CPU functions and their OpenCL kernel counterparts) are all in
+  this group.
+- **Tile-local**: the algorithm addresses pixels in buffer-relative coordinates with no ROI
+  awareness at all (`FC(row, col, filters)` where `row`/`col` are local loop indices). These need
+  the **fully pre-shifted** `filters` computed once at the top of `process()`/`process_cl()`/
+  `process_rcd_cl()` — passing them the raw, margin-only table silently drops the dynamic part of
+  the shift. RCD, LMMSE, PPG, AMaZE, and the Bayer downsample path (CPU and OpenCL) are in this
+  group. Bayer has no xtrans-table equivalent of this split: `dt_rawspeed_crop_dcraw_filters()`
+  already no-ops on X-Trans (`filters == 9u`), so it is always safe to call.
+
+A third, narrower trap lives inside `xtrans_markesteijn_interpolate()`/`xtrans_fdc_interpolate()`
+(`iop/demosaic/markesteijn.c`, CPU and OpenCL builders alike): the `allhex[3][3][...]` neighbor-
+geometry table is precomputed once per call from `FCxtrans(row, col, ·, xtrans)` for `row`/`col` in
+`0..2`, then looked up later via `hexmap()`/`allhex[row][col]` using **tile-local** (`roi_in`-
+relative) coordinates taken mod 3. Building that table with `NULL` (no offset) puts it in a
+different phase than the tile-local lookup expects whenever `roi_in->x/y` isn't itself a multiple
+of 3 — main per-pixel colors stay correct (they go through their own `roi_in`-aware lookup), but
+the geometric neighbor relationships used to actually interpolate are wrong, producing a subtler,
+locally-blotchy color artifact rather than a full scramble. The fix is to build `allhex` with
+`roi_in` instead of `NULL`, matching the phase `hexmap()` will later assume.
+
+Because every algorithm is now verified correct for an arbitrary, unaligned crop offset, demosaic's
+`modify_roi_in()` no longer snaps the requested position to the sensor pattern (the old
+`XTRANS_SNAPPER`/`BAYER_SNAPPER` rounding is gone). That snap was never a correctness requirement
+of the phase math — it was a blunt instrument that kept the offset congruent to 0 mod its period,
+which incidentally made every one of the bugs above unreachable by construction. Removing it is
+what actually exercises non-aligned offsets and is how these bugs were found; reintroducing a
+similar snap anywhere in this path would silently mask a regression here rather than fix one.
+
 ---
 
 ## Masks / forms history

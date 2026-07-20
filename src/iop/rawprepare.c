@@ -218,11 +218,18 @@ static void _update_output_cfa_descriptor(const dt_dev_pixelpipe_t *pipe,
    * attached to the input image into the runtime descriptor seen by downstream RAW
    * modules. Rebuild that contract from the pipe image each time instead of chaining
    * shifts from `piece->dsc_in`, otherwise repeated ROI planning can compound the
-   * Bayer/X-Trans phase offset. */
+   * Bayer/X-Trans phase offset.
+   *
+   * Only the fixed sensor border trim (d->x/d->y) is folded in here: that offset is
+   * constant for a given image, regardless of how the user pans/zooms/crops downstream.
+   * The dynamic, ROI-dependent part of the phase shift is applied downstream, fresh on
+   * every process()/process_cl() call, from the module's own current roi_in (see the
+   * matching comment at the top of demosaic.c's process()) — not here, and not from any
+   * ROI callback, since piece->dsc_in is not guaranteed to be populated yet at that point. */
 
   const dt_iop_rawprepare_data_t *d = (dt_iop_rawprepare_data_t *)piece->data;
-  const uint32_t crop_x = compute_proper_crop(piece, roi_in, d->x + roi_in->x);
-  const uint32_t crop_y = compute_proper_crop(piece, roi_in, d->y + roi_in->y);
+  const uint32_t crop_x = compute_proper_crop(piece, roi_in, d->x);
+  const uint32_t crop_y = compute_proper_crop(piece, roi_in, d->y);
 
   dsc->filters = dt_rawspeed_crop_dcraw_filters(pipe->dev->image_storage.dsc.filters, crop_x, crop_y);
   //fprintf(stdout, "crop: x=%u, y=%u\n", crop_x, crop_y);
