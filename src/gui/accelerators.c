@@ -1412,7 +1412,7 @@ void _for_each_accel_create_treeview_row(gpointer key, gpointer value, gpointer 
 
     // Capitalize first letter for GUI purposes
     gchar *label = g_strdup(parts[i]);
-    label[0] = g_unichar_toupper(label[0]);
+    dt_capitalize_label(label);
 
     // Write the shortcut only if we are at the terminating point of the path
     if(!g_strcmp0(accum, path))
