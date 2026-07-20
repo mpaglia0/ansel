@@ -376,6 +376,32 @@ policy must be `GTK_POLICY_EXTERNAL` + `set_min_content_height(1)` +
 reconfigures (the table persists across view enter/leave; the guard would otherwise skip the
 reconfigure on same-size re-entry).
 
+### Modal dialogs must explicitly refocus their parent on close
+
+`gtk_window_set_transient_for()` at dialog creation is not enough to guarantee focus returns to
+the parent window once the dialog is destroyed — on macOS/quartz in particular, GTK does not
+reliably hand keyboard focus back the way X11 window managers do with transient hints.
+
+Every top-level modal dialog (one whose transient parent is the main window, not another
+still-open dialog) must call `dt_gui_refocus_parent()` (`gui/gtk.{h,c}`) right after
+`gtk_widget_destroy()`. It falls back to the main window if no valid parent is passed, and
+handles the macOS-specific `dt_osx_focus_window()` call internally. Mechanical pattern (capture
+the parent *before* destroying the dialog, since the widget is invalid afterwards):
+
+```c
+GtkWindow *dialog_parent = gtk_window_get_transient_for(GTK_WINDOW(dialog));
+gtk_widget_destroy(dialog);
+dt_gui_refocus_parent(dialog_parent);
+```
+
+Do NOT apply this to a nested dialog (e.g. a warning/confirm popup) whose transient parent is
+another dialog still open at that point — GTK already hands focus back to a live parent window
+correctly; this only matters for the final return to the application. Also skip
+`GtkFileChooserDialog`/native choosers, which are a separate, already-correct subsystem. Any
+dialog created without a transient parent at all (e.g. a popup menu action, which cannot
+legitimately use the popup's own toplevel — see `dtgtk/thumbnail.c`'s "Active modules" dialog)
+should instead be parented directly to `dt_ui_main_window(darktable.gui->ui)` at creation time.
+
 ---
 
 ## Interpolation
