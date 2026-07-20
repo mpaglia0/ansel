@@ -1933,6 +1933,22 @@ static void _yes_no_button_handler(GtkButton *button, gpointer data)
   _gtk_main_quit_safe(NULL, NULL);
 }
 
+void dt_gui_refocus_parent(GtkWindow *parent)
+{
+  if(!GTK_IS_WINDOW(parent) && !IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->ui)
+     && !IS_NULL_PTR(darktable.gui->ui->main_window))
+  {
+    GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
+    if(GTK_IS_WINDOW(main_window)) parent = GTK_WINDOW(main_window);
+  }
+
+  if(GTK_IS_WINDOW(parent)) gtk_window_present(parent);
+
+#ifdef GDK_WINDOWING_QUARTZ
+  dt_osx_focus_window();
+#endif
+}
+
 gboolean dt_gui_show_standalone_yes_no_dialog(const char *title, const char *markup, const char *no_text,
                                               const char *yes_text)
 {

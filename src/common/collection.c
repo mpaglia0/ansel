@@ -2543,11 +2543,9 @@ void dt_collection_load_filmroll(dt_collection_t *collection, const int32_t imgi
     }
   }
 
-  fprintf(stdout,"Collection: view = %s\n", Collection_view ? "Tree" : "List");
-  const char *path = g_strdup_printf("%s%s", dir, Collection_view ? "*" : "");
-  fprintf(stdout,"Collection: path = %s\n", path);
-
-  dt_conf_set_string("plugins/lighttable/collect/string0", g_strdup_printf("%s*", dir));
+  // Don't append "*": it's the legacy encoding for "recursive" and would silently
+  // override the user's current recursive/sub-folders setting on every import.
+  dt_conf_set_string("plugins/lighttable/collect/string0", dir);
   dt_conf_set_int("plugins/lighttable/collect/num_rules", 1);
 
   // Reload the collection with the current filmroll
