@@ -14,11 +14,16 @@ raws via Git LFS, baseline PNGs committed directly since they're small).
 ## Setup (once)
 
 ```sh
-git submodule update --init tests/image_test/samples
+git submodule update --init --checkout tests/image_test/samples
 ```
 
 That's it -- `tests/image_test.sh` uses this shared bank automatically once it's checked out
 (needs `git-lfs` installed: `sudo apt install git-lfs && git lfs install`, once per machine).
+
+This submodule is registered with `update = none` in `.gitmodules`, so it's opt-in: a plain
+`git submodule update --init --recursive` (the common blanket setup command, also used by CI)
+skips it silently instead of trying to pull this private repo. Fetching it always requires the
+explicit `--checkout` invocation above.
 
 To use your own raws instead (or on top of it), point at any local folder:
 

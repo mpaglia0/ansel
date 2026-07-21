@@ -209,7 +209,7 @@ if [ -z "$BANK_DIR" ]; then
   if git -C "$REPO_ROOT" config -f .gitmodules --get-regexp '\.path$' 2>/dev/null \
        | grep -q "tests/image_test/samples\$"; then
     err "The shared team bank is registered but not checked out yet:"
-    err "  git submodule update --init tests/image_test/samples"
+    err "  git submodule update --init --checkout tests/image_test/samples"
   else
     err "Point one with --bank <dir>, \$ANSEL_IMAGE_TEST, or: $0 configure <dir>"
   fi
