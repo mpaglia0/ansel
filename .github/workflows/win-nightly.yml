@@ -112,7 +112,7 @@ jobs:
           $(cygpath ${INSTALL_PREFIX})/bin/ansel-cli.exe \
                  --width 2048 --height 2048 \
                  --apply-custom-presets false \
-                 $(cygpath '${{ github.workspace }}')/data/pixmaps/256x256/ansel.png \
+                 $(cygpath ${SRC_DIR})/data/pixmaps/256x256/ansel.png \
                  output.png \
                  --core --disable-opencl --conf host_memory_limit=8192 \
                  --conf worker_threads=4 -t 4 \

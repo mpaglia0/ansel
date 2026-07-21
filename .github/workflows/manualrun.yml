@@ -104,7 +104,7 @@ jobs:
           ${INSTALL_PREFIX}/bin/ansel-cli \
                  --width 2048 --height 2048 \
                  --apply-custom-presets false \
-                 "${{ github.workspace }}/data/pixmaps/256x256/ansel.png" \
+                 "${SRC_DIR}/data/pixmaps/256x256/ansel.png" \
                  output.png \
                  --core --disable-opencl --conf host_memory_limit=8192 \
                  --conf worker_threads=4 -t 4 \
@@ -114,7 +114,7 @@ jobs:
         #integration test can get "stuck" plus there are couple of errors here, so it needs to be addressed first
         #if: ${{ false }}
         run: |
-          cd "${{ github.workspace }}/tests/integration/"
+          cd "${SRC_DIR}/tests/integration/"
           ./run.sh --no-opencl --no-deltae --fast-fail
 
   Win64:
@@ -178,7 +178,7 @@ jobs:
           $(cygpath ${INSTALL_PREFIX})/bin/ansel-cli.exe \
                  --width 2048 --height 2048 \
                  --apply-custom-presets false \
-                 $(cygpath '${{ github.workspace }}')/data/pixmaps/256x256/ansel.png \
+                 $(cygpath ${SRC_DIR})/data/pixmaps/256x256/ansel.png \
                  output.png \
                  --core --disable-opencl --conf host_memory_limit=8192 \
                  --conf worker_threads=4 -t 4 \
@@ -240,7 +240,7 @@ jobs:
           ${INSTALL_PREFIX}/bin/ansel-cli \
                  --width 2048 --height 2048 \
                  --apply-custom-presets false \
-                 "${{ github.workspace }}/data/pixmaps/256x256/ansel.png" \
+                 "${SRC_DIR}/data/pixmaps/256x256/ansel.png" \
                  output.png \
                  --core --disable-opencl --conf host_memory_limit=8192 \
                  --conf worker_threads=4 -t 4 \
