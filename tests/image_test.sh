@@ -351,7 +351,7 @@ process_one() {
         fi
         local base_c="" base_r=""
         [ "$base_bad" = yes ] && { base_c="$C_RED"; base_r="$C_RESET"; }
-        diffnote=" [CPU vs baseline] avg dE=${base_c}${avg_de:-n/a}${base_r}, max dE=${max_de}, ${base_c}${pct_de:-n/a}% px>(dE 2.3)${base_r}"
+        diffnote=" [CPU vs baseline] avg dE=${base_c}${avg_de:-n/a}${base_r}, max dE=${max_de}, ${pct_de:-n/a}% px>(dE 2.3)"
       fi
     fi
   fi
@@ -396,7 +396,7 @@ process_one() {
       fi
       local cl_c="" cl_r=""
       [ "$cl_bad" = yes ] && { cl_c="$C_RED"; cl_r="$C_RESET"; }
-      clnote="[opencl vs CPU]   avg dE=${cl_c}${cl_avg_de:-n/a}${cl_r}, max dE=${cl_max_de:-n/a}, ${cl_c}${cl_pct_de:-n/a}% px>(dE 2.3)${cl_r}"
+      clnote="[opencl vs CPU]   avg dE=${cl_avg_de:-n/a}, max dE=${cl_max_de:-n/a}, ${cl_c}${cl_pct_de:-n/a}% px>(dE 2.3)${cl_r}"
     fi
   fi
 
