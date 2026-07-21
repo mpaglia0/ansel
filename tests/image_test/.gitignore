@@ -1,0 +1,4 @@
+bank_path.conf
+results/
+baseline/
+.no-baseline-during-update/
