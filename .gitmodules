@@ -22,3 +22,4 @@
 	path = tests/image_test/samples
 	url = https://github.com/aurelienpierreeng/ansel-test.git
 	update = none
+	active = false
