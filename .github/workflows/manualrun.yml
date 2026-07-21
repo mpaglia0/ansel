@@ -115,7 +115,7 @@ jobs:
         #integration test can get "stuck" plus there are couple of errors here, so it needs to be addressed first
         #if: ${{ false }}
         run: |
-          cd "${SRC_DIR}/src/tests/integration/"
+          cd "${SRC_DIR}/tests/integration/"
           ./run.sh --no-opencl --no-deltae --fast-fail
 
   Win64:
