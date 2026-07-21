@@ -115,8 +115,8 @@ jobs:
           ${INSTALL_PREFIX}/bin/ansel-cli \
                  --width 2048 --height 2048 \
                  --apply-custom-presets false \
-                 "${SRC_DIR}/tests/integration/images/mire1.cr2" \
-                 "${SRC_DIR}/tests/integration/0000-nop/nop.xmp" \
+                 "${{ github.workspace }}/tests/integration/images/mire1.cr2" \
+                 "${{ github.workspace }}/tests/integration/0000-nop/nop.xmp" \
                  output.png \
                  --core --disable-opencl --conf host_memory_limit=8192 \
                  --conf worker_threads=4 -t 4 \
