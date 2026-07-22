@@ -1896,10 +1896,12 @@ static gchar *_ask_text(const char *title, const char *initial)
 // ---- actions ----
 static void _act_folders_remove(dt_lib_collect_t *d, GList *rows)
 {
-  // Select the images of exactly the chosen folders (non-recursive: we must not silently pull
-  // in a whole parent subtree), then hand them to dt_control_remove_images(), which already
-  // prompts "remove from library vs trash files".
-  GList *imgids = _rows_to_imgids(DT_COLLECTION_PROP_FOLDERS, rows, FALSE);
+  // Recursive, like _act_prerender() below: a folder node with only subfolder children (no
+  // images directly in it) has nothing to match non-recursively, so a non-recursive lookup here
+  // silently no-ops on any such parent folder -- most of a real, nested film-roll tree. The
+  // subtree count is shown to the user in dt_control_remove_images()'s "remove N images?"
+  // confirmation before anything is touched, so recursion doesn't skip that safety net.
+  GList *imgids = _rows_to_imgids(DT_COLLECTION_PROP_FOLDERS, rows, TRUE);
   if(!imgids) return;
   dt_selection_clear(darktable.selection);
   dt_selection_select_list(darktable.selection, imgids);
