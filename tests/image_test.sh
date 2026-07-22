@@ -209,7 +209,7 @@ if [ -z "$BANK_DIR" ]; then
   if git -C "$REPO_ROOT" config -f .gitmodules --get-regexp '\.path$' 2>/dev/null \
        | grep -q "tests/image_test/samples\$"; then
     err "The shared team bank is registered but not checked out yet:"
-    err "  git submodule update --init tests/image_test/samples"
+    err "  git submodule update --init --checkout tests/image_test/samples"
   else
     err "Point one with --bank <dir>, \$ANSEL_IMAGE_TEST, or: $0 configure <dir>"
   fi
@@ -237,13 +237,20 @@ find_cli() {
     printf '%s\n' "$CLI_BIN"
     return 0
   fi
-  # Prefer relocated install trees (build*/bin, install*/bin): ansel-cli resolves
-  # its plugin moduledir relative to its own binary path, which only lines up
-  # correctly once "cmake --install <builddir> --prefix <builddir>" (or
-  # "ninja install") has populated <builddir>/bin + <builddir>/lib together. The
-  # raw ninja output in build*/src/cli/ansel-cli looks for its bundled plugins
-  # (views/libs/imageio backends) in the wrong place and silently fails to init
-  # (e.g. "can't init develop system") -- kept below only as a last resort.
+  # build.sh --install always (re)points /usr/local/bin/ansel-cli at whatever
+  # $INSTALL_PREFIX/bin/ansel-cli it just installed, whatever --prefix was used --
+  # so PATH reliably resolves to the most recently installed build. Trust that
+  # over guessing a repo-relative layout below.
+  local from_path
+  from_path="$(command -v ansel-cli 2>/dev/null)" && { printf '%s\n' "$from_path"; return 0; }
+  # Fallback for a build that was never `--install`ed system-wide (e.g. a
+  # relocatable "cmake --install <builddir> --prefix <builddir>" done by hand):
+  # ansel-cli resolves its plugin moduledir relative to its own binary path,
+  # which only lines up correctly once install has populated <builddir>/bin +
+  # <builddir>/lib together. The raw ninja output in build*/src/cli/ansel-cli
+  # looks for its bundled plugins (views/libs/imageio backends) in the wrong
+  # place and silently fails to init (e.g. "can't init develop system") --
+  # kept below only as a last resort.
   local candidates=(
     "$REPO_ROOT/build/bin/ansel-cli"
     "$REPO_ROOT/install/bin/ansel-cli"
@@ -260,7 +267,6 @@ find_cli() {
   for c in "${candidates[@]}"; do
     [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
   done
-  command -v ansel-cli 2>/dev/null && return 0
   return 1
 }
 
@@ -349,9 +355,24 @@ process_one() {
         elif [ "$deltae_rc" -eq 1 ]; then
           [ "$STRICT_CPU" = yes ] && { verdict="DIFF"; base_bad=yes; }
         fi
-        local base_c="" base_r=""
-        [ "$base_bad" = yes ] && { base_c="$C_RED"; base_r="$C_RESET"; }
-        diffnote=" [CPU vs baseline] avg dE=${base_c}${avg_de:-n/a}${base_r}, max dE=${max_de}, ${base_c}${pct_de:-n/a}% px>(dE 2.3)${base_r}"
+        # Color exactly the metric(s) responsible for the failure: max dE > 2.3
+        # or avg dE > 0.767 (2.3/3) is what deltae's own exit(2) checks. A
+        # --strict-cpu-only failure (rc=1, some nonzero drift under both real
+        # thresholds) is deltae's exit(0)-vs-exit(1) boundary, which is purely
+        # `max dE < 0.01` -- so that's the one to flag when neither real
+        # threshold was actually crossed.
+        local max_bad=no avg_bad=no
+        if [ "$base_bad" = yes ]; then
+          awk -v v="$max_de" 'BEGIN{exit !(v > 2.3)}' && max_bad=yes
+          awk -v v="$avg_de" 'BEGIN{exit !(v > 2.3/3)}' && avg_bad=yes
+          if [ "$max_bad" = no ] && [ "$avg_bad" = no ]; then
+            max_bad=yes
+          fi
+        fi
+        local max_c="" max_r="" avg_c="" avg_r=""
+        [ "$max_bad" = yes ] && { max_c="$C_RED"; max_r="$C_RESET"; }
+        [ "$avg_bad" = yes ] && { avg_c="$C_RED"; avg_r="$C_RESET"; }
+        diffnote=" [CPU vs baseline] avg dE=${avg_c}${avg_de:-n/a}${avg_r}, max dE=${max_c}${max_de}${max_r}, ${pct_de:-n/a}% px>(dE 2.3)"
       fi
     fi
   fi
@@ -396,7 +417,7 @@ process_one() {
       fi
       local cl_c="" cl_r=""
       [ "$cl_bad" = yes ] && { cl_c="$C_RED"; cl_r="$C_RESET"; }
-      clnote="[opencl vs CPU]   avg dE=${cl_c}${cl_avg_de:-n/a}${cl_r}, max dE=${cl_max_de:-n/a}, ${cl_c}${cl_pct_de:-n/a}% px>(dE 2.3)${cl_r}"
+      clnote="[opencl vs CPU]   avg dE=${cl_avg_de:-n/a}, max dE=${cl_max_de:-n/a}, ${cl_c}${cl_pct_de:-n/a}% px>(dE 2.3)${cl_r}"
     fi
   fi
 

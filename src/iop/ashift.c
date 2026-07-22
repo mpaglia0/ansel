@@ -2642,8 +2642,15 @@ static void do_crop(dt_iop_module_t *self, dt_iop_ashift_params_t *p)
     pcount = 2;
   }
 
+  // NMS_CROP_EPSILON (100 px^2) is a fixed absolute tolerance, but crop_fitness's magnitude scales
+  // with the image's area (tens of millions of px^2) — near identity params, the optimum is already
+  // ~the initial guess, the landscape goes near-flat, and floating-point noise alone keeps the
+  // simplex spread above this tiny absolute value forever, burning all NMS_CROP_ITERATIONS. Scale
+  // the tolerance with image area (floored at the original constant) instead.
+  const double crop_epsilon = fmax(NMS_CROP_EPSILON, 1e-4 * (double)crop_width * (double)crop_height);
+
   // start the simplex fit
-  const int iter = simplex(crop_fitness, params, pcount, NMS_CROP_EPSILON, NMS_CROP_SCALE, NMS_CROP_ITERATIONS,
+  const int iter = simplex(crop_fitness, params, pcount, crop_epsilon, NMS_CROP_SCALE, NMS_CROP_ITERATIONS,
                            crop_constraint, (void*)&cropfit);
   // in case the fit did not converge -> failed
   if(iter >= NMS_CROP_ITERATIONS) goto failed;
@@ -2697,22 +2704,15 @@ static void do_crop(dt_iop_module_t *self, dt_iop_ashift_params_t *p)
   return;
 
 failed:
-  // in case of failure: reset clipping margins, set "automatic cropping" parameter
-  // to "off" state, and display warning message
-  _clear_crop_box(p);
-  p->cropmode = ASHIFT_CROP_OFF;
-  dt_gui_freeze_begin();
-  dt_bauhaus_combobox_set(g->cropmode, p->cropmode);
-  dt_gui_freeze_end();
   g->fitting = 0;
-  dt_control_log(_("automatic cropping failed"));
 
-  if(g->editing)
-  {
-    dt_dev_pixelpipe_sync_virtual(self->dev, DT_DEV_PIPE_SYNCH);
-    dt_dev_get_thumbnail_size(self->dev);
-    dt_dev_pixelpipe_resync_history_all(self->dev);
-  }
+  // At rotation/lensshift (0,0,0) the target crop is trivially the full image regardless of
+  // whether the simplex formally reports convergence, so a non-convergence here is not worth
+  // reporting as a failure.
+  const gboolean identity_transform = (p->rotation == 0.0f && p->lensshift_v == 0.0f && p->lensshift_h == 0.0f);
+  if(!identity_transform)
+    dt_control_log(_("Automatic cropping failed. Keeping previous margins."));
+
   return;
 }
 

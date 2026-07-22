@@ -14,11 +14,31 @@ raws via Git LFS, baseline PNGs committed directly since they're small).
 ## Setup (once)
 
 ```sh
-git submodule update --init tests/image_test/samples
+git submodule update --init --checkout tests/image_test/samples
 ```
 
 That's it -- `tests/image_test.sh` uses this shared bank automatically once it's checked out
 (needs `git-lfs` installed: `sudo apt install git-lfs && git lfs install`, once per machine).
+
+This submodule is registered with `update = none` and `active = false` in `.gitmodules`, so
+it's opt-in: a plain `git submodule update --init --recursive` (the common blanket setup
+command, also used by CI) or `git clone --recurse-submodules`/`git pull --recurse-submodules`
+skips it silently instead of trying to pull this private repo. Fetching it always requires the
+explicit `--checkout` invocation above.
+
+Once you've opted in this way, it stays checked out, and a later plain `git pull
+--recurse-submodules` *will* fast-forward it to whatever commit the superproject has pinned
+-- that's intentional, it's how you pick up shared baseline updates. To sync it right away
+instead of waiting for your next pull, run the same command as initial setup minus `--init`
+(already registered, so not needed, but harmless to keep):
+
+```sh
+git submodule update --checkout tests/image_test/samples
+```
+
+If you want your local checkout to stop tracking it even after opting in, override it
+per-machine with `git config submodule.tests/image_test/samples.active false` (not committed
+-- this only applies to your own clone).
 
 To use your own raws instead (or on top of it), point at any local folder:
 
