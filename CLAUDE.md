@@ -462,6 +462,32 @@ dialog created without a transient parent at all (e.g. a popup menu action, whic
 legitimately use the popup's own toplevel — see `dtgtk/thumbnail.c`'s "Active modules" dialog)
 should instead be parented directly to `dt_ui_main_window(darktable.gui->ui)` at creation time.
 
+### Worker-thread → GUI-thread deferred callbacks referencing a shared struct need a refcount
+
+The `g_main_context_invoke(NULL, callback, params)` pattern (worker thread schedules `callback` to
+run later on the GUI thread) is used throughout the codebase to touch GTK widgets safely from a
+non-GUI thread. When `params` carries a pointer into a struct that can also be torn down
+independently through the same pattern (e.g. `libs/backgroundjobs.c`'s per-job
+`dt_lib_backgroundjob_element_t`, updated via `.updated`/`.message_updated`/`.cancellable` and torn
+down via `.destroyed`, all reachable concurrently from worker threads doing pixel/import work), a
+"destroy" callback can run — and free the struct — while an "update" callback scheduled earlier for
+the same struct is still queued, waiting for its turn on the GTK main loop. The queued update then
+dereferences freed memory (Sentry issue 130394919: `EXCEPTION_ACCESS_VIOLATION` in
+`gtk_label_set_text`, called from a stale `dt_lib_backgroundjob_element_t*`).
+
+`control->progress_system.mutex` (`control/progress.c`) only serializes the *scheduling* of these
+callbacks against each other — it says nothing about their relative *execution* order on the GUI
+thread, and does not protect a struct shared across independent worker threads that don't otherwise
+synchronize with each other before calling into the progress API.
+
+Fix pattern (mirrors the forms/history-item refcounting above): give the shared struct a
+`dt_atomic_int refcount`. Every proxy function that schedules a callback referencing it takes a
+reference first; every callback drops its reference on the way out, freeing the struct only when
+the count reaches zero — whichever callback that happens to be. The "destroy" callback additionally
+NULLs every GTK widget pointer in the struct (right after removing/destroying them) instead of
+freeing the struct outright, so any other callback still queued for the same struct sees NULL and
+skips the now-invalid widgets instead of touching freed GTK objects.
+
 ---
 
 ## Interpolation
