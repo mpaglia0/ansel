@@ -2055,6 +2055,17 @@ static gboolean _en_folders(int property, int n)
 {
   return item_is_folder(property);
 }
+// Unlike _en_folders(), also require Lighttable: dt_control_remove_images() unconditionally
+// refuses to run outside DT_VIEW_LIGHTTABLE (control/jobs/control_jobs.c), the same restriction
+// the global "File > Remove from library" menu enforces by graying itself out
+// (has_active_image_in_lighttable(), gui/actions/menu.c). This panel is also shown in the map and
+// print views (see views() above), where the context-menu action would otherwise appear enabled
+// but silently do nothing beyond a log message.
+static gboolean _en_folders_lighttable(int property, int n)
+{
+  const dt_view_t *cv = darktable.view_manager->current_view;
+  return item_is_folder(property) && cv && cv->view(cv) == DT_VIEW_LIGHTTABLE;
+}
 static gboolean _en_tags(int property, int n)
 {
   return item_is_tag(property);
@@ -2077,7 +2088,7 @@ typedef struct collect_action_t
 } collect_action_t;
 
 static const collect_action_t ACTIONS[] = {
-  { N_("remove from library..."), TRUE, _en_folders, _act_folders_remove },
+  { N_("remove from library..."), TRUE, _en_folders_lighttable, _act_folders_remove },
   { N_("relocate..."), TRUE, _en_folders, _act_folders_relocate },
   { N_("delete tag(s)..."), TRUE, _en_tags, _act_tags_remove },
   { N_("rename tag..."), FALSE, _en_tag_single, _act_tag_rename },
