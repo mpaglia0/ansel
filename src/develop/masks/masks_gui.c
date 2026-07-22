@@ -795,15 +795,55 @@ GtkWidget *dt_masks_create_menu(dt_masks_form_gui_t *gui, dt_masks_form_t *form,
   if(!gui->creation && (gui->form_selected || gui->node_selected) && op_form)
   {
     const float opacity = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_OPACITY);
-    const float hardness = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_HARDNESS);
 
-    _masks_gui_add_interaction_slider(menu, _("Size"), op_form, DT_MASKS_INTERACTION_SIZE,
-                                      DT_MASKS_INCREMENT_SCALE, -4.f, 4.0f, 0.01f, 0.0f, 2, "x", 1.0f,
-                                      gui, darktable.develop->gui_module);
-    _masks_gui_add_interaction_slider(menu, _("Fading"), op_form, DT_MASKS_INTERACTION_HARDNESS,
-                                      DT_MASKS_INCREMENT_ABSOLUTE, 0.f, 1.0f, 0.01f,
-                                      isfinite(hardness) ? hardness : 1.0f, 3, "%", 100.0f,
-                                      gui, darktable.develop->gui_module);
+    if(form->type & DT_MASKS_GRADIENT)
+    {
+      // For gradients, DT_MASKS_INTERACTION_HARDNESS is the shape curvature and
+      // DT_MASKS_INTERACTION_SIZE is the fade extent -- expose them under their actual names.
+      const float curvature = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_HARDNESS);
+      const float fade = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_SIZE);
+      float rotation = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_ROTATION);
+      if(!isfinite(rotation)) rotation = 0.0f;
+      if(rotation > 180.0f) rotation -= 360.0f;
+
+      _masks_gui_add_interaction_slider(menu, _("Curvature"), op_form, DT_MASKS_INTERACTION_HARDNESS,
+                                        DT_MASKS_INCREMENT_ABSOLUTE, -2.0f, 2.0f, 0.01f,
+                                        isfinite(curvature) ? curvature : 0.0f, 3, "%", 50.0f,
+                                        gui, darktable.develop->gui_module);
+      _masks_gui_add_interaction_slider(menu, _("Fade"), op_form, DT_MASKS_INTERACTION_SIZE,
+                                        DT_MASKS_INCREMENT_ABSOLUTE, 0.0f, 1.0f, 0.001f,
+                                        isfinite(fade) ? fade : 1.0f, 3, "%", 100.0f,
+                                        gui, darktable.develop->gui_module);
+      _masks_gui_add_interaction_slider(menu, _("Rotation"), op_form, DT_MASKS_INTERACTION_ROTATION,
+                                        DT_MASKS_INCREMENT_ABSOLUTE, -180.0f, 180.0f, 1.0f,
+                                        rotation, 1, "\302\260", 1.0f,
+                                        gui, darktable.develop->gui_module);
+    }
+    else
+    {
+      const float hardness = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_HARDNESS);
+
+      _masks_gui_add_interaction_slider(menu, _("Size"), op_form, DT_MASKS_INTERACTION_SIZE,
+                                        DT_MASKS_INCREMENT_SCALE, -4.f, 4.0f, 0.01f, 0.0f, 2, "x", 1.0f,
+                                        gui, darktable.develop->gui_module);
+      _masks_gui_add_interaction_slider(menu, _("Fading"), op_form, DT_MASKS_INTERACTION_HARDNESS,
+                                        DT_MASKS_INCREMENT_ABSOLUTE, 0.f, 1.0f, 0.01f,
+                                        isfinite(hardness) ? hardness : 1.0f, 3, "%", 100.0f,
+                                        gui, darktable.develop->gui_module);
+
+      if(form->type & DT_MASKS_ELLIPSE)
+      {
+        float rotation = dt_masks_form_get_interaction_value(op_form, DT_MASKS_INTERACTION_ROTATION);
+        if(!isfinite(rotation)) rotation = 0.0f;
+        if(rotation > 180.0f) rotation -= 360.0f;
+
+        _masks_gui_add_interaction_slider(menu, _("Rotation"), op_form, DT_MASKS_INTERACTION_ROTATION,
+                                          DT_MASKS_INCREMENT_ABSOLUTE, -180.0f, 180.0f, 1.0f,
+                                          rotation, 1, "\302\260", 1.0f,
+                                          gui, darktable.develop->gui_module);
+      }
+    }
+
     _masks_gui_add_interaction_slider(menu, _("Opacity"), op_form, DT_MASKS_INTERACTION_OPACITY,
                                       DT_MASKS_INCREMENT_ABSOLUTE, 0.0f, 1.0f, 0.01f,
                                       isfinite(opacity) ? opacity : 1.0f, 3, "%", 100.0f,

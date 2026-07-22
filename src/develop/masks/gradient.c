@@ -401,6 +401,8 @@ static float _gradient_get_interaction_value(const dt_masks_form_t *form, dt_mas
       return gradient->extent;
     case DT_MASKS_INTERACTION_HARDNESS:
       return gradient->curvature;
+    case DT_MASKS_INTERACTION_ROTATION:
+      return gradient->rotation;
     default:
       return NAN;
   }
@@ -421,6 +423,8 @@ static int _change_extent(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struc
                           int index, const float amount, const dt_masks_increment_t increment, const int flow);
 static int _change_curvature(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module,
                              int index, const float amount, const dt_masks_increment_t increment, const int flow);
+static int _change_rotation(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module,
+                            int index, const float amount, const dt_masks_increment_t increment, const int flow);
 
 static float _gradient_set_interaction_value(dt_masks_form_t *form, dt_masks_interaction_t interaction, float value,
                                              dt_masks_increment_t increment, int flow,
@@ -436,6 +440,9 @@ static float _gradient_set_interaction_value(dt_masks_form_t *form, dt_masks_int
       return _gradient_get_interaction_value(form, interaction);
     case DT_MASKS_INTERACTION_HARDNESS:
       if(!_change_curvature(form, gui, module, index, value, increment, flow)) return NAN;
+      return _gradient_get_interaction_value(form, interaction);
+    case DT_MASKS_INTERACTION_ROTATION:
+      if(!_change_rotation(form, gui, module, index, value, increment, flow)) return NAN;
       return _gradient_get_interaction_value(form, interaction);
     default:
       return NAN;
