@@ -449,6 +449,18 @@ static inline gboolean _is_downsample_method(const dt_iop_demosaic_method_t meth
   return method == DT_IOP_DEMOSAIC_DOWNSAMPLE;
 }
 
+static inline __attribute__((always_inline)) const char *_pipe_type_string(dt_dev_pixelpipe_type_t type)
+{
+  switch(type)
+  {
+    case DT_DEV_PIXELPIPE_EXPORT:    return "export";
+    case DT_DEV_PIXELPIPE_FULL:      return "full";
+    case DT_DEV_PIXELPIPE_PREVIEW:   return "preview";
+    case DT_DEV_PIXELPIPE_THUMBNAIL: return "thumbnail";
+    default:                         return "none";
+  }
+}
+
 /**
  * @brief Build one half-size RGB pixel from the 2x2 CFA block backing it.
  *
@@ -1019,6 +1031,12 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
     else if(pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU_MONO)
       demosaicing_method = DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME;
   }
+
+  dt_print(DT_DEBUG_DEMOSAIC,
+           "[demosaic] CPU pipe %p (%s) thread %lu piece %p roi_in=(%d,%d) %dx%d dsc_in.filters=0x%x -> filters=0x%x xtrans_raw=%p method=%s\n",
+           (void *)pipe, _pipe_type_string(pipe->type), (unsigned long)pthread_self(), (void *)piece,
+           roi_in->x, roi_in->y, roi_in->width, roi_in->height,
+           piece->dsc_in.filters, filters, (void *)xtrans_raw, method2string(demosaicing_method));
 
   const float *const pixels = (float *)i;
 
@@ -1646,6 +1664,12 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     else if(pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU_MONO)
       demosaicing_method = DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME;
   }
+
+  dt_print(DT_DEBUG_DEMOSAIC,
+           "[demosaic] CL pipe %p (%s) thread %lu piece %p devid=%d roi_in=(%d,%d) %dx%d dsc_in.filters=0x%x -> filters=0x%x method=%s\n",
+           (void *)pipe, _pipe_type_string(pipe->type), (unsigned long)pthread_self(), (void *)piece,
+           pipe->devid, roi_in->x, roi_in->y, roi_in->width, roi_in->height,
+           piece->dsc_in.filters, filters, method2string(demosaicing_method));
 
   cl_mem high_image = NULL;
   cl_mem low_image = NULL;
