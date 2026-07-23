@@ -111,6 +111,42 @@ a real GPU id causes the GUI thread to enqueue a GPU read without owning the dev
 pipeline's OpenCL events → SIGSEGV in `clReleaseEvent`. Device-only entries then report a miss
 to the GUI, which waits for the pipeline to publish a host copy instead.
 
+### A toggled-on GPU module can erase a host-cache requirement inherited from further downstream
+
+`_seal_opencl_cache_policy()` (`develop/dev_pixelpipe.c`) walks `pipe->nodes` backwards once per
+resync to decide, per module, whether its output must be copied from device to host RAM
+(`piece->cache_output_on_ram`). It threads a `current_output_must_cache_host` flag upstream: each
+enabled module recomputes it from its own properties (`!supports_opencl || active_in_gui || ...`)
+and hands the result to whichever module sits before it in pipe order. A **disabled** module is
+skipped via `continue` before that handoff, so the requirement from further downstream correctly
+keeps flowing through it untouched.
+
+The bug was in the handoff itself: it assigned (`=`) instead of combined (`||`), so an **enabled**
+GPU-capable module that itself needs no host input silently replaced — rather than passed through —
+whatever requirement was inherited from further downstream. Toggling such a module from disabled to
+enabled (e.g. `iop/rawoverexposed.c`: `IOP_FLAGS_NO_HISTORY_STACK`, GPU-capable, no GUI/histogram
+reason of its own to need host data) made it start participating in the loop and erased the
+correctly-propagated `TRUE` requirement coming from a CPU-only module further downstream (`dither`),
+even though that module's own need for host data never changed.
+
+Concretely: with the overlay enabled, `colorout`'s GPU kernel computed correct new pixels on every
+re-render (`process_cl()` ran fine), but the GPU→host readback
+(`dt_dev_pixelpipe_cache_sync_cl_buffer`, gated by `if(*cache_output)` in `pixelpipe_gpu.c`) was
+skipped because `colorout`'s `cache_output_on_ram` came out `FALSE`. Because pixelpipe cache entries
+are reused in place via hash *rekey* rather than freshly allocated
+(`_cache_try_rekey_reuse_locked`), the stale host bytes from the entry's previous life persisted
+under the new hash key. Once the overlay was disabled again, `dither` (CPU-only) read directly from
+`colorout`'s cacheline and got those stale, pre-toggle pixels — silently mismatched from the current
+pan/zoom, even though every hash and ROI in the chain was individually correct. Only reproduced with
+OpenCL enabled (`--disable-opencl` sidesteps it entirely: every module then unconditionally needs
+host data, so the flag is always `TRUE`).
+
+Fixed by propagating the OR of the inherited flag and the current module's own requirement
+(`current_output_must_cache_host = previous_output_must_cache_host || current_output_must_cache_host`),
+so a host requirement, once established anywhere downstream, survives every enabled module between
+it and whichever module's cache policy is being decided — regardless of whether any of those modules
+dynamically toggles.
+
 ### The darkroom worker thread must be joined before view `leave()` tears down pipe state
 
 `dt_dev_darkroom_pipeline()` runs forever in the dedicated `DT_CTL_WORKER_DARKROOM` job thread,

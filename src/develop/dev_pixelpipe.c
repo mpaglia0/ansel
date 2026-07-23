@@ -386,7 +386,13 @@ static void _seal_opencl_cache_policy(dt_dev_pixelpipe_t *pipe)
           || global_hist_output_on
           || current_output_must_cache_host;
 
-    current_output_must_cache_host = previous_output_must_cache_host;
+    // A GPU-capable module that itself needs no host copy of its input must not erase a host
+    // requirement inherited from further downstream (e.g. a CPU-only module reached through it,
+    // or through a module that is disabled right now but was enabled a moment ago and left a
+    // stale host-less cacheline behind). Once established, the requirement has to keep
+    // propagating upstream, module after module, or an intermediate GPU module silently resets
+    // it and the module before it skips the readback that a later, non-adjacent consumer needs.
+    current_output_must_cache_host = previous_output_must_cache_host || current_output_must_cache_host;
   }
 }
 
@@ -1487,8 +1493,10 @@ void dt_pixelpipe_get_global_hash(dt_dev_pixelpipe_t *pipe)
     if(darktable.unmuted & DT_DEBUG_VERBOSE)
     {
       gchar *type = _get_debug_pipe_name(pipe, pipe->dev);
-      dt_print(DT_DEBUG_PIPE, "[pixelpipe] global hash for %20s (%s) in pipe %s with hash %lu\n",
-               piece->module->op, piece->module->multi_name, type, (long unsigned int)hash);
+      dt_print(DT_DEBUG_PIPE,
+               "[pixelpipe] global hash for %20s (%s) in pipe %s enabled=%d bypass_cache=%d with hash %lu\n",
+               piece->module->op, piece->module->multi_name, type, piece->enabled, piece->bypass_cache,
+               (long unsigned int)hash);
       dt_free(type);
     }
     // In case of drawn masks, we would need to account only for the distortions of previous modules.
