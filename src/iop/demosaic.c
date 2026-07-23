@@ -61,7 +61,6 @@
 #include "common/darktable.h"
 #include "common/imagebuf.h"
 #include "common/image_cache.h"
-#include "common/imageio_rawspeed.h" // for dt_rawspeed_crop_dcraw_filters
 #include "common/interpolation.h"
 #include "common/math.h"
 #include "common/opencl.h"
@@ -1013,7 +1012,7 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
   // `filters` up front — passing a locally pre-shifted table to the roi-aware algorithms
   // instead would double their own correction on top of it.
   const uint8_t(*const xtrans_raw)[6] = (const uint8_t(*const)[6])piece->dsc_in.xtrans;
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   dt_iop_demosaic_data_t *data = (dt_iop_demosaic_data_t *)piece->data;
   dt_iop_demosaic_global_data_t *gd = (dt_iop_demosaic_global_data_t *)self->global_data;
@@ -1219,7 +1218,7 @@ static int process_default_cl(struct dt_iop_module_t *self, const dt_dev_pixelpi
 
   // The PPG kernels below work in tile-local coordinates with no roi awareness, so they
   // need the dynamic ROI offset folded into filters up front (see process()'s comment).
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   // green equilibration
   if(data->green_eq != DT_IOP_GREEN_EQ_NO)
@@ -1646,7 +1645,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   // explicit argument and self-correct against the unshifted piece->dsc_in.filters/xtrans.
   // Only the bayer downsample kernel works in tile-local coordinates with no roi awareness,
   // so it alone needs the dynamic offset folded in up front.
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   dt_iop_demosaic_data_t *data = (dt_iop_demosaic_data_t *)piece->data;
   dt_iop_demosaic_global_data_t *gd = (dt_iop_demosaic_global_data_t *)self->global_data;

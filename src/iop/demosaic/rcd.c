@@ -594,7 +594,7 @@ static int process_rcd_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t
 
   // RCD works in tile-local coordinates with no roi awareness, so it needs the dynamic
   // ROI offset folded into filters up front (see demosaic.c process()'s matching comment).
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   // green equilibration
   if(data->green_eq != DT_IOP_GREEN_EQ_NO)

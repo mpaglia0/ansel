@@ -237,15 +237,20 @@ places, each owning a different, non-overlapping part of the total shift:
   zooms, or crops). It writes the result to `piece->dsc_out.filters`/`xtrans`, which propagates
   forward to demosaic's `piece->dsc_in` through the normal `input_format()`/`output_format()`
   contract — never through a shared, pipe-wide field.
-- `iop/demosaic.c`'s `process()`/`process_cl()` fold in the **dynamic, ROI-dependent** part, fresh
-  on every call, from the module's own current `roi_in->x/y`. This must happen in `process()`/
-  `process_cl()`, not in `modify_roi_in()`/`output_format()`: those ROI-planning callbacks run
-  before `piece->dsc_in` is guaranteed to be populated for this resync. It also must never write
-  back into `piece->dsc_in`/`dsc_out` — those are sealed contracts, read-only once processing
-  starts (see the `dt_dev_pixelpipe_iop_t` doc comment in `pixelpipe_hb.h`). The result — a locally
-  rotated `xtrans_raw`-derived table, or a `filters` value passed through
-  `dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y)` — is a plain local
-  variable, discarded at the end of the call, recomputed next time.
+- Every consumer's `process()`/`process_cl()` folds in the **dynamic, ROI-dependent** part, fresh
+  on every call, from the module's own current `roi_in->x/y`, via the shared helper
+  `dt_dev_get_roi_filters(piece, roi_in)` (`develop/imageop.c`, next to `dt_dev_get_module_scale()`).
+  This must happen in `process()`/`process_cl()`, not in `modify_roi_in()`/`output_format()`: those
+  ROI-planning callbacks run before `piece->dsc_in` is guaranteed to be populated for this resync —
+  and, more fundamentally, `dsc_in`/`dsc_out` are settled once by a single pipe-wide pass that runs
+  independently of per-tile ROI refinement, so a value baked in there would be correct for at most
+  one tile and silently wrong for every other tile once the piece is large enough to get tiled
+  (`IOP_FLAGS_ALLOW_TILING` modules get `process()`/`process_cl()` called once per tile, each with
+  its own `roi_in`, but `modify_roi_in()`/`output_format()` only once for the untiled request). It
+  also must never write back into `piece->dsc_in`/`dsc_out` — those are sealed contracts, read-only
+  once processing starts (see the `dt_dev_pixelpipe_iop_t` doc comment in `pixelpipe_hb.h`). The
+  result — a locally rotated `xtrans_raw`-derived table, or the `filters` word `dt_dev_get_roi_filters()`
+  returns — is a plain local variable, discarded at the end of the call, recomputed next time.
 
 Every demosaic algorithm falls into exactly one of two categories, and mixing them up is the
 recurring failure mode here:
@@ -259,11 +264,12 @@ recurring failure mode here:
   this group.
 - **Tile-local**: the algorithm addresses pixels in buffer-relative coordinates with no ROI
   awareness at all (`FC(row, col, filters)` where `row`/`col` are local loop indices). These need
-  the **fully pre-shifted** `filters` computed once at the top of `process()`/`process_cl()`/
-  `process_rcd_cl()` — passing them the raw, margin-only table silently drops the dynamic part of
-  the shift. RCD, LMMSE, PPG, AMaZE, and the Bayer downsample path (CPU and OpenCL) are in this
-  group. Bayer has no xtrans-table equivalent of this split: `dt_rawspeed_crop_dcraw_filters()`
-  already no-ops on X-Trans (`filters == 9u`), so it is always safe to call.
+  the **fully pre-shifted** `filters` from `dt_dev_get_roi_filters(piece, roi_in)`, computed once
+  at the top of `process()`/`process_cl()`/`process_rcd_cl()` — passing them the raw, margin-only
+  table silently drops the dynamic part of the shift. RCD, LMMSE, PPG, AMaZE, and the Bayer
+  downsample path (CPU and OpenCL) are in this group. Bayer has no xtrans-table equivalent of this
+  split: `dt_rawspeed_crop_dcraw_filters()` already no-ops on X-Trans (`filters == 9u`), so
+  `dt_dev_get_roi_filters()` is always safe to call regardless of sensor type.
 
 A third, narrower trap lives inside `xtrans_markesteijn_interpolate()`/`xtrans_fdc_interpolate()`
 (`iop/demosaic/markesteijn.c`, CPU and OpenCL builders alike): the `allhex[3][3][...]` neighbor-
