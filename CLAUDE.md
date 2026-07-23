@@ -224,13 +224,14 @@ buffer-relative pixels and never re-derives its own absolute position from `pipe
 correctly positioned even when the base image content is offset — a mismatch between a mask and
 the image it's drawn on is a symptom of this class of bug, not of the masking code.
 
-### Demosaic's Bayer/X-Trans phase is computed fresh per crop, not snapped
+### CFA phase (Bayer/X-Trans) is computed fresh per crop, not snapped — demosaic and highlights alike
 
-Once `basebuffer` honors the real crop offset, that offset reaches `demosaic` unrounded — it is
-almost never a multiple of the sensor's repeating pattern (2 px for Bayer, 6×6 px for X-Trans).
-Getting the per-pixel color identity wrong for such an offset produces wrong colors or, if the
-wrongness compounds, fully scrambled blocks of pixels. The phase handling is split across two
-places, each owning a different, non-overlapping part of the total shift:
+Once `basebuffer` honors the real crop offset, that offset reaches every pre-demosaic RAW-domain
+module unrounded (`demosaic` itself, but also anything upstream of it in `iop_order` that reads the
+CFA, e.g. `highlights`) — it is almost never a multiple of the sensor's repeating pattern (2 px for
+Bayer, 6×6 px for X-Trans). Getting the per-pixel color identity wrong for such an offset produces
+wrong colors or, if the wrongness compounds, fully scrambled blocks of pixels. The phase handling
+is split across two places, each owning a different, non-overlapping part of the total shift:
 
 - `iop/rawprepare.c`'s `_update_output_cfa_descriptor()` folds in only the **fixed sensor border
   trim** (`d->x`/`d->y`, constant for a given camera/image, independent of how the user pans,
@@ -251,9 +252,14 @@ places, each owning a different, non-overlapping part of the total shift:
   once processing starts (see the `dt_dev_pixelpipe_iop_t` doc comment in `pixelpipe_hb.h`). The
   result — a locally rotated `xtrans_raw`-derived table, or the `filters` word `dt_dev_get_roi_filters()`
   returns — is a plain local variable, discarded at the end of the call, recomputed next time.
+  Call `dt_dev_get_roi_filters()` for every new tile-local consumer instead of inlining
+  `dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y)` again — it now has
+  two call families (demosaic's own algorithms below, and `iop/highlights.c`'s laplacian Bayer
+  reconstruction, CPU and OpenCL) and duplicating the one-liner a third time is how this class of
+  bug keeps reappearing instead of getting fixed once.
 
-Every demosaic algorithm falls into exactly one of two categories, and mixing them up is the
-recurring failure mode here:
+Every algorithm that reads the CFA — in demosaic or elsewhere — falls into exactly one of two
+categories, and mixing them up is the recurring failure mode here:
 
 - **Self-correcting**: the algorithm takes `roi_in`/explicit `x,y` alongside the filters/xtrans
   table and adds the offset itself at each color lookup (`FCxtrans(row, col, roi_in, xtrans)`,
@@ -267,9 +273,13 @@ recurring failure mode here:
   the **fully pre-shifted** `filters` from `dt_dev_get_roi_filters(piece, roi_in)`, computed once
   at the top of `process()`/`process_cl()`/`process_rcd_cl()` — passing them the raw, margin-only
   table silently drops the dynamic part of the shift. RCD, LMMSE, PPG, AMaZE, and the Bayer
-  downsample path (CPU and OpenCL) are in this group. Bayer has no xtrans-table equivalent of this
-  split: `dt_rawspeed_crop_dcraw_filters()` already no-ops on X-Trans (`filters == 9u`), so
-  `dt_dev_get_roi_filters()` is always safe to call regardless of sensor type.
+  downsample path (CPU and OpenCL) are in this group, and so is `iop/highlights.c`'s laplacian
+  Bayer reconstruction (CPU and OpenCL, through the shared `interpolate_and_mask`/
+  `remosaic_and_replace` kernels — those two kernels have no ROI-offset argument of their own,
+  unlike `highlights_normalize_reduce_first`, which does and stays self-correcting on the raw
+  table). Bayer has no xtrans-table equivalent of this split: `dt_rawspeed_crop_dcraw_filters()`
+  already no-ops on X-Trans (`filters == 9u`), so `dt_dev_get_roi_filters()` is always safe to call
+  regardless of sensor type.
 
 A third, narrower trap lives inside `xtrans_markesteijn_interpolate()`/`xtrans_fdc_interpolate()`
 (`iop/demosaic/markesteijn.c`, CPU and OpenCL builders alike): the `allhex[3][3][...]` neighbor-

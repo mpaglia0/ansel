@@ -1820,7 +1820,10 @@ static int process_laplacian_bayer(struct dt_iop_module_t *self, const dt_dev_pi
   dt_iop_highlights_data_t *data = (dt_iop_highlights_data_t *)piece->data;
   int err = 0;
 
-  const uint32_t filters = piece->dsc_in.filters;
+  // Every helper below (normalization, gather, remosaic) reads FC(row, col, filters) with
+  // tile-local row/col (0-based within this buffer, no roi offset added), so filters must be
+  // pre-shifted for roi_in's crop position here -- mirrors demosaic.c's tile-local algorithms.
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   const size_t height = roi_in->height;
   const size_t width = roi_in->width;
@@ -2188,7 +2191,12 @@ static cl_int process_laplacian_bayer_cl(struct dt_iop_module_t *self, const dt_
   size_t sizes[] = { ROUNDUPDWD(width, devid), ROUNDUPDHT(height, devid), 1 };
   size_t ds_sizes[] = { ROUNDUPDWD(ds_width, devid), ROUNDUPDHT(ds_height, devid), 1 };
 
+  // kernel_highlights_normalize_reduce_first is self-correcting: it takes the raw filters
+  // below PLUS roi_in->x/y as separate kernel args and adds them itself. interpolate_and_mask
+  // and remosaic_and_replace have no roi offset args at all -- they need filters pre-shifted
+  // for roi_in's crop position instead (mirrors the CPU process_laplacian_bayer fix).
   const uint32_t filters = piece->dsc_in.filters;
+  const uint32_t filters_shifted = dt_dev_get_roi_filters(piece, roi_in);
 
   cl_mem interpolated = dt_opencl_alloc_device(devid, sizes[0], sizes[1], sizeof(float) * 4);  // [R, G, B, norm] for each pixel
   cl_mem clipping_mask = dt_opencl_alloc_device(devid, sizes[0], sizes[1], sizeof(float) * 4); // [R, G, B, norm] for each pixel
@@ -2292,7 +2300,7 @@ static cl_int process_laplacian_bayer_cl(struct dt_iop_module_t *self, const dt_
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 2, sizeof(cl_mem), (void *)&temp);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 3, sizeof(cl_mem), (void *)&clips_cl);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 4, sizeof(cl_mem), (void *)&normalization_final);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 5, sizeof(int), (void *)&filters);
+  dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 5, sizeof(int), (void *)&filters_shifted);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 6, sizeof(int), (void *)&roi_out->width);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_bilinear_and_mask, 7, sizeof(int),
                            (void *)&roi_out->height);
@@ -2358,7 +2366,7 @@ static cl_int process_laplacian_bayer_cl(struct dt_iop_module_t *self, const dt_
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 2, sizeof(cl_mem), (void *)&clipping_mask);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 3, sizeof(cl_mem), (void *)&dev_out);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 4, sizeof(cl_mem), (void *)&normalization_final);
-  dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 5, sizeof(int), (void *)&filters);
+  dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 5, sizeof(int), (void *)&filters_shifted);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 6, sizeof(int), (void *)&width);
   dt_opencl_set_kernel_arg(devid, gd->kernel_highlights_remosaic_and_replace, 7, sizeof(int), (void *)&height);
   err = dt_opencl_enqueue_kernel_2d(devid, gd->kernel_highlights_remosaic_and_replace, sizes);
@@ -2699,7 +2707,12 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
 {
   const dt_iop_roi_t *const roi_in = &piece->roi_in;
   const dt_iop_roi_t *const roi_out = &piece->roi_out;
-  const uint32_t filters = piece->dsc_in.filters;
+  // process_visualize and interpolate_color (INPAINT mode) below read FC(row, col, filters)
+  // with tile-local row/col, so filters must be pre-shifted for roi_in's crop position here.
+  // The laplacian dispatch below passes roi_in/roi_out, not this filters value, and derives its
+  // own (correctly shifted) copy internally -- shifting this local doesn't affect it. The
+  // filters==9u / !filters checks are shift-invariant.
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
   dt_iop_highlights_data_t *data = (dt_iop_highlights_data_t *)piece->data;
   dt_iop_highlights_gui_data_t *g = (dt_iop_highlights_gui_data_t *)self->gui_data;
 
