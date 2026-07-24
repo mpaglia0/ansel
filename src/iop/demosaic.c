@@ -61,7 +61,6 @@
 #include "common/darktable.h"
 #include "common/imagebuf.h"
 #include "common/image_cache.h"
-#include "common/imageio_rawspeed.h" // for dt_rawspeed_crop_dcraw_filters
 #include "common/interpolation.h"
 #include "common/math.h"
 #include "common/opencl.h"
@@ -447,6 +446,18 @@ static inline __attribute__((always_inline)) const char* method2string(dt_iop_de
 static inline gboolean _is_downsample_method(const dt_iop_demosaic_method_t method)
 {
   return method == DT_IOP_DEMOSAIC_DOWNSAMPLE;
+}
+
+static inline __attribute__((always_inline)) const char *_pipe_type_string(dt_dev_pixelpipe_type_t type)
+{
+  switch(type)
+  {
+    case DT_DEV_PIXELPIPE_EXPORT:    return "export";
+    case DT_DEV_PIXELPIPE_FULL:      return "full";
+    case DT_DEV_PIXELPIPE_PREVIEW:   return "preview";
+    case DT_DEV_PIXELPIPE_THUMBNAIL: return "thumbnail";
+    default:                         return "none";
+  }
 }
 
 /**
@@ -1001,7 +1012,7 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
   // `filters` up front — passing a locally pre-shifted table to the roi-aware algorithms
   // instead would double their own correction on top of it.
   const uint8_t(*const xtrans_raw)[6] = (const uint8_t(*const)[6])piece->dsc_in.xtrans;
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   dt_iop_demosaic_data_t *data = (dt_iop_demosaic_data_t *)piece->data;
   dt_iop_demosaic_global_data_t *gd = (dt_iop_demosaic_global_data_t *)self->global_data;
@@ -1019,6 +1030,12 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
     else if(pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU_MONO)
       demosaicing_method = DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME;
   }
+
+  dt_print(DT_DEBUG_DEMOSAIC,
+           "[demosaic] CPU pipe %p (%s) thread %lu piece %p roi_in=(%d,%d) %dx%d dsc_in.filters=0x%x -> filters=0x%x xtrans_raw=%p method=%s\n",
+           (void *)pipe, _pipe_type_string(pipe->type), (unsigned long)pthread_self(), (void *)piece,
+           roi_in->x, roi_in->y, roi_in->width, roi_in->height,
+           piece->dsc_in.filters, filters, (void *)xtrans_raw, method2string(demosaicing_method));
 
   const float *const pixels = (float *)i;
 
@@ -1201,7 +1218,7 @@ static int process_default_cl(struct dt_iop_module_t *self, const dt_dev_pixelpi
 
   // The PPG kernels below work in tile-local coordinates with no roi awareness, so they
   // need the dynamic ROI offset folded into filters up front (see process()'s comment).
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   // green equilibration
   if(data->green_eq != DT_IOP_GREEN_EQ_NO)
@@ -1628,7 +1645,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   // explicit argument and self-correct against the unshifted piece->dsc_in.filters/xtrans.
   // Only the bayer downsample kernel works in tile-local coordinates with no roi awareness,
   // so it alone needs the dynamic offset folded in up front.
-  const uint32_t filters = dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y);
+  const uint32_t filters = dt_dev_get_roi_filters(piece, roi_in);
 
   dt_iop_demosaic_data_t *data = (dt_iop_demosaic_data_t *)piece->data;
   dt_iop_demosaic_global_data_t *gd = (dt_iop_demosaic_global_data_t *)self->global_data;
@@ -1646,6 +1663,12 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     else if(pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU_MONO)
       demosaicing_method = DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME;
   }
+
+  dt_print(DT_DEBUG_DEMOSAIC,
+           "[demosaic] CL pipe %p (%s) thread %lu piece %p devid=%d roi_in=(%d,%d) %dx%d dsc_in.filters=0x%x -> filters=0x%x method=%s\n",
+           (void *)pipe, _pipe_type_string(pipe->type), (unsigned long)pthread_self(), (void *)piece,
+           pipe->devid, roi_in->x, roi_in->y, roi_in->width, roi_in->height,
+           piece->dsc_in.filters, filters, method2string(demosaicing_method));
 
   cl_mem high_image = NULL;
   cl_mem low_image = NULL;

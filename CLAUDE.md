@@ -111,6 +111,42 @@ a real GPU id causes the GUI thread to enqueue a GPU read without owning the dev
 pipeline's OpenCL events → SIGSEGV in `clReleaseEvent`. Device-only entries then report a miss
 to the GUI, which waits for the pipeline to publish a host copy instead.
 
+### A toggled-on GPU module can erase a host-cache requirement inherited from further downstream
+
+`_seal_opencl_cache_policy()` (`develop/dev_pixelpipe.c`) walks `pipe->nodes` backwards once per
+resync to decide, per module, whether its output must be copied from device to host RAM
+(`piece->cache_output_on_ram`). It threads a `current_output_must_cache_host` flag upstream: each
+enabled module recomputes it from its own properties (`!supports_opencl || active_in_gui || ...`)
+and hands the result to whichever module sits before it in pipe order. A **disabled** module is
+skipped via `continue` before that handoff, so the requirement from further downstream correctly
+keeps flowing through it untouched.
+
+The bug was in the handoff itself: it assigned (`=`) instead of combined (`||`), so an **enabled**
+GPU-capable module that itself needs no host input silently replaced — rather than passed through —
+whatever requirement was inherited from further downstream. Toggling such a module from disabled to
+enabled (e.g. `iop/rawoverexposed.c`: `IOP_FLAGS_NO_HISTORY_STACK`, GPU-capable, no GUI/histogram
+reason of its own to need host data) made it start participating in the loop and erased the
+correctly-propagated `TRUE` requirement coming from a CPU-only module further downstream (`dither`),
+even though that module's own need for host data never changed.
+
+Concretely: with the overlay enabled, `colorout`'s GPU kernel computed correct new pixels on every
+re-render (`process_cl()` ran fine), but the GPU→host readback
+(`dt_dev_pixelpipe_cache_sync_cl_buffer`, gated by `if(*cache_output)` in `pixelpipe_gpu.c`) was
+skipped because `colorout`'s `cache_output_on_ram` came out `FALSE`. Because pixelpipe cache entries
+are reused in place via hash *rekey* rather than freshly allocated
+(`_cache_try_rekey_reuse_locked`), the stale host bytes from the entry's previous life persisted
+under the new hash key. Once the overlay was disabled again, `dither` (CPU-only) read directly from
+`colorout`'s cacheline and got those stale, pre-toggle pixels — silently mismatched from the current
+pan/zoom, even though every hash and ROI in the chain was individually correct. Only reproduced with
+OpenCL enabled (`--disable-opencl` sidesteps it entirely: every module then unconditionally needs
+host data, so the flag is always `TRUE`).
+
+Fixed by propagating the OR of the inherited flag and the current module's own requirement
+(`current_output_must_cache_host = previous_output_must_cache_host || current_output_must_cache_host`),
+so a host requirement, once established anywhere downstream, survives every enabled module between
+it and whichever module's cache policy is being decided — regardless of whether any of those modules
+dynamically toggles.
+
 ### The darkroom worker thread must be joined before view `leave()` tears down pipe state
 
 `dt_dev_darkroom_pipeline()` runs forever in the dedicated `DT_CTL_WORKER_DARKROOM` job thread,
@@ -188,31 +224,42 @@ buffer-relative pixels and never re-derives its own absolute position from `pipe
 correctly positioned even when the base image content is offset — a mismatch between a mask and
 the image it's drawn on is a symptom of this class of bug, not of the masking code.
 
-### Demosaic's Bayer/X-Trans phase is computed fresh per crop, not snapped
+### CFA phase (Bayer/X-Trans) is computed fresh per crop, not snapped — demosaic and highlights alike
 
-Once `basebuffer` honors the real crop offset, that offset reaches `demosaic` unrounded — it is
-almost never a multiple of the sensor's repeating pattern (2 px for Bayer, 6×6 px for X-Trans).
-Getting the per-pixel color identity wrong for such an offset produces wrong colors or, if the
-wrongness compounds, fully scrambled blocks of pixels. The phase handling is split across two
-places, each owning a different, non-overlapping part of the total shift:
+Once `basebuffer` honors the real crop offset, that offset reaches every pre-demosaic RAW-domain
+module unrounded (`demosaic` itself, but also anything upstream of it in `iop_order` that reads the
+CFA, e.g. `highlights`) — it is almost never a multiple of the sensor's repeating pattern (2 px for
+Bayer, 6×6 px for X-Trans). Getting the per-pixel color identity wrong for such an offset produces
+wrong colors or, if the wrongness compounds, fully scrambled blocks of pixels. The phase handling
+is split across two places, each owning a different, non-overlapping part of the total shift:
 
 - `iop/rawprepare.c`'s `_update_output_cfa_descriptor()` folds in only the **fixed sensor border
   trim** (`d->x`/`d->y`, constant for a given camera/image, independent of how the user pans,
   zooms, or crops). It writes the result to `piece->dsc_out.filters`/`xtrans`, which propagates
   forward to demosaic's `piece->dsc_in` through the normal `input_format()`/`output_format()`
   contract — never through a shared, pipe-wide field.
-- `iop/demosaic.c`'s `process()`/`process_cl()` fold in the **dynamic, ROI-dependent** part, fresh
-  on every call, from the module's own current `roi_in->x/y`. This must happen in `process()`/
-  `process_cl()`, not in `modify_roi_in()`/`output_format()`: those ROI-planning callbacks run
-  before `piece->dsc_in` is guaranteed to be populated for this resync. It also must never write
-  back into `piece->dsc_in`/`dsc_out` — those are sealed contracts, read-only once processing
-  starts (see the `dt_dev_pixelpipe_iop_t` doc comment in `pixelpipe_hb.h`). The result — a locally
-  rotated `xtrans_raw`-derived table, or a `filters` value passed through
-  `dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y)` — is a plain local
-  variable, discarded at the end of the call, recomputed next time.
+- Every consumer's `process()`/`process_cl()` folds in the **dynamic, ROI-dependent** part, fresh
+  on every call, from the module's own current `roi_in->x/y`, via the shared helper
+  `dt_dev_get_roi_filters(piece, roi_in)` (`develop/imageop.c`, next to `dt_dev_get_module_scale()`).
+  This must happen in `process()`/`process_cl()`, not in `modify_roi_in()`/`output_format()`: those
+  ROI-planning callbacks run before `piece->dsc_in` is guaranteed to be populated for this resync —
+  and, more fundamentally, `dsc_in`/`dsc_out` are settled once by a single pipe-wide pass that runs
+  independently of per-tile ROI refinement, so a value baked in there would be correct for at most
+  one tile and silently wrong for every other tile once the piece is large enough to get tiled
+  (`IOP_FLAGS_ALLOW_TILING` modules get `process()`/`process_cl()` called once per tile, each with
+  its own `roi_in`, but `modify_roi_in()`/`output_format()` only once for the untiled request). It
+  also must never write back into `piece->dsc_in`/`dsc_out` — those are sealed contracts, read-only
+  once processing starts (see the `dt_dev_pixelpipe_iop_t` doc comment in `pixelpipe_hb.h`). The
+  result — a locally rotated `xtrans_raw`-derived table, or the `filters` word `dt_dev_get_roi_filters()`
+  returns — is a plain local variable, discarded at the end of the call, recomputed next time.
+  Call `dt_dev_get_roi_filters()` for every new tile-local consumer instead of inlining
+  `dt_rawspeed_crop_dcraw_filters(piece->dsc_in.filters, roi_in->x, roi_in->y)` again — it now has
+  two call families (demosaic's own algorithms below, and `iop/highlights.c`'s laplacian Bayer
+  reconstruction, CPU and OpenCL) and duplicating the one-liner a third time is how this class of
+  bug keeps reappearing instead of getting fixed once.
 
-Every demosaic algorithm falls into exactly one of two categories, and mixing them up is the
-recurring failure mode here:
+Every algorithm that reads the CFA — in demosaic or elsewhere — falls into exactly one of two
+categories, and mixing them up is the recurring failure mode here:
 
 - **Self-correcting**: the algorithm takes `roi_in`/explicit `x,y` alongside the filters/xtrans
   table and adds the offset itself at each color lookup (`FCxtrans(row, col, roi_in, xtrans)`,
@@ -223,11 +270,16 @@ recurring failure mode here:
   this group.
 - **Tile-local**: the algorithm addresses pixels in buffer-relative coordinates with no ROI
   awareness at all (`FC(row, col, filters)` where `row`/`col` are local loop indices). These need
-  the **fully pre-shifted** `filters` computed once at the top of `process()`/`process_cl()`/
-  `process_rcd_cl()` — passing them the raw, margin-only table silently drops the dynamic part of
-  the shift. RCD, LMMSE, PPG, AMaZE, and the Bayer downsample path (CPU and OpenCL) are in this
-  group. Bayer has no xtrans-table equivalent of this split: `dt_rawspeed_crop_dcraw_filters()`
-  already no-ops on X-Trans (`filters == 9u`), so it is always safe to call.
+  the **fully pre-shifted** `filters` from `dt_dev_get_roi_filters(piece, roi_in)`, computed once
+  at the top of `process()`/`process_cl()`/`process_rcd_cl()` — passing them the raw, margin-only
+  table silently drops the dynamic part of the shift. RCD, LMMSE, PPG, AMaZE, and the Bayer
+  downsample path (CPU and OpenCL) are in this group, and so is `iop/highlights.c`'s laplacian
+  Bayer reconstruction (CPU and OpenCL, through the shared `interpolate_and_mask`/
+  `remosaic_and_replace` kernels — those two kernels have no ROI-offset argument of their own,
+  unlike `highlights_normalize_reduce_first`, which does and stays self-correcting on the raw
+  table). Bayer has no xtrans-table equivalent of this split: `dt_rawspeed_crop_dcraw_filters()`
+  already no-ops on X-Trans (`filters == 9u`), so `dt_dev_get_roi_filters()` is always safe to call
+  regardless of sensor type.
 
 A third, narrower trap lives inside `xtrans_markesteijn_interpolate()`/`xtrans_fdc_interpolate()`
 (`iop/demosaic/markesteijn.c`, CPU and OpenCL builders alike): the `allhex[3][3][...]` neighbor-

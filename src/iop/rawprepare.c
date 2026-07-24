@@ -232,7 +232,17 @@ static void _update_output_cfa_descriptor(const dt_dev_pixelpipe_t *pipe,
   const uint32_t crop_y = compute_proper_crop(piece, roi_in, d->y);
 
   dsc->filters = dt_rawspeed_crop_dcraw_filters(pipe->dev->image_storage.dsc.filters, crop_x, crop_y);
-  //fprintf(stdout, "crop: x=%u, y=%u\n", crop_x, crop_y);
+
+  dt_print(DT_DEBUG_DEMOSAIC,
+           "[rawprepare] pipe %p (%s) thread %lu piece %p dsc %p roi_in=(%d,%d) scale=%f d->x,y=(%d,%d) -> crop=(%u,%u) filters=0x%x -> 0x%x\n",
+           (void *)pipe, pipe->type == DT_DEV_PIXELPIPE_FULL ? "full" :
+                          pipe->type == DT_DEV_PIXELPIPE_PREVIEW ? "preview" :
+                          pipe->type == DT_DEV_PIXELPIPE_EXPORT ? "export" :
+                          pipe->type == DT_DEV_PIXELPIPE_THUMBNAIL ? "thumbnail" : "none",
+           (unsigned long)pthread_self(), (void *)piece, (void *)dsc,
+           roi_in->x, roi_in->y, roi_in->scale, d->x, d->y, crop_x, crop_y,
+           pipe->dev->image_storage.dsc.filters, dsc->filters);
+
   if(pipe->dev->image_storage.dsc.filters != 9u) return;
 
   /**
@@ -248,9 +258,7 @@ static void _update_output_cfa_descriptor(const dt_dev_pixelpipe_t *pipe,
     for(int j = 0; j < 6; ++j)
     {
       dsc->xtrans[j][i] = pipe->dev->image_storage.dsc.xtrans[(j + crop_y) % 6][(i + crop_x) % 6];
-      //fprintf(stdout, "%u\t", dsc->xtrans[j][i]);
     }
-    //fprintf(stdout, "\n");
   }
 }
 
