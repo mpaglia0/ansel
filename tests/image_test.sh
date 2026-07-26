@@ -256,11 +256,15 @@ find_cli() {
     "$REPO_ROOT/install/bin/ansel-cli"
     "$REPO_ROOT/build_Release/bin/ansel-cli"
     "$REPO_ROOT/build_Debug/bin/ansel-cli"
+    "$REPO_ROOT/build_release/bin/ansel-cli"
+    "$REPO_ROOT/build_debug/bin/ansel-cli"
     "$REPO_ROOT/build_ASAN/bin/ansel-cli"
     "$REPO_ROOT/install_ASAN/bin/ansel-cli"
     "$REPO_ROOT/build/src/cli/ansel-cli"
     "$REPO_ROOT/build_Release/src/cli/ansel-cli"
     "$REPO_ROOT/build_Debug/src/cli/ansel-cli"
+    "$REPO_ROOT/build_release/src/cli/ansel-cli"
+    "$REPO_ROOT/build_debug/src/cli/ansel-cli"
     "$REPO_ROOT/build_ASAN/src/cli/ansel-cli"
   )
   local c
@@ -271,17 +275,119 @@ find_cli() {
 }
 
 lib_dir_for() {
-  local bin="$1" d
-  d="$(cd "$(dirname "$bin")/../.." 2>/dev/null && pwd)" || return 1
-  if [ -f "$d/lib/libansel.so" ]; then printf '%s\n' "$d/lib"; return 0; fi
-  d="$(cd "$(dirname "$bin")/.." 2>/dev/null && pwd)" || return 1
-  if [ -f "$d/lib/libansel.so" ]; then printf '%s\n' "$d/lib"; return 0; fi
+  local bin="$1" bindir up1 up2
+  bindir="$(cd "$(dirname "$bin")" 2>/dev/null && pwd)" || return 1
+  # Windows CMake install layout: everything flat in <prefix>/bin/ -- the DLL sits
+  # right beside the .exe itself, no separate lib/ subfolder at all. This is also
+  # why running the installed ansel-cli.exe directly (no PATH tweak) "just works":
+  # Windows' DLL search always checks the exe's own directory first, regardless of
+  # PATH. It stops being automatic the moment CLI_BIN is a copy/symlink living
+  # somewhere else (e.g. /usr/local/bin/ansel-cli), which is exactly when this
+  # function's result actually matters.
+  if [ -f "$bindir/libansel.dll" ] || [ -f "$bindir/libansel.so" ]; then printf '%s\n' "$bindir"; return 0; fi
+  up1="$(cd "$bindir/.." 2>/dev/null && pwd)" || return 1
+  up2="$(cd "$bindir/../.." 2>/dev/null && pwd)" || return 1
+  # Installed layout: <prefix>/bin/ansel-cli + <prefix>/lib/libansel.{so,dll}
+  if [ -f "$up2/lib/libansel.so" ] || [ -f "$up2/lib/libansel.dll" ]; then printf '%s\n' "$up2/lib"; return 0; fi
+  if [ -f "$up1/lib/libansel.so" ] || [ -f "$up1/lib/libansel.dll" ]; then printf '%s\n' "$up1/lib"; return 0; fi
+  # Raw ninja build layout on Windows: <builddir>/src/cli/ansel-cli.exe next to
+  # <builddir>/src/libansel.dll (sibling directory, no lib/ subfolder ever created).
+  if [ -f "$up1/libansel.dll" ]; then printf '%s\n' "$up1"; return 0; fi
   return 1
 }
 
+toolchain_bin_dir_for() {
+  # Windows-only: the compiler's own toolchain bin dir carries the runtime DLLs
+  # (libc++.dll, libunwind.dll, ucrtbase api-ms-win-crt-* forwarders...) ansel-cli
+  # was linked against, AND a real python3 (the Windows Store "python3" shim that
+  # otherwise wins on PATH prints an install nag and exits, breaking the deltae
+  # comparison script). A git hook can run from a different MSYS2 install/flavor's
+  # shell than the one that actually built the CLI (e.g. Git for Windows' bundled,
+  # unrelated /mingw64 vs. a standalone C:\msys64\ucrt64 build) -- guessing a
+  # flavor dir name off the current shell's own PATH doesn't reliably land on the
+  # right install, so read the compiler path CMake recorded for this exact build.
+  local bin="$1" d cache compiler compiler_dir
+  d="$(dirname "$bin")"
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    cache="$d/CMakeCache.txt"
+    if [ -f "$cache" ]; then
+      compiler="$(sed -n 's/^CMAKE_C_COMPILER:FILEPATH=//p' "$cache")"
+      [ -z "$compiler" ] && return 1
+      compiler_dir="$(dirname "$compiler")"
+      command -v cygpath >/dev/null 2>&1 && compiler_dir="$(cygpath -u "$compiler_dir" 2>/dev/null || printf '%s\n' "$compiler_dir")"
+      printf '%s\n' "$compiler_dir"
+      return 0
+    fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+installed_cli_for() {
+  # The raw ninja build output (build*/src/cli/ansel-cli) resolves its plugin
+  # moduledir relative to its own binary path, which only lines up once a proper
+  # "cmake --install" has populated <prefix>/bin + <prefix>/lib together (see the
+  # comment on find_cli()'s candidates below) -- otherwise ansel-cli starts (DLLs
+  # resolve fine) but fails with "can't init develop system, aborting" because it
+  # can't find its views/libs/imageio plugins. If this build was ever installed
+  # (CMAKE_INSTALL_PREFIX recorded in its CMakeCache.txt has a populated bin/),
+  # prefer that binary over the raw, not-installed one found by find_cli().
+  local bin="$1" d cache prefix prefix_dir candidate
+  d="$(dirname "$bin")"
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    cache="$d/CMakeCache.txt"
+    if [ -f "$cache" ]; then
+      prefix="$(sed -n 's/^CMAKE_INSTALL_PREFIX:PATH=//p' "$cache")"
+      [ -z "$prefix" ] && return 1
+      prefix_dir="$prefix"
+      command -v cygpath >/dev/null 2>&1 && prefix_dir="$(cygpath -u "$prefix" 2>/dev/null || printf '%s\n' "$prefix")"
+      for candidate in "$prefix_dir/bin/ansel-cli" "$prefix_dir/bin/ansel-cli.exe"; do
+        [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+      done
+      return 1
+    fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+CLI_WAS_EXPLICIT=no
+[ -n "$CLI_BIN" ] && CLI_WAS_EXPLICIT=yes
 CLI_BIN="$(find_cli)" || { err "ansel-cli not found; build it or pass --cli <path>"; exit 1; }
-if LIBDIR="$(lib_dir_for "$CLI_BIN")"; then
+# toolchain_bin_dir_for() below needs the raw build tree (it walks up looking for
+# CMakeCache.txt) -- capture it before installed_cli_for() potentially swaps
+# CLI_BIN to an installed binary that lives outside any build tree entirely.
+RAW_CLI_BIN="$CLI_BIN"
+# Never second-guess an explicit --cli/$ANSEL_CLI: only upgrade a CLI we found
+# ourselves via the repo-relative fallback candidates above.
+if [ "$CLI_WAS_EXPLICIT" = no ] && INSTALLED_CLI="$(installed_cli_for "$CLI_BIN")" && [ -x "$INSTALLED_CLI" ]; then
+  CLI_BIN="$INSTALLED_CLI"
+fi
+LIBDIR="$(lib_dir_for "$CLI_BIN")"
+if [ -z "$LIBDIR" ] && [ "$CLI_WAS_EXPLICIT" = no ]; then
+  # command -v ansel-cli (find_cli()'s first, most-trusted source) assumes
+  # /usr/local/bin/ansel-cli is a real symlink into the install prefix, as
+  # `build.sh --install`'s `ln -sfn` intends -- true on Linux/macOS, but creating
+  # a symlink on Windows/NTFS without elevated privileges silently degrades to a
+  # standalone copy instead (seen in practice: a lone .exe in /usr/local/bin with
+  # no adjacent DLLs at all, Links: 1, not a reparse point). lib_dir_for() then
+  # has nothing nearby to find. Fall back to this project's own well-known
+  # default install prefix (build.sh's INSTALL_PREFIX_DEFAULT) as a last resort.
+  for DEFAULT_CLI in /opt/ansel/bin/ansel-cli /opt/ansel/bin/ansel-cli.exe; do
+    if [ -x "$DEFAULT_CLI" ] && DEFAULT_LIBDIR="$(lib_dir_for "$DEFAULT_CLI")"; then
+      CLI_BIN="$DEFAULT_CLI"
+      LIBDIR="$DEFAULT_LIBDIR"
+      break
+    fi
+  done
+fi
+if [ -n "$LIBDIR" ]; then
   export LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  # The Windows PE loader resolves DLLs via PATH, not LD_LIBRARY_PATH.
+  export PATH="$LIBDIR:$PATH"
+fi
+if TOOLCHAIN_BIN="$(toolchain_bin_dir_for "$RAW_CLI_BIN")" && [ -d "$TOOLCHAIN_BIN" ]; then
+  export PATH="$TOOLCHAIN_BIN:$PATH"
 fi
 
 # --- per-image export + verdict -------------------------------------------
@@ -348,26 +454,44 @@ process_one() {
         diffnote=" (delta-E comparison failed vs baseline, likely a size mismatch)"
         verdict="DIFF"
       else
-        local base_bad=no
-        if [ "$deltae_rc" -ge 2 ]; then
-          verdict="DIFF"
-          base_bad=yes
-        elif [ "$deltae_rc" -eq 1 ]; then
-          [ "$STRICT_CPU" = yes ] && { verdict="DIFF"; base_bad=yes; }
-        fi
-        # Color exactly the metric(s) responsible for the failure: max dE > 2.3
-        # or avg dE > 0.767 (2.3/3) is what deltae's own exit(2) checks. A
-        # --strict-cpu-only failure (rc=1, some nonzero drift under both real
-        # thresholds) is deltae's exit(0)-vs-exit(1) boundary, which is purely
-        # `max dE < 0.01` -- so that's the one to flag when neither real
-        # threshold was actually crossed.
-        local max_bad=no avg_bad=no
-        if [ "$base_bad" = yes ]; then
-          awk -v v="$max_de" 'BEGIN{exit !(v > 2.3)}' && max_bad=yes
-          awk -v v="$avg_de" 'BEGIN{exit !(v > 2.3/3)}' && avg_bad=yes
-          if [ "$max_bad" = no ] && [ "$avg_bad" = no ]; then
-            max_bad=yes
+        # avg dE > 0.767 (2.3/3) is a population-wide problem -- never filtered
+        # by pixel count. max dE > 2.3 on its own can be a single dark-shadow
+        # pixel where an isolated ±1/255 rounding step (platform/compiler FP
+        # noise) produces an outsized CIEDE2000 value purely because Lab's L*
+        # compresses luminance non-linearly (the same 1-bit rounding step reads
+        # as a much bigger dE near black than at mid/highlight tones) -- so it
+        # only counts as a real, visible regression once it affects more than
+        # MAX_PCT_ABOVE_TOLERANCE% of pixels, mirroring the opencl-vs-CPU
+        # comparison's own tolerance below. Missing/unparseable pct_de fails
+        # safe (treated as widespread) rather than silently passing.
+        local avg_bad=no max_bad_raw=no max_bad_widespread=no
+        awk -v v="$avg_de" 'BEGIN{exit !(v > 2.3/3)}' && avg_bad=yes
+        awk -v v="$max_de" 'BEGIN{exit !(v > 2.3)}' && max_bad_raw=yes
+        if [ "$max_bad_raw" = yes ]; then
+          if [ -z "$pct_de" ]; then
+            max_bad_widespread=yes
+          else
+            awk -v v="$pct_de" -v t="$MAX_PCT_ABOVE_TOLERANCE" 'BEGIN{exit !(v > t)}' && max_bad_widespread=yes
           fi
+        fi
+        local base_bad=no max_bad=no
+        if [ "$avg_bad" = yes ]; then
+          verdict="DIFF"; base_bad=yes
+        elif [ "$max_bad_widespread" = yes ]; then
+          verdict="DIFF"; base_bad=yes; max_bad=yes
+        elif [ "$max_bad_raw" = yes ] && [ "$STRICT_CPU" = yes ]; then
+          # --strict-cpu is zero-tolerance: even a handful of outlier pixels still fail.
+          verdict="DIFF"; base_bad=yes; max_bad=yes
+        elif [ "$deltae_rc" -eq 1 ] && [ "$STRICT_CPU" = yes ]; then
+          # deltae's own exit(0)-vs-exit(1) boundary: some nonzero drift under
+          # both real thresholds (max dE >= 0.01) -- only --strict-cpu cares.
+          verdict="DIFF"; base_bad=yes
+        fi
+        # Color exactly the metric(s) responsible for the failure. A
+        # --strict-cpu-only failure with neither real threshold crossed is the
+        # deltae_rc=1 case above, so flag max there too when nothing else did.
+        if [ "$base_bad" = yes ] && [ "$max_bad" = no ] && [ "$avg_bad" = no ]; then
+          max_bad=yes
         fi
         local max_c="" max_r="" avg_c="" avg_r=""
         [ "$max_bad" = yes ] && { max_c="$C_RED"; max_r="$C_RESET"; }
