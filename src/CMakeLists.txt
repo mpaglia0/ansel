@@ -155,6 +155,7 @@ FILE(GLOB SOURCE_FILES
   "develop/develop.c"
   "develop/dev_history.c"
   "develop/dev_pixelpipe.c"
+  "develop/dev_snapshot.c"
   "develop/imageop.c"
   "develop/imageop_math.c"
   "develop/imageop_gui.c"
@@ -222,7 +223,7 @@ FILE(GLOB SOURCE_FILES
   "views/dev_toolbox.c"
   "views/dev_backbuf.c"
   )
-FILE(GLOB HEADER_FILES "*.h" "common/*.h" "external/OpenCL/CL/*.h" "control/*.h" "iop/*.h" "libs/*.h" "views/*.h")
+FILE(GLOB HEADER_FILES "*.h" "common/*.h" "common/solvers/*.h" "external/OpenCL/CL/*.h" "control/*.h" "iop/*.h" "iop/highlights/*.h" "libs/*.h" "views/*.h")
 
 
 if(APPLE)
