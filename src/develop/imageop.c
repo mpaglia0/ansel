@@ -1884,11 +1884,17 @@ void dt_iop_compute_blendop_hash(dt_iop_module_t *module, uint64_t hash, GList *
 
   if(module->flags() & IOP_FLAGS_SUPPORTS_BLENDING)
   {
-    // Drawn masks from dev for this module
+    // The caller owns the choice of forms list: the commit path passes the live dev->forms
+    // (dt_dev_history_item_update_from_params falls back to it when no snapshot was taken, so
+    // the hash of a module whose blend params reference a mask group can never come out blind
+    // to that group's content — issue #1060 family), while history replay passes the snapshot
+    // accumulated at the item's own position. NO ambient fallback here: this function cannot
+    // know whether live forms describe the state being hashed (they don't during replay,
+    // where dev->forms still holds the state being left).
     if(!IS_NULL_PTR(masks))
     {
       dt_masks_form_t *grp = dt_masks_get_from_id_ext(masks, module->blend_params->mask_id);
-      hash = dt_masks_group_get_hash(hash, grp);
+      hash = dt_masks_group_get_hash_ext(hash, masks, grp);
     }
 
     // else : no module->dev when running from init_default_params()
@@ -1913,7 +1919,7 @@ void dt_iop_compute_blendop_hash(dt_iop_module_t *module, uint64_t hash, GList *
       if(!IS_NULL_PTR(masks))
       {
         dt_masks_form_t *raster_grp = dt_masks_get_from_id_ext(masks, raster_source->blend_params->mask_id);
-        hash = dt_masks_group_get_hash(hash, raster_grp);
+        hash = dt_masks_group_get_hash_ext(hash, masks, raster_grp);
       }
 
       // Blending
