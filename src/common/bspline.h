@@ -19,9 +19,13 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
-#pragma once
+#ifndef DT_COMMON_BSPLINE_H
+#define DT_COMMON_BSPLINE_H
 
-#include "common/darktable.h"
+#include "common/openmp.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/dwt.h"
 #include "develop/openmp_maths.h"
 #include "math.h"
@@ -372,6 +376,8 @@ inline static void decompose_2D_Bspline(const float *const restrict in,
   }
   
 }
+
+#endif // DT_COMMON_BSPLINE_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

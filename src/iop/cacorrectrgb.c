@@ -26,9 +26,12 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #endif
 
 #include "bauhaus/bauhaus.h"
+#include "common/module_versioning.h"
+#include "common/target_clones.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "gui/color_picker_proxy.h"

@@ -54,8 +54,15 @@
 // public API.)
 
 #include "common/box_filters.h"
+#include "iop/highlights/common.h"
 #include "common/bspline.h"
-#include "common/darktable.h"
+#include "common/logging.h"
+#include "common/macros.h"
+#include "common/mem_alloc.h"
+#include "common/openmp.h"
+#include "common/simd.h"
+#include "common/target_clones.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/dwt.h"
 #include "common/fast_guided_filter.h"
 #include "common/opencl.h"

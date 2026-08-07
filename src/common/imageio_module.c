@@ -34,12 +34,15 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "common/module_versioning.h"
 #include "common/imageio_module.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/mem_alloc.h"
+#include "common/paths.h"
+#include "gui/gtk.h"
 #include "common/file_location.h"
 #include "common/imageio.h"
 #include "control/conf.h"
-#include "control/control.h"
 #include "control/signal.h"
 #include <stdlib.h>
 static gint dt_imageio_sort_modules_storage(gconstpointer a, gconstpointer b)
@@ -90,7 +93,7 @@ static int dt_imageio_load_module_format(dt_imageio_module_format_t *module, con
 #define INCLUDE_API_FROM_MODULE_LOAD "imageio_load_module_format"
 #include "imageio/format/imageio_format_api.h"
 
-  if(darktable.gui)
+  if(dt_gui_get_global())
   {
     if(IS_NULL_PTR(module->gui_init)) goto api_h_error;
   }
@@ -143,9 +146,9 @@ static int dt_imageio_load_modules_format(dt_imageio_t *iio)
       continue;
     }
     module->gui_data = NULL;
-    if(darktable.gui) dt_gui_freeze_begin();
+    if(dt_gui_get_global()) dt_gui_freeze_begin();
     module->gui_init(module);
-    if(darktable.gui) dt_gui_freeze_end();
+    if(dt_gui_get_global()) dt_gui_freeze_end();
     if(module->widget) g_object_ref_sink(module->widget);
     dt_free(libname);
     res = g_list_insert_sorted(res, module, dt_imageio_sort_modules_format);
@@ -181,7 +184,7 @@ static int dt_imageio_load_module_storage(dt_imageio_module_storage_t *module, c
 #define INCLUDE_API_FROM_MODULE_LOAD "imageio_load_module_storage"
 #include "imageio/storage/imageio_storage_api.h"
 
-  if(darktable.gui)
+  if(dt_gui_get_global())
   {
     if(IS_NULL_PTR(module->gui_init)) goto api_h_error;
   }
@@ -267,7 +270,7 @@ void dt_imageio_cleanup(dt_imageio_t *iio)
 
 dt_imageio_module_format_t *dt_imageio_get_format()
 {
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   const char *format_name = dt_conf_get_string_const("plugins/lighttable/export/format_name");
   dt_imageio_module_format_t *format = dt_imageio_get_format_by_name(format_name);
   // if the format from the config isn't available default to jpeg, if that's not available either just use
@@ -279,7 +282,7 @@ dt_imageio_module_format_t *dt_imageio_get_format()
 
 dt_imageio_module_storage_t *dt_imageio_get_storage()
 {
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   const char *storage_name = dt_conf_get_string_const("plugins/lighttable/export/storage_name");
   dt_imageio_module_storage_t *storage = dt_imageio_get_storage_by_name(storage_name);
   // if the storage from the config isn't available default to disk, if that's not available either just use
@@ -292,7 +295,7 @@ dt_imageio_module_storage_t *dt_imageio_get_storage()
 dt_imageio_module_format_t *dt_imageio_get_format_by_name(const char *name)
 {
   if(IS_NULL_PTR(name)) return NULL;
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   for(GList *it = iio->plugins_format; it; it = g_list_next(it))
   {
     dt_imageio_module_format_t *module = (dt_imageio_module_format_t *)it->data;
@@ -304,7 +307,7 @@ dt_imageio_module_format_t *dt_imageio_get_format_by_name(const char *name)
 dt_imageio_module_storage_t *dt_imageio_get_storage_by_name(const char *name)
 {
   if(IS_NULL_PTR(name)) return NULL;
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   for(GList *it = iio->plugins_storage; it; it = g_list_next(it))
   {
     dt_imageio_module_storage_t *module = (dt_imageio_module_storage_t *)it->data;
@@ -315,7 +318,7 @@ dt_imageio_module_storage_t *dt_imageio_get_storage_by_name(const char *name)
 
 dt_imageio_module_format_t *dt_imageio_get_format_by_index(int index)
 {
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   GList *it = g_list_nth(iio->plugins_format, index);
   if(IS_NULL_PTR(it)) it = iio->plugins_format;
   return (dt_imageio_module_format_t *)it->data;
@@ -323,7 +326,7 @@ dt_imageio_module_format_t *dt_imageio_get_format_by_index(int index)
 
 dt_imageio_module_storage_t *dt_imageio_get_storage_by_index(int index)
 {
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   GList *it = g_list_nth(iio->plugins_storage, index);
   if(IS_NULL_PTR(it)) it = iio->plugins_storage;
   return (dt_imageio_module_storage_t *)it->data;
@@ -331,26 +334,26 @@ dt_imageio_module_storage_t *dt_imageio_get_storage_by_index(int index)
 
 int dt_imageio_get_index_of_format(dt_imageio_module_format_t *format)
 {
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   return g_list_index(iio->plugins_format, format);
 }
 int dt_imageio_get_index_of_storage(dt_imageio_module_storage_t *storage)
 {
-  dt_imageio_t *iio = darktable.imageio;
+  dt_imageio_t *iio = dt_imageio_get_global();
   return g_list_index(iio->plugins_storage, storage);
 }
 
 void dt_imageio_insert_storage(dt_imageio_module_storage_t *storage)
 {
-  darktable.imageio->plugins_storage
-      = g_list_insert_sorted(darktable.imageio->plugins_storage, storage, dt_imageio_sort_modules_storage);
-  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_IMAGEIO_STORAGE_CHANGE);
+  dt_imageio_get_global()->plugins_storage
+      = g_list_insert_sorted(dt_imageio_get_global()->plugins_storage, storage, dt_imageio_sort_modules_storage);
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_IMAGEIO_STORAGE_CHANGE);
 }
 
 void dt_imageio_remove_storage(dt_imageio_module_storage_t *storage)
 {
-  darktable.imageio->plugins_storage  = g_list_remove(darktable.imageio->plugins_storage, storage);
-  DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_IMAGEIO_STORAGE_CHANGE);
+  dt_imageio_get_global()->plugins_storage  = g_list_remove(dt_imageio_get_global()->plugins_storage, storage);
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_IMAGEIO_STORAGE_CHANGE);
 }
 
 gchar *dt_imageio_resizing_factor_get_and_parsing(double *num, double *denum)

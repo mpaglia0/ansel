@@ -25,10 +25,13 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/imagebuf.h"
-#include "control/control.h"
-#include "develop/imageop.h"
 #include "dwt.h"
 
 /* Based on the original source code of GIMP's Wavelet Decompose plugin, by Marco Rossini
@@ -243,7 +246,7 @@ static int dwt_wavelet_decompose(float *img, dwt_params_t *const p, _dwt_layer_f
   // buffer to reconstruct the image
   layers = dt_pixelpipe_cache_alloc_align_float_cache((size_t)4 * p->width * p->height, 0);
   // scratch buffer for decomposition
-  temp = dt_pixelpipe_cache_alloc_align_float_cache(darktable.num_openmp_threads * 4 * p->width, 0);
+  temp = dt_pixelpipe_cache_alloc_align_float_cache(dt_get_num_openmp_threads() * 4 * p->width, 0);
 
   if(buffer[1] == NULL || IS_NULL_PTR(layers) || IS_NULL_PTR(temp))
   {
@@ -569,7 +572,7 @@ dwt_params_cl_t *dt_dwt_init_cl(const int devid, cl_mem image, const int width, 
   dwt_params_cl_t *p = (dwt_params_cl_t *)malloc(sizeof(dwt_params_cl_t));
   if(IS_NULL_PTR(p)) return NULL;
 
-  p->global = darktable.opencl->dwt;
+  p->global = dt_opencl_get_global()->dwt;
   p->devid = devid;
   p->image = image;
   p->ch = 4;

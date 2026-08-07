@@ -27,13 +27,11 @@
 
 #ifdef HAVE_GRAPHICSMAGICK
 #include "imageio_gm.h"
-#include "common/colorspaces.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/logging.h"
 #include "common/exif.h"
 #include "common/imageio_magick_abort_guard.h"
-#include "control/conf.h"
 #include "develop/develop.h"
-#include "imageio.h"
 
 #include <assert.h>
 #include <inttypes.h>

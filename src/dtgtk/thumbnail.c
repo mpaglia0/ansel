@@ -43,21 +43,17 @@
 #include "dtgtk/thumbtable_info.h"
 
 #include "bauhaus/bauhaus.h"
-#include "common/collection.h"
-#include "common/datetime.h"
-#include "common/darktable.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/debug.h"
 #include "common/focus.h"
 #include "common/focus_peaking.h"
 #include "common/grouping.h"
-#include "common/image_cache.h"
 #include "common/database.h"
 #include "common/ratings.h"
 #include "common/selection.h"
+#include "common/utility.h"
 #include "common/variables.h"
 #include "control/control.h"
-#include "dtgtk/button.h"
-#include "dtgtk/icon.h"
 #include "dtgtk/preview_window.h"
 #include "dtgtk/thumbnail_btn.h"
 #include "gui/drag_and_drop.h"
@@ -113,7 +109,7 @@ static void _image_update_group_tooltip(dt_thumbnail_t *thumb)
   // and the other images
   sqlite3_stmt *stmt;
   // clang-format off
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get_sqlite3_global(),
                               "SELECT id, version, filename"
                               " FROM main.images"
                               " WHERE group_id = ?1", -1, &stmt,
@@ -221,7 +217,7 @@ static void _active_modules_popup(GtkWidget *widget, dt_thumbnail_t *thumb)
   (void)widget;
   if(IS_NULL_PTR(thumb)) return;
 
-  sqlite3 *handle = dt_database_get(darktable.db);
+  sqlite3 *handle = dt_database_get_sqlite3_global();
   if(IS_NULL_PTR(handle)) return;
 
   static const char *sql =
@@ -258,7 +254,7 @@ static void _active_modules_popup(GtkWidget *widget, dt_thumbnail_t *thumb)
   // (setting the menu's toplevel as parent triggers GTK parent warnings, since it is
   // unmapped by the time this dialog shows). Without a transient parent, GTK/the window
   // manager has nothing to return focus to when the dialog closes.
-  GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
+  GtkWidget *main_window = dt_gui_main_window();
   GtkWidget *dialog = gtk_dialog_new_with_buttons(_("Active modules"),
                                                   GTK_IS_WINDOW(main_window) ? GTK_WINDOW(main_window) : NULL,
                                                   GTK_DIALOG_DESTROY_WITH_PARENT,
@@ -697,7 +693,7 @@ int dt_thumbnail_get_image_buffer(dt_thumbnail_t *thumb)
   dt_pthread_mutex_unlock(&thumb->lock);
 
   dt_control_job_set_params(job, thumb, _thumbnail_release);
-  if(dt_control_add_job(darktable.control, DT_JOB_QUEUE_SYSTEM_FG, job) != 0)
+  if(dt_control_add_job(dt_control_get_global(), DT_JOB_QUEUE_SYSTEM_FG, job) != 0)
   {
     dt_pthread_mutex_lock(&thumb->lock);
     if(thumb->job == job) thumb->job = NULL;
@@ -836,7 +832,7 @@ static gboolean _event_main_press(GtkWidget *widget, GdkEventButton *event, gpoi
   if(event->button == 1 && event->type == GDK_2BUTTON_PRESS)
   {
     thumb->dragging = FALSE;
-    DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_VIEWMANAGER_THUMBTABLE_ACTIVATE, thumb->info.id);
+    DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_VIEWMANAGER_THUMBTABLE_ACTIVATE, thumb->info.id);
     return TRUE;
   }
   else if(event->button == GDK_BUTTON_SECONDARY && event->type == GDK_BUTTON_PRESS)
@@ -860,9 +856,9 @@ static gboolean _event_main_release(GtkWidget *widget, GdkEventButton *event, gp
      && thumb->table && thumb->table->mode == DT_THUMBTABLE_MODE_FILEMANAGER)
   {
     if(dt_modifier_is(event->state, 0))
-      dt_selection_select_single(darktable.selection, thumb->info.id);
+      dt_selection_select_single(dt_selection_get_global(), thumb->info.id);
     else if(dt_modifier_is(event->state, GDK_CONTROL_MASK))
-      dt_selection_toggle(darktable.selection, thumb->info.id);
+      dt_selection_toggle(dt_selection_get_global(), thumb->info.id);
     else if(dt_modifier_is(event->state, GDK_SHIFT_MASK) && thumb->table)
       dt_thumbtable_select_range(thumb->table, thumb->rowid);
     // Because selection might include several images, we handle styling globally
@@ -872,7 +868,7 @@ static gboolean _event_main_release(GtkWidget *widget, GdkEventButton *event, gp
   else if(event->button == 1
           && thumb->table && thumb->table->mode == DT_THUMBTABLE_MODE_FILMSTRIP)
   {
-    DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_VIEWMANAGER_FILMSTRIP_ACTIVATE, thumb->info.id);
+    DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_VIEWMANAGER_FILMSTRIP_ACTIVATE, thumb->info.id);
     return TRUE;
   }
   return FALSE;
@@ -927,16 +923,16 @@ static gboolean _event_audio_release(GtkWidget *widget, GdkEventButton *event, g
   if(event->button == 1)
   {
     gboolean start_audio = TRUE;
-    if(darktable.view_manager->audio.audio_player_id != -1)
+    if(dt_view_manager_get_global()->audio.audio_player_id != -1)
     {
       // don't start the audio for the image we just killed it for
-      if(darktable.view_manager->audio.audio_player_id == thumb->info.id) start_audio = FALSE;
-      dt_view_audio_stop(darktable.view_manager);
+      if(dt_view_manager_get_global()->audio.audio_player_id == thumb->info.id) start_audio = FALSE;
+      dt_view_audio_stop(dt_view_manager_get_global());
     }
 
     if(start_audio)
     {
-      dt_view_audio_start(darktable.view_manager, thumb->info.id);
+      dt_view_audio_start(dt_view_manager_get_global(), thumb->info.id);
     }
   }
   return FALSE;
@@ -1435,7 +1431,7 @@ dt_thumbnail_t *dt_thumbnail_new(int rowid, dt_thumbnail_overlay_t over, dt_thum
   dt_thumbnail_update_gui(thumb);
 
   // This will then only run on "selection_changed" event
-  dt_thumbnail_update_selection(thumb, dt_selection_is_id_selected(darktable.selection, thumb->info.id));
+  dt_thumbnail_update_selection(thumb, dt_selection_is_id_selected(dt_selection_get_global(), thumb->info.id));
 
   return thumb;
 }

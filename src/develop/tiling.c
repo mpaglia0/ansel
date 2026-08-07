@@ -32,7 +32,8 @@
 */
 
 
-#include "common/darktable.h"
+#include "common/sys_resources.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "develop/tiling.h"
 #include "common/opencl.h"
 #include "control/control.h"
@@ -116,7 +117,7 @@ static inline int _maximum_number_tiles()
 
 static inline void _print_roi(const dt_iop_roi_t *roi, const char *label)
 {
-  if((darktable.unmuted & DT_DEBUG_VERBOSE) && (darktable.unmuted & DT_DEBUG_TILING))
+  if((dt_get_debug_flags() & DT_DEBUG_VERBOSE) && (dt_get_debug_flags() & DT_DEBUG_TILING))
     fprintf(stderr,"     {%5d %5d ->%5d %5d (%5dx%5d)  %.6f } %s\n",
          roi->x, roi->y, roi->x + roi->width, roi->y + roi->height, roi->width, roi->height, roi->scale, label);
 }
@@ -293,7 +294,7 @@ static int _default_process_tiling_ptp(struct dt_iop_module_t *self, const struc
    * run, so a plan that exceeds it is guaranteed to fail at runtime no
    * matter how much total memory is nominally free. */
   const float largest_run
-      = (float)dt_pixelpipe_cache_get_largest_free_run(darktable.pixelpipe_cache);
+      = (float)dt_pixelpipe_cache_get_largest_free_run(dt_pixelpipe_cache_get_global());
   available = fminf(available, 0.9f * largest_run);
 
   /* Size the tile from the memory left in the host cache.
@@ -553,7 +554,7 @@ static int _default_process_tiling_roi(struct dt_iop_module_t *self, const struc
    * run, so a plan that exceeds it is guaranteed to fail at runtime no
    * matter how much total memory is nominally free. */
   const float largest_run
-      = (float)dt_pixelpipe_cache_get_largest_free_run(darktable.pixelpipe_cache);
+      = (float)dt_pixelpipe_cache_get_largest_free_run(dt_pixelpipe_cache_get_global());
   available = fminf(available, 0.9f * largest_run);
 
   /* Size the tile from the memory left in the host cache.
@@ -872,8 +873,8 @@ static int _default_process_tiling_cl_ptp(struct dt_iop_module_t *self, const st
   const float singlebuffer = fminf(fmaxf((available - tiling.overhead) / factor, 0.0f),
                                    (float)(dt_opencl_get_device_memalloc(devid)));
   const float maxbuf = fmaxf(tiling.maxbuf_cl, 1.0f);
-  int width = _min(roi_in->width, darktable.opencl->dev[devid].max_image_width);
-  int height = _min(roi_in->height, darktable.opencl->dev[devid].max_image_height);
+  int width = _min(roi_in->width, dt_opencl_get_global()->dev[devid].max_image_width);
+  int height = _min(roi_in->height, dt_opencl_get_global()->dev[devid].max_image_height);
 
   /* shrink tile size in case it would exceed singlebuffer size */
   if((float)width * height * max_bpp * maxbuf > singlebuffer)
@@ -1106,8 +1107,8 @@ static int _default_process_tiling_cl_roi(struct dt_iop_module_t *self, const st
                                    (float)(dt_opencl_get_device_memalloc(devid)));
   const float maxbuf = fmaxf(tiling.maxbuf_cl, 1.0f);
 
-  int width = _min(_max(roi_in->width, roi_out->width), darktable.opencl->dev[devid].max_image_width);
-  int height = _min(_max(roi_in->height, roi_out->height), darktable.opencl->dev[devid].max_image_height);
+  int width = _min(_max(roi_in->width, roi_out->width), dt_opencl_get_global()->dev[devid].max_image_width);
+  int height = _min(_max(roi_in->height, roi_out->height), dt_opencl_get_global()->dev[devid].max_image_height);
 
   /* Alignment rules: we need to make sure that alignment requirements of module are fulfilled.
      Modules will report alignment requirements via xalign and yalign within tiling_callback().
@@ -1453,7 +1454,7 @@ int dt_tiling_piece_fits_host_memory(const size_t width, const size_t height, co
    * the largest run, evicting to make room — eviction merges adjacent free
    * runs, but cannot merge across entries pinned by the pipe recursion. */
   size_t available = dt_get_available_mem();
-  size_t largest_run = dt_pixelpipe_cache_get_largest_free_run(darktable.pixelpipe_cache);
+  size_t largest_run = dt_pixelpipe_cache_get_largest_free_run(dt_pixelpipe_cache_get_global());
 
   int error = 0;
   while(!error && (available < total || (size_t)(0.9f * largest_run) < total))
@@ -1465,12 +1466,12 @@ int dt_tiling_piece_fits_host_memory(const size_t width, const size_t height, co
      * cache would not change the answer; the caller tiles instead. */
     size_t cache_current = 0;
     size_t cache_max = 0;
-    dt_dev_pixelpipe_cache_get_usage(darktable.pixelpipe_cache, &cache_current, &cache_max);
+    dt_dev_pixelpipe_cache_get_usage(dt_pixelpipe_cache_get_global(), &cache_current, &cache_max);
     if(cache_max - cache_current >= total && (size_t)(0.9f * largest_run) >= total) break;
 
-    error = dt_dev_pixel_pipe_cache_remove_lru(darktable.pixelpipe_cache);
+    error = dt_dev_pixel_pipe_cache_remove_lru(dt_pixelpipe_cache_get_global());
     available = dt_get_available_mem();
-    largest_run = dt_pixelpipe_cache_get_largest_free_run(darktable.pixelpipe_cache);
+    largest_run = dt_pixelpipe_cache_get_largest_free_run(dt_pixelpipe_cache_get_global());
   }
 
   return total <= available && total <= (size_t)(0.9f * largest_run);

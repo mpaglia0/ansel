@@ -25,8 +25,11 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/darktable.h"
-#include "control/control.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "develop/imageop.h"
 #include "develop/openmp_maths.h"
 #include "heal.h"
@@ -432,7 +435,7 @@ heal_params_cl_t *dt_heal_init_cl(const int devid)
   heal_params_cl_t *p = (heal_params_cl_t *)malloc(sizeof(heal_params_cl_t));
   if(IS_NULL_PTR(p)) return NULL;
 
-  p->global = darktable.opencl->heal;
+  p->global = dt_opencl_get_global()->heal;
   p->devid = devid;
 
   return p;

@@ -79,7 +79,6 @@
 #include "config.h"
 #endif
 
-#include "is_supported_platform.h"
 
 #if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__DragonFly__)
 #include <malloc.h>
@@ -88,10 +87,32 @@
 #include <sys/malloc.h>
 #endif
 
+/* Platform memory-query APIs used by dt_get_total_memory()/dt_get_system_available_mem()
+ * below: sysctl(CTL_HW, ...) on Apple/BSD and the mach host/task statistics on Apple.
+ * These used to arrive through common/darktable.h's OS block; this TU is their only
+ * non-external consumer in the tree (common/telemetry.c carries its own), so it declares
+ * them itself. */
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#endif
+#if defined(__DragonFly__) || defined(__FreeBSD__)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
+#if defined(__NetBSD__) || defined(__OpenBSD__)
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#endif
+
 #include "common/collection.h"
 #include "common/colorspaces.h"
 #include "common/colorlabels.h"
 #include "common/darktable.h"
+#include "common/anonymous_ids.h"
+#include "common/capabilities.h"
+#include "common/global_mutexes.h"
+#include "common/sys_resources.h"
 #include "common/datetime.h"
 #include "common/exif.h"
 #include "common/history.h"
@@ -128,10 +149,8 @@
 #include "control/conf.h"
 #include "control/control.h"
 #include "control/crawler.h"
-#include "control/jobs/control_jobs.h"
 #include "control/jobs/film_jobs.h"
 #include "control/signal.h"
-#include "develop/blend.h"
 #include "develop/dev_pixelpipe.h"
 #include "develop/imageop.h"
 #include "develop/supervisor.h"
@@ -172,6 +191,7 @@
 #endif
 
 #include "dbus.h"
+#include "common/utility.h"
 
 #if defined(__SUNOS__)
 #include <sys/varargs.h>
@@ -477,6 +497,202 @@ static inline size_t _get_total_memory()
 void *dt_alloc_align(size_t size)
 {
   return dt_alloc_align_internal(size);
+}
+
+/* Singleton accessors: the orchestrator BINDS the application-wide instances to the
+ * lower-level libs that declare these symbols (develop/pixelpipe_cache.h and
+ * common/openmp.h). This keeps those libs free of common/darktable.h — they link
+ * against two functions instead of importing the whole application struct. */
+struct dt_dev_pixelpipe_cache_t *dt_pixelpipe_cache_get_global(void)
+{
+  return darktable.pixelpipe_cache;
+}
+
+int dt_get_num_openmp_threads(void)
+{
+  return darktable.num_openmp_threads;
+}
+
+struct dt_gui_gtk_t *dt_gui_get_global(void)
+{
+  return darktable.gui;
+}
+
+struct dt_develop_t *dt_dev_get_global(void)
+{
+  return darktable.develop;
+}
+
+GList *dt_iop_get_modules_so(void)
+{
+  return darktable.iop;
+}
+
+GList *dt_ioppr_get_iop_order_rules_global(void)
+{
+  return darktable.iop_order_rules;
+}
+
+void dt_dev_set_global(struct dt_develop_t *dev)
+{
+  darktable.develop = dev;
+}
+
+GList *dt_guides_get_list(void)
+{
+  return darktable.guides;
+}
+
+GList **dt_guides_get_list_ref(void)
+{
+  return &darktable.guides;
+}
+
+GList *dt_gui_get_themes(void)
+{
+  return darktable.themes;
+}
+
+void dt_gui_set_themes(GList *themes)
+{
+  g_list_free_full(darktable.themes, dt_free_gpointer);
+  darktable.themes = themes;
+}
+
+const char *dt_get_main_message(void)
+{
+  return darktable.main_message;
+}
+
+void dt_set_main_message(char *message)
+{
+  dt_free(darktable.main_message);
+  darktable.main_message = message;
+}
+
+struct dt_view_manager_t *dt_view_manager_get_global(void)
+{
+  return darktable.view_manager;
+}
+
+dt_pthread_mutex_t *dt_plugin_threadsafe_mutex(void)
+{
+  return &darktable.plugin_threadsafe;
+}
+
+dt_pthread_mutex_t *dt_pipeline_threadsafe_mutex(void)
+{
+  return &darktable.pipeline_threadsafe;
+}
+
+dt_pthread_mutex_t *dt_exiv2_threadsafe_mutex(void)
+{
+  return &darktable.exiv2_threadsafe;
+}
+
+dt_pthread_mutex_t *dt_readfile_mutex(void)
+{
+  return &darktable.readFile_mutex;
+}
+
+dt_pthread_rwlock_t *dt_database_threadsafe_lock(void)
+{
+  return &darktable.database_threadsafe;
+}
+
+struct dt_image_cache_t *dt_image_cache_get_global(void)
+{
+  return darktable.image_cache;
+}
+
+struct dt_mipmap_cache_t *dt_mipmap_cache_get_global(void)
+{
+  return darktable.mipmap_cache;
+}
+
+struct dt_selection_t *dt_selection_get_global(void)
+{
+  return darktable.selection;
+}
+
+struct dt_undo_t *dt_undo_get_global(void)
+{
+  return darktable.undo;
+}
+
+struct dt_collection_t *dt_collection_get_global(void)
+{
+  return darktable.collection;
+}
+
+struct dt_database_t *dt_database_get_global(void)
+{
+  return (struct dt_database_t *)darktable.db;
+}
+
+sqlite3 *dt_database_get_sqlite3_global(void)
+{
+  return dt_database_get(darktable.db);
+}
+
+struct dt_control_signal_t *dt_control_signal_get_global(void)
+{
+  return darktable.signals;
+}
+
+struct dt_lib_t *dt_lib_get_global(void)
+{
+  return darktable.lib;
+}
+
+struct dt_imageio_t *dt_imageio_get_global(void)
+{
+  return darktable.imageio;
+}
+
+struct dt_points_t *dt_points_get_global(void)
+{
+  return darktable.points;
+}
+
+struct dt_l10n_t *dt_l10n_get_global(void)
+{
+  return darktable.l10n;
+}
+
+const struct dt_pwstorage_t *dt_pwstorage_get_global(void)
+{
+  return darktable.pwstorage;
+}
+
+struct dt_dbus_t *dt_dbus_get_global(void)
+{
+  return darktable.dbus;
+}
+
+JsonParser *dt_noiseprofile_get_parser_global(void)
+{
+  return darktable.noiseprofile_parser;
+}
+
+struct dt_opencl_t *dt_opencl_get_global(void)
+{
+  return darktable.opencl;
+}
+
+struct dt_colorspaces_t *dt_colorspaces_get_global(void)
+{
+  return darktable.color_profiles;
+}
+
+struct dt_bauhaus_t *dt_bauhaus_get_global(void)
+{
+  return darktable.bauhaus;
+}
+
+struct dt_control_t *dt_control_get_global(void)
+{
+  return darktable.control;
 }
 
 int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load_data)
@@ -1605,6 +1821,26 @@ void dt_cleanup()
   }
 }
 
+double dt_get_start_wtime(void)
+{
+  return darktable.start_wtime;
+}
+
+int32_t dt_get_debug_flags(void)
+{
+  return darktable.unmuted;
+}
+
+int32_t dt_get_signal_debug_acts(void)
+{
+  return darktable.unmuted_signal_dbg_acts;
+}
+
+gboolean dt_get_signal_debug(const int signal)
+{
+  return darktable.unmuted_signal_dbg[signal];
+}
+
 void dt_print(dt_debug_thread_t thread, const char *msg, ...)
 {
   if(thread == DT_DEBUG_ALWAYS || (darktable.unmuted & thread))
@@ -1913,6 +2149,11 @@ size_t dt_get_available_mem()
 size_t dt_get_mipmap_mem()
 {
   return darktable.dtresources.mipmap_memory;
+}
+
+size_t dt_get_total_mem(void)
+{
+  return darktable.dtresources.total_memory;
 }
 
 size_t dt_get_memory_pressure_floor(void)

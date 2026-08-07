@@ -20,6 +20,9 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
+#ifndef DT_COMMON_LUMINANCE_MASK_H
+#define DT_COMMON_LUMINANCE_MASK_H
 #include <assert.h>
 #include <math.h>
 #include <stdlib.h>
@@ -27,8 +30,8 @@
 #include <string.h>
 #include <time.h>
 
-#include "common/darktable.h"
-#include "develop/imageop_math.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
 
 
 #define MIN_FLOAT exp2f(-16.0f)
@@ -259,6 +262,7 @@ static inline void luminance_mask(const float *const restrict in, float *const r
   }
 }
 
+#endif // DT_COMMON_LUMINANCE_MASK_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

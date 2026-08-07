@@ -15,7 +15,15 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/darktable.h"
+#include "common/logging.h"
+#include "common/iop_profile.h"
+#include "control/conf.h"
+#include "common/macros.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/times.h"
+#include "control/signal.h"
+#include "gui/gtk.h"
 #include "control/control.h"
 #include "common/image_cache.h"
 #include "views/view.h"
@@ -44,7 +52,7 @@ static void _preview_window_destroy(GtkWidget *dialog, gpointer user_data)
   // Disconnect from DARKROOM_UI_CHANGED before freeing: otherwise the handler keeps
   // firing with a dangling `preview` pointer and crashes on the next UI change
   // (e.g. moving the border-size slider).
-  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_preview_redraw), preview);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_preview_redraw), preview);
   dt_view_image_surface_fetcher_cleanup(&preview->fetcher);
   dt_free(preview);
 }
@@ -78,7 +86,7 @@ void _colormanage_ui_color(const float L, const float a, const float b, dt_align
   dt_aligned_pixel_t Lab = { L, a, b, 1.f };
   dt_aligned_pixel_t XYZ = { 0.f, 0.f, 0.f, 1.f };
   dt_Lab_to_XYZ(Lab, XYZ);
-  cmsDoTransform(darktable.color_profiles->transform_xyz_to_display, XYZ, RGB, 1);
+  cmsDoTransform(dt_colorspaces_get_global()->transform_xyz_to_display, XYZ, RGB, 1);
 }
 
 static gboolean
@@ -159,9 +167,9 @@ void dt_preview_window_spawn(const int32_t imgid)
 
   GtkWidget *dialog = gtk_dialog_new();
 
-  const dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'r');
+  const dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
   gchar *name = g_strdup_printf(_("Ansel - Preview : %s"), img->filename);
-  dt_image_cache_read_release(darktable.image_cache, img);
+  dt_image_cache_read_release(dt_image_cache_get_global(), img);
   gtk_window_set_title(GTK_WINDOW(dialog), name);
   dt_free(name);
 
@@ -172,7 +180,7 @@ void dt_preview_window_spawn(const int32_t imgid)
 
   gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
   gtk_window_set_modal(GTK_WINDOW(dialog), FALSE);
-  gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)));
+  gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(dt_gui_main_window()));
   gtk_window_set_default_size(GTK_WINDOW(dialog), 350, 350);
   g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(_close_preview_popup), NULL);
   g_signal_connect(G_OBJECT(dialog), "destroy", G_CALLBACK(_preview_window_destroy), preview);
@@ -186,7 +194,7 @@ void dt_preview_window_spawn(const int32_t imgid)
   gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))), preview->area, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(preview->area), "draw", G_CALLBACK(_thumb_draw_image), preview);
   g_signal_connect(G_OBJECT(preview->area), "size-allocate", G_CALLBACK(_preview_window_size_allocate), preview);
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_DARKROOM_UI_CHANGED, G_CALLBACK(_preview_redraw), preview);
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_DARKROOM_UI_CHANGED, G_CALLBACK(_preview_redraw), preview);
 
   gtk_widget_set_visible(preview->area, TRUE);
   gtk_widget_show_all(dialog);

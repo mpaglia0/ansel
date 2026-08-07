@@ -41,12 +41,13 @@
 #include <string.h>
 
 #include "control/control.h"
+#include "common/sys_resources.h"
+#include "develop/imageop.h"
+#include "develop/pixelpipe_hb.h"
 #include "control/signal.h"
 #include "develop/pixelpipe_cache.h"
 #include "develop/pixelpipe.h"
 #include "develop/supervisor.h"
-#include "common/darktable.h"
-#include "common/debug.h"
 #include "common/opencl.h"
 #include "develop/format.h"
 
@@ -63,8 +64,8 @@ static inline const char *_cache_debug_module_name(void)
 static void _trace_exact_hit(const char *phase, const uint64_t hash, dt_pixel_cache_entry_t *cache_entry,
                              void *data, void *cl_mem_output, const int preferred_devid, const gboolean verbose)
 {
-  if(!(darktable.unmuted & DT_DEBUG_PIPECACHE)) return;
-  if(verbose && !(darktable.unmuted & DT_DEBUG_VERBOSE)) return;
+  if(!(dt_get_debug_flags() & DT_DEBUG_PIPECACHE)) return;
+  if(verbose && !(dt_get_debug_flags() & DT_DEBUG_VERBOSE)) return;
 
   dt_print(DT_DEBUG_PIPECACHE,
            "[pixelpipe_cache] exact-hit %s req=%" PRIu64 " entry=%" PRIu64 "/%" PRIu64
@@ -199,8 +200,8 @@ static size_t _pixel_cache_get_size(dt_pixel_cache_entry_t *cache_entry)
 
 static void _pixel_cache_message(dt_pixel_cache_entry_t *cache_entry, const char *message, gboolean verbose)
 {
-  if(!(darktable.unmuted & DT_DEBUG_PIPECACHE)) return;
-  if(verbose && !(darktable.unmuted & DT_DEBUG_VERBOSE)) return;
+  if(!(dt_get_debug_flags() & DT_DEBUG_PIPECACHE)) return;
+  if(verbose && !(dt_get_debug_flags() & DT_DEBUG_VERBOSE)) return;
   dt_print(DT_DEBUG_PIPECACHE,
            "[pixelpipe] cache entry %" PRIu64 "/%" PRIu64 ": %s (data=%p - %" G_GSIZE_FORMAT " MiB - age %" PRId64
            " - hits %i - refs %i - auto %i - ext %i - id %i - module %s) %s\n",
@@ -495,7 +496,7 @@ void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const i
   // cl_mem objects at application exit, when nothing else is running.
   if(devid < 0) return;
 
-  // NOTE: the caller must hold darktable.opencl->dev[devid].lock -- either
+  // NOTE: the caller must hold dt_opencl_get_global()->dev[devid].lock -- either
   // because it IS the pixelpipe currently running on that device (the lock
   // dt_opencl_lock_device() handed it for the duration of its run), or because
   // it explicitly took that lock to safely flush this device's cache entries
@@ -524,14 +525,14 @@ void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const i
     if(!locked) dt_pthread_rwlock_unlock(&entry->lock);
     if(used || locked)
     {
-      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
         dt_print(DT_DEBUG_OPENCL,
           "[dt_dev_pixelpipe_cache_flush_clmem] entry %" PRIu64 " is in use (refcount=%i locked=%i), "
           "keeping its vRAM\n", entry->hash, dt_atomic_get_int(&entry->refcount), locked);
       continue;
     }
 
-    if(darktable.unmuted & DT_DEBUG_VERBOSE)
+    if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
       dt_print(DT_DEBUG_OPENCL,
         "[dt_dev_pixelpipe_cache_flush_clmem] trying to flush vRAM for entry %" PRIu64 " on device %d...\n",
         entry->hash, devid);
@@ -551,15 +552,15 @@ void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const i
 void dt_dev_pixelpipe_cache_flush_clmem_for_pipe(dt_dev_pixelpipe_cache_t *cache, const int devid)
 {
   // Like dt_dev_pixelpipe_cache_flush_clmem(), but for callers that do NOT
-  // currently hold darktable.opencl->dev[devid].lock -- typically a pipe's own
+  // currently hold dt_opencl_get_global()->dev[devid].lock -- typically a pipe's own
   // cleanup, running after dt_dev_pixelpipe_process() already released that
   // lock. Taking it here ensures we can't race the eventlist/cl_mem bookkeeping
   // of whichever OTHER pixelpipe is now running on that device.
-  if(devid < 0 || IS_NULL_PTR(darktable.opencl) || !darktable.opencl->inited) return;
+  if(devid < 0 || IS_NULL_PTR(dt_opencl_get_global()) || !dt_opencl_is_inited()) return;
 
-  dt_pthread_mutex_lock(&darktable.opencl->dev[devid].lock);
+  dt_pthread_mutex_lock(&dt_opencl_get_global()->dev[devid].lock);
   dt_dev_pixelpipe_cache_flush_clmem(cache, devid);
-  dt_pthread_mutex_unlock(&darktable.opencl->dev[devid].lock);
+  dt_pthread_mutex_unlock(&dt_opencl_get_global()->dev[devid].lock);
 }
 #else
 void dt_dev_pixelpipe_cache_flush_clmem_for_pipe(dt_dev_pixelpipe_cache_t *cache, const int devid)
@@ -664,7 +665,7 @@ static void *_pixel_cache_clmem_get(dt_pixel_cache_entry_t *entry, void *host_pt
 {
   dt_pthread_mutex_lock(&entry->cl_mem_lock);
 
-  if(darktable.unmuted & DT_DEBUG_VERBOSE)
+  if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
   dt_print(DT_DEBUG_OPENCL, 
     "[_pixel_cache_clmem_get] %u output entries in %" PRIu64 "\n", 
     g_list_length(entry->cl_mem_list), entry->hash);
@@ -934,7 +935,7 @@ void dt_dev_pixelpipe_cache_put_pinned_image(dt_dev_pixelpipe_cache_t *cache, vo
   dt_pixel_cache_entry_t *entry = entry_hint;
   if(IS_NULL_PTR(entry)) 
   {
-    if(darktable.unmuted & DT_DEBUG_VERBOSE)
+    if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
       dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_put_pinned_image] no cache entry to put the vRAM buffer\n");
     return;
   }
@@ -942,7 +943,7 @@ void dt_dev_pixelpipe_cache_put_pinned_image(dt_dev_pixelpipe_cache_t *cache, vo
   // FIXME: is it safe to cache non-pinned vRAM buffers (aka no CL_MEM_USE_HOST_PTR in flags) ?
   const int state = _pixel_cache_clmem_put(entry, host_ptr, (cl_mem)*mem);
   *mem = NULL;
-  if(darktable.unmuted & DT_DEBUG_VERBOSE)
+  if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
     dt_print(DT_DEBUG_OPENCL, "[dt_dev_pixelpipe_cache_put_pinned_image] cache entry put the vRAM buffer (state=%i) in %p\n", state, entry);
 }
 
@@ -1049,7 +1050,7 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
     {
       cl_mem_input = dt_opencl_alloc_device_use_host_pointer(devid, roi->width, roi->height, cl_bpp,
                                                              host_ptr, flags);
-      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
         dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] allocated a pinned GPU buffer for %s %s\n", module->name(), message);
     }
   }
@@ -1069,7 +1070,7 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
     {
       cl_mem_input = dt_dev_pixelpipe_cache_alloc_cl_device_buffer(devid, roi, bpp, module, message, keep);
 
-      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
         dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] allocated a device-only GPU buffer for %s %s\n", module->name(), message);
     }
   }
@@ -1082,7 +1083,7 @@ void *dt_dev_pixelpipe_cache_get_cl_buffer(int devid, void *const host_ptr, cons
   {
     const int hits = dt_atomic_add_int(&clmem_reuse_hits, 1) + 1;
     const int misses = dt_atomic_get_int(&clmem_reuse_misses);
-    if(darktable.unmuted & DT_DEBUG_VERBOSE)
+    if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
       dt_print(DT_DEBUG_OPENCL,
               "[dev_pixelpipe] reused GPU buffer from cache (hits=%d, misses=%d) for module %s %s\n",
               hits, misses, module->name(), message);
@@ -1231,11 +1232,11 @@ float *dt_dev_pixelpipe_cache_restore_cl_buffer(dt_dev_pixelpipe_t *pipe, float 
                                                 const char *message)
 {
   if(IS_NULL_PTR(cl_mem_input)) return input;
-  dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, TRUE, input_entry);
+  dt_dev_pixelpipe_cache_wrlock_entry(dt_pixelpipe_cache_get_global(), TRUE, input_entry);
 
   const int fail = dt_dev_pixelpipe_cache_sync_cl_buffer(pipe->devid, input, cl_mem_input, roi_in,
                                                          CL_MAP_READ, in_bpp, module, message);
-  dt_dev_pixelpipe_cache_wrlock_entry(darktable.pixelpipe_cache, FALSE, input_entry);
+  dt_dev_pixelpipe_cache_wrlock_entry(dt_pixelpipe_cache_get_global(), FALSE, input_entry);
   return fail ? NULL : input;
 }
 
@@ -1285,7 +1286,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
     const cl_mem mem = (cl_mem)*cl_mem_input;
     if(dt_opencl_is_pinned_memory(mem))
     {
-      dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, input_entry);
+      dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, input_entry);
       *locked_input_entry = input_entry;
     }
     return 0;
@@ -1297,7 +1298,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
     return 1;
   }
 
-  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, input_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, input_entry);
 
   // Try to reuse a cached pinned buffer; otherwise allocate a new pinned image backed by `input`.
   gboolean input_reused_from_cache = FALSE;
@@ -1344,7 +1345,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(dt_dev_pixelpipe_t *pipe, dt_iop_mod
   if(keep_lock)
     *locked_input_entry = input_entry;
   else
-    dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, FALSE, input_entry);
+    dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, input_entry);
 
   return fail ? 1 : 0;
 }
@@ -1697,7 +1698,7 @@ static gboolean _cache_entry_clmem_flush_device(dt_pixel_cache_entry_t *entry, c
     {
       // Don't flush cachelines that don't belong to the current OpenCL device,
       // or are still borrowed by an in-flight GPU module (per-payload refs > 0).
-      if(darktable.unmuted & DT_DEBUG_VERBOSE)
+      if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
         dt_print(DT_DEBUG_OPENCL,
           "[dt_dev_pixelpipe_cache_flush_clmem] for entry %" PRIu64 ": couldn't flush %p "
           "(referenced=%i not ours=%i)\n",
@@ -1944,11 +1945,11 @@ static void _free_cache_entry(dt_pixel_cache_entry_t *cache_entry)
    * teardown into a SIGSEGV. Skip the arena free and the accounting in that case -- the arena is
    * unmapped wholesale right after, so nothing actually leaks. */
   dt_dev_pixelpipe_cache_t *cache = cache_entry->cache;
-  if(cache != darktable.pixelpipe_cache)
+  if(cache != dt_pixelpipe_cache_get_global())
   {
     fprintf(stderr, "[pixelpipe] cache entry %p has a corrupted back-reference (%p, expected %p); "
                     "skipping arena free to avoid a crash\n",
-            (void *)cache_entry, (void *)cache, (void *)darktable.pixelpipe_cache);
+            (void *)cache_entry, (void *)cache, (void *)dt_pixelpipe_cache_get_global());
     cache = NULL;
   }
 
@@ -1967,7 +1968,7 @@ static void _free_cache_entry(dt_pixel_cache_entry_t *cache_entry)
         * is still reading the previous pixels.
         *
         * dt_opencl_finish() flushes that device's event list, which is only thread-safe while we hold
-        * darktable.opencl->dev[devid].lock. Touching it without that lock races the eventlist/cl_mem
+        * dt_opencl_get_global()->dev[devid].lock. Touching it without that lock races the eventlist/cl_mem
         * bookkeeping of whichever pixelpipe is currently running on that device and crashes inside
         * clWaitForEvents (issues #859, #864, #131742439 -- the 3-min GUI garbage collection timeout
         * dt_dev_pixelpipe_cache_flush_old() owns no device lock). _free_cache_entry() also runs from LRU
@@ -1976,11 +1977,11 @@ static void _free_cache_entry(dt_pixel_cache_entry_t *cache_entry)
         * the owner is draining it itself at the end of its run and this refcount==0 entry is not one of its
         * live borrows, so skipping the finish is safe. */
       const int mem_devid = dt_opencl_get_mem_context_id((cl_mem)c->mem);
-      if(mem_devid >= 0 && !IS_NULL_PTR(darktable.opencl) && darktable.opencl->inited
-         && !dt_pthread_mutex_BAD_trylock(&darktable.opencl->dev[mem_devid].lock))
+      if(mem_devid >= 0 && !IS_NULL_PTR(dt_opencl_get_global()) && dt_opencl_is_inited()
+         && !dt_pthread_mutex_BAD_trylock(&dt_opencl_get_global()->dev[mem_devid].lock))
       {
         dt_opencl_finish(mem_devid);
-        dt_pthread_mutex_BAD_unlock(&darktable.opencl->dev[mem_devid].lock);
+        dt_pthread_mutex_BAD_unlock(&dt_opencl_get_global()->dev[mem_devid].lock);
       }
     }
     dt_pthread_mutex_unlock(&cache_entry->cl_mem_lock);
@@ -2654,7 +2655,7 @@ void dt_dev_pixelpipe_cache_wrlock_entry(dt_dev_pixelpipe_cache_t *cache, gboole
     // never-served case, doc/pipeline-cache.md §8). INVALID for non-module outputs
     // (raster masks, republished inputs): waiters simply fall back to hash match.
     if(cache_entry && cache_entry->hash != DT_PIXELPIPE_CACHE_HASH_INVALID)
-      DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_CACHELINE_READY, cache_entry->hash,
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_CACHELINE_READY, cache_entry->hash,
                                     cache_entry->producer_node_key);
   }
 }
@@ -2838,7 +2839,7 @@ int dt_dev_pixelpipe_cache_rekey(dt_dev_pixelpipe_cache_t *cache, const uint64_t
 
 void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache)
 {
-  if(!(darktable.unmuted & DT_DEBUG_PIPECACHE)) return;
+  if(!(dt_get_debug_flags() & DT_DEBUG_PIPECACHE)) return;
 
   dt_print(DT_DEBUG_PIPECACHE, "[pixelpipe] cache hit rate so far: %.3f%% - size: %" G_GSIZE_FORMAT " MiB over %" G_GSIZE_FORMAT " MiB - %i items\n", 
     100. * (cache->hits) / (float)cache->queries, cache->current_memory / (1024 * 1024), 
@@ -2902,10 +2903,10 @@ GArray *dt_dev_pixelpipe_cache_get_entries_stats(dt_dev_pixelpipe_cache_t *cache
 size_t dt_dev_pixelpipe_cache_get_vram_total(void)
 {
 #ifdef HAVE_OPENCL
-  if(!dt_opencl_is_enabled() || IS_NULL_PTR(darktable.opencl)) return 0;
+  if(!dt_opencl_is_enabled() || IS_NULL_PTR(dt_opencl_get_global())) return 0;
   size_t total = 0;
-  for(int i = 0; i < darktable.opencl->num_devs; i++)
-    total += (size_t)darktable.opencl->dev[i].max_global_mem;
+  for(int i = 0; i < dt_opencl_get_global()->num_devs; i++)
+    total += (size_t)dt_opencl_get_global()->dev[i].max_global_mem;
   return total;
 #else
   return 0;

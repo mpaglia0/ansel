@@ -33,7 +33,12 @@
 */
 
 #include "common/interpolation.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/math.h"
 #include "control/conf.h"
 
@@ -1154,7 +1159,7 @@ int dt_interpolation_resample_cl(const struct dt_interpolation *itor,
   // a number of parallel work items each taking care of one horizontal convolution,
   // then sum over work items to do the vertical convolution
 
-  const int kernel = darktable.opencl->interpolation->kernel_interpolation_resample;
+  const int kernel = dt_opencl_get_global()->interpolation->kernel_interpolation_resample;
   const int width = roi_out->width;
   const int height = roi_out->height;
 

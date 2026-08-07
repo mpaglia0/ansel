@@ -18,15 +18,11 @@
 
 #include "dtgtk/thumbtable_info.h"
 
-#include "common/darktable.h"
-#include "common/datetime.h"
+#include "common/database.h"
 #include "common/debug.h"
 #include "common/image.h"
 #include "common/image_cache.h"
-#include "common/imageio.h"
-#include "common/ratings.h"
-#include "develop/imageop.h"
-#include "views/view.h"
+#include "common/macros.h"
 
 #include <glib.h>
 #include <glib/gi18n.h>
@@ -46,9 +42,9 @@ void dt_thumbtable_info_seed_image_cache(const dt_image_t *info)
 {
   if(IS_NULL_PTR(info) || info->id <= 0) return;
 
-  if(IS_NULL_PTR(darktable.image_cache)) return;
+  if(IS_NULL_PTR(dt_image_cache_get_global())) return;
 
-  dt_image_cache_seed(darktable.image_cache, info);
+  dt_image_cache_seed(dt_image_cache_get_global(), info);
 }
 
 sqlite3_stmt *dt_thumbtable_info_get_collection_stmt(void)
@@ -56,7 +52,7 @@ sqlite3_stmt *dt_thumbtable_info_get_collection_stmt(void)
   if(IS_NULL_PTR(_thumbtable_collection_stmt))
   {
     DT_DEBUG_SQLITE3_PREPARE_V2(
-        dt_database_get(darktable.db),
+        dt_database_get_sqlite3_global(),
         // Batch-fetch thumbnail metadata in one SQL query to avoid one query per image
         // through the image cache. This keeps scrolling lightweight and predictable.
         "SELECT im.id, im.group_id, "
@@ -111,12 +107,12 @@ void dt_thumbtable_info_debug_assert_matches_cache(const dt_image_t *sql_info)
 {
   if(IS_NULL_PTR(sql_info) || sql_info->id <= 0) return;
 
-  const dt_image_t *img = dt_image_cache_get(darktable.image_cache, sql_info->id, 'r');
+  const dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), sql_info->id, 'r');
   if(IS_NULL_PTR(img)) return;
 
   dt_image_t cache_info = {0};
   dt_thumbtable_copy_image(&cache_info, img);
-  dt_image_cache_read_release(darktable.image_cache, img);
+  dt_image_cache_read_release(dt_image_cache_get_global(), img);
 
   g_assert_cmpint(sql_info->id, ==, cache_info.id);
   g_assert_cmpint(sql_info->film_id, ==, cache_info.film_id);

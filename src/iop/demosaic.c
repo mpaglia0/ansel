@@ -58,7 +58,16 @@
 #include "config.h"
 #endif
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/logging.h"
+#include "common/times.h"
+#include "common/module_versioning.h"
+#include "common/fp_mode.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/imagebuf.h"
 #include "common/image_cache.h"
 #include "common/interpolation.h"
@@ -77,7 +86,6 @@
 
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces.h"
-#include "control/conf.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/bspline.h"
 
@@ -997,7 +1005,7 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
   dt_iop_roi_t roo = *roi_out;
   roo.x = roo.y = 0;
   // roi_out->scale = global scale: (iscale == 1.0, always when demosaic is on)
-  const gboolean info = ((darktable.unmuted & (DT_DEBUG_DEMOSAIC | DT_DEBUG_PERF))
+  const gboolean info = ((dt_get_debug_flags() & (DT_DEBUG_DEMOSAIC | DT_DEBUG_PERF))
                          && (pipe->type == DT_DEV_PIXELPIPE_FULL));
 
   // piece->dsc_in.filters/xtrans only carries the fixed sensor-border-trim phase shift
@@ -1638,7 +1646,7 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
   const dt_iop_roi_t *const roi_in = &piece->roi_in;
   const dt_iop_roi_t *const roi_out = &piece->roi_out;
   dt_times_t start_time = { 0 }, end_time = { 0 };
-  const gboolean info = ((darktable.unmuted & (DT_DEBUG_DEMOSAIC | DT_DEBUG_PERF))
+  const gboolean info = ((dt_get_debug_flags() & (DT_DEBUG_DEMOSAIC | DT_DEBUG_PERF))
                          && (pipe->type == DT_DEV_PIXELPIPE_FULL));
 
   // See the matching comment in process(): most kernels below take roi_in->x/y as an
@@ -1918,7 +1926,7 @@ void tiling_callback(struct dt_iop_module_t *self, const struct dt_dev_pixelpipe
     tiling->factor = 1.0f + ioratio;
     tiling->factor += fmax(1.0f + greeneq, smooth);  // + tmp + geeneq | + smooth
     tiling->maxbuf = 1.0f;
-    tiling->overhead = sizeof(float) * RCD_TILESIZE * RCD_TILESIZE * 8 * MAX(1, darktable.num_openmp_threads);
+    tiling->overhead = sizeof(float) * RCD_TILESIZE * RCD_TILESIZE * 8 * MAX(1, dt_get_num_openmp_threads());
     tiling->xalign = 2;
     tiling->yalign = 2;
     tiling->overlap = 10;
@@ -1929,7 +1937,7 @@ void tiling_callback(struct dt_iop_module_t *self, const struct dt_dev_pixelpipe
     tiling->factor = 1.0f + ioratio;
     tiling->factor += fmax(1.0f + greeneq, smooth);  // + tmp + geeneq | + smooth
     tiling->maxbuf = 1.0f;
-    tiling->overhead = sizeof(float) * LMMSE_GRP * LMMSE_GRP * 6 * MAX(1, darktable.num_openmp_threads);
+    tiling->overhead = sizeof(float) * LMMSE_GRP * LMMSE_GRP * 6 * MAX(1, dt_get_num_openmp_threads());
     tiling->xalign = 2;
     tiling->yalign = 2;
     tiling->overlap = 10;
@@ -2323,14 +2331,14 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->dual_thrs, isdual);
   gtk_widget_set_visible(g->lmmse_refine, islmmse);
 
-  dt_image_t *img = dt_image_cache_get(darktable.image_cache, self->dev->image_storage.id, 'w');
+  dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), self->dev->image_storage.id, 'w');
   if(!img) return;
   if((p->demosaicing_method == DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME) ||
      (p->demosaicing_method == DT_IOP_DEMOSAIC_PASSTHR_MONOX))
     img->flags |= DT_IMAGE_MONOCHROME_BAYER;
   else
     img->flags &= ~DT_IMAGE_MONOCHROME_BAYER;
-  dt_image_cache_write_release(darktable.image_cache, img, DT_IMAGE_CACHE_RELAXED);
+  dt_image_cache_write_release(dt_image_cache_get_global(), img, DT_IMAGE_CACHE_RELAXED);
 }
 void gui_update(struct dt_iop_module_t *self)
 {

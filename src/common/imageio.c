@@ -57,10 +57,16 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "common/colorlabels.h"
 #include "common/colorspaces.h"
-#include "common/darktable.h"
-#include "common/debug.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/logging.h"
+#include "common/times.h"
+#include "common/paths.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/exif.h"
 #include "common/image_cache.h"
 #include "common/history.h"
@@ -775,7 +781,7 @@ gboolean _apply_style_before_export(dt_develop_t *dev, dt_imageio_module_data_t 
 
 void _print_export_debug(dt_dev_pixelpipe_t *pipe, dt_imageio_module_data_t *format_params, const gboolean use_style)
 {
-  if(darktable.unmuted & DT_DEBUG_IMAGEIO)
+  if(dt_get_debug_flags() & DT_DEBUG_IMAGEIO)
   {
     fprintf(stderr,"[dt_imageio_export_with_flags] ");
     if(use_style)
@@ -936,7 +942,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   dt_get_times(&start);
 
   dt_mipmap_buffer_t buf;
-  dt_mipmap_cache_t *cache = darktable.mipmap_cache;
+  dt_mipmap_cache_t *cache = dt_mipmap_cache_get_global();
   void *outbuf = NULL;
 
   // Get the history, aka sequence of editing changes
@@ -1053,19 +1059,19 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
    * returning and our ref_count_entry() call — leaving us with a dangling data pointer that
    * the OpenMP conversion threads then read → SIGSEGV.  ref_entry_by_hash() closes that
    * window by holding cache->lock across both the lookup and the increment. */
-  if(!dt_dev_pixelpipe_cache_ref_entry_by_hash(darktable.pixelpipe_cache,
+  if(!dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_pixelpipe_cache_get_global(),
                                                dt_dev_backbuf_get_hash(&pipe.backbuf),
                                                &data, &cache_entry)
      || !data)
   {
     if(cache_entry)
-      dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, FALSE, cache_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, cache_entry);
     goto error;
   }
 
   /* Hold a read lock for the duration of the conversion so no writer can replace the buffer
    * while the OpenMP threads are reading it. */
-  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, TRUE, cache_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, cache_entry);
 
   // Down-conversion to low-precision formats:
   const size_t pixels = pipe.backbuf.width * pipe.backbuf.height * 4;
@@ -1123,8 +1129,8 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   }
 
   // Decrease ref count on the cache entry and release the read lock
-  dt_dev_pixelpipe_cache_ref_count_entry(darktable.pixelpipe_cache, FALSE, cache_entry);
-  dt_dev_pixelpipe_cache_rdlock_entry(darktable.pixelpipe_cache, FALSE, cache_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, cache_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, cache_entry);
 
   if(IS_NULL_PTR(outbuf)) goto error;
 
@@ -1165,7 +1171,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   if(!thumbnail_export && strcmp(format->mime(format_params), "memory")
     && !(format->flags(format_params) & FORMAT_FLAGS_NO_TMPFILE))
   {
-    DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_IMAGE_EXPORT_TMPFILE, imgid, filename, format,
+    DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_IMAGE_EXPORT_TMPFILE, imgid, filename, format,
                             format_params, storage, storage_params);
   }
 

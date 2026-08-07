@@ -16,7 +16,8 @@
    along with darktable.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#pragma once
+#ifndef DT_COMMON_SOLVERS_SPARSE_CHOLESKY_H
+#define DT_COMMON_SOLVERS_SPARSE_CHOLESKY_H
 
 // Reusable exact sparse SPD Cholesky solver (double precision), factored out of the
 // highlights harmonic-transposition code. Header-only, like common/../choleski.h. Takes a
@@ -25,12 +26,14 @@
 // highlights module). Large scratch buffers use the pipeline-cache arena, so the caller
 // passes the dt_dev_pixelpipe_t.
 
+#include <glib.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "develop/pixelpipe_hb.h" // dt_dev_pixelpipe_t (arena alloc) — self-contained include order
 
 // Factored SPD matrix (lower-triangular Cholesky factor L, column-compressed).
@@ -405,3 +408,4 @@ static inline void _sp_chol_solve(const _sp_chol_t *const factor, double *const 
     rhs[j] = accum / factor->values[factor->col_ptr[j]]; // x_j = (y_j - sum_{i>j} L[i,j] x_i) / L[j,j]
   }
 }
+#endif // DT_COMMON_SOLVERS_SPARSE_CHOLESKY_H

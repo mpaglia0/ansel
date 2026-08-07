@@ -20,7 +20,10 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_COMMON_TEA_H
+#define DT_COMMON_TEA_H
+
+#include "develop/pixelpipe_cache_alloc.h"
 
 // Allocate a buffer for storing the internal state of 'numthreads' parallel instances of the Tiny Encryption
 // Algorithm.  We need to ensure that each state falls in a separate cache line, or all threads sharing a
@@ -75,6 +78,7 @@ static inline float tpdf(unsigned int urandom)
   return (frandom < 0.5f ? (sqrtf(2.0f * frandom) - 1.0f) : (1.0f - sqrtf(2.0f * (1.0f - frandom))));
 }
 
+#endif // DT_COMMON_TEA_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

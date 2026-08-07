@@ -44,14 +44,15 @@
 
 
 #include "dtgtk/thumbnail.h"
-#include "common/dtpthread.h"
-#include "common/darktable.h"
 #include "common/debug.h"
+#include "common/logging.h"
 
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
+#include <stdint.h>
 
-#pragma once
+#ifndef DT_DTGTK_THUMBTABLE_H
+#define DT_DTGTK_THUMBTABLE_H
 
 
 /**
@@ -407,6 +408,8 @@ static inline void dt_thumbtable_hide(dt_thumbtable_t *table)
   gtk_widget_hide(table->scroll_window);
   gtk_widget_hide(table->grid);
 }
+
+#endif // DT_DTGTK_THUMBTABLE_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

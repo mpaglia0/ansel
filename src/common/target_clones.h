@@ -15,24 +15,18 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
-#pragma once
+#ifndef DT_COMMON_TARGET_CLONES_H
+#define DT_COMMON_TARGET_CLONES_H
 
-/* Function multi-versioning for compute units that must NOT inherit
- * common/darktable.h.
+/* Function multi-versioning (target_clones) for SIMD compute functions.
  *
- * This is a DELIBERATE DUPLICATE of the block in common/darktable.h, which
- * remains the canonical copy for the rest of the tree. It exists because
- * common/nn_model.c is deliberately self-contained (no darktable.h, no
- * pipeline types — see its header comment) yet holds the hottest loops in the
- * denoiser, so it needs the attribute without the dependency.
+ * This is THE canonical definition of __DT_CLONE_TARGETS__: common/darktable.h
+ * inherits it from here (it used to carry a deliberate duplicate until the
+ * de-glueing landed). Self-contained on purpose — low-level compute units
+ * (common/nn_model.c and friends) include this without pulling anything else.
  *
- * KEEP THE TWO IN SYNC until the wider darktable.h de-glueing lands and this
- * becomes the single definition; that migration is scoped separately. The
- * guard below makes the duplication inert wherever darktable.h was already
- * included, so include order can never produce a redefinition.
- *
- * Only common/nn_model.c should include this for now. Everything else already
- * gets the macro from darktable.h.
+ * The guard keeps the definition inert if some translation unit ends up seeing
+ * it twice through different paths.
  */
 
 #ifndef __DT_CLONE_TARGETS__
@@ -108,3 +102,4 @@
 #endif
 
 #endif // __DT_CLONE_TARGETS__
+#endif // DT_COMMON_TARGET_CLONES_H

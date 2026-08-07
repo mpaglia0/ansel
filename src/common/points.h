@@ -29,7 +29,14 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_COMMON_POINTS_H
+#define DT_COMMON_POINTS_H
+
+#include "develop/pixelpipe_cache_alloc.h"
+
+/* Process-wide singleton with no per-call context to ride on: this accessor is the
+ * intended end state (same category as dt_conf_*), implemented by the orchestrator. */
+struct dt_points_t *dt_points_get_global(void);
 
 #ifndef __SSE2__
 
@@ -89,7 +96,7 @@ static inline float dt_points_get_for(dt_points_t *p, const unsigned int thread_
 
 static inline float dt_points_get()
 {
-  return dt_points_get_for(darktable.points, dt_get_thread_num());
+  return dt_points_get_for(dt_points_get_global(), dt_get_thread_num());
 }
 
 #else
@@ -998,10 +1005,13 @@ static inline float dt_points_get_for(dt_points_t *p, const unsigned int thread_
 
 static inline float dt_points_get()
 {
-  return dt_points_get_for(darktable.points, dt_get_thread_num());
+  return dt_points_get_for(dt_points_get_global(), dt_get_thread_num());
 }
 
 #endif
+
+#endif // DT_COMMON_POINTS_H
+
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

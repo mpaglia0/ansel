@@ -33,10 +33,13 @@
 
 #define __STDC_FORMAT_MACROS
 
-#include "common/darktable.h"
+#include "common/mem_alloc.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
 
 
 #include "develop/imageop.h"
+#include "develop/pixelpipe_hb.h"
 #include "develop/imageop_math.h"
 
 // otherwise the name will be mangled and the linker won't be able to see the function ...

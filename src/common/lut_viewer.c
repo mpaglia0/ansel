@@ -16,11 +16,17 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <glib/gstdio.h>
 #include "common/lut_viewer.h"
 
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/logging.h"
+#include "common/times.h"
 #include "common/matrices.h"
 #include "control/conf.h"
 #include "control/control.h"
@@ -566,7 +572,7 @@ static void _draw_cube(cairo_t *cr, const dt_lut_viewer_t *viewer, const dt_lut_
     _project_point(projection, rgb, &x[corner], &y[corner], &depth);
   }
 
-  set_color(cr, darktable.bauhaus->graph_border);
+  set_color(cr, dt_bauhaus_get_global()->graph_border);
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(1.f));
 
   for(int corner = 0; corner < 8; corner++)
@@ -685,7 +691,7 @@ static void _draw_samples(cairo_t *cr, const dt_lut_viewer_t *viewer,
     return;
 
   dt_lut_viewer_t *mutable_viewer = (dt_lut_viewer_t *)viewer;
-  const gboolean log_perf = (darktable.unmuted & DT_DEBUG_PERF) != 0;
+  const gboolean log_perf = (dt_get_debug_flags() & DT_DEBUG_PERF) != 0;
   const double total_start = log_perf ? dt_get_wtime() : 0.0;
   double collect_done = 0.0;
   double convert_done = 0.0;
@@ -940,9 +946,9 @@ static void _draw_placeholder(cairo_t *cr, const int width, const int height, co
 
 static void _render_surface(dt_lut_viewer_t *viewer, const int width, const int height)
 {
-  const gboolean log_perf = (darktable.unmuted & DT_DEBUG_PERF) != 0;
+  const gboolean log_perf = (dt_get_debug_flags() & DT_DEBUG_PERF) != 0;
   const double start = log_perf ? dt_get_wtime() : 0.0;
-  const double ppd = (darktable.gui && darktable.gui->ppd > 0.0) ? darktable.gui->ppd : 1.0;
+  const double ppd = (dt_gui_get_global() && dt_gui_get_global()->ppd > 0.0) ? dt_gui_get_global()->ppd : 1.0;
   if(viewer->clut_lock) dt_pthread_rwlock_rdlock(viewer->clut_lock);
   _invalidate_surface(viewer);
   viewer->surface = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
@@ -1028,7 +1034,7 @@ static gboolean _draw_callback(GtkWidget *widget, cairo_t *cr, gpointer user_dat
   const float zoom = viewer->zoom;
   const int gamut = dt_bauhaus_combobox_get(viewer->gamut);
   const gboolean show_control_nodes = _show_control_nodes(viewer);
-  const double ppd = (darktable.gui && darktable.gui->ppd > 0.0) ? darktable.gui->ppd : 1.0;
+  const double ppd = (dt_gui_get_global() && dt_gui_get_global()->ppd > 0.0) ? dt_gui_get_global()->ppd : 1.0;
 
   if(!viewer->surface
      || viewer->cached_width != allocation.width
@@ -1202,7 +1208,7 @@ static void _save_clut_callback(GtkWidget *widget, gpointer user_data)
     return;
   }
 
-  GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
+  GtkWidget *win = dt_gui_main_window();
   GtkFileChooserNative *filechooser = gtk_file_chooser_native_new(
         _("save 3D LUT"), GTK_WINDOW(win), GTK_FILE_CHOOSER_ACTION_SAVE,
         _("_save"), _("_cancel"));
@@ -1292,35 +1298,35 @@ dt_lut_viewer_t *dt_lut_viewer_new(dt_gui_module_t *module)
   gtk_box_pack_start(GTK_BOX(viewer->widget), GTK_WIDGET(viewer->area), TRUE, TRUE, 0);
 
   viewer->rotation_around_axis
-      = dt_bauhaus_slider_new_with_range(darktable.bauhaus, module, -180.f, 180.f, 1.f, 35.f, 0);
+      = dt_bauhaus_slider_new_with_range(dt_bauhaus_get_global(), module, -180.f, 180.f, 1.f, 35.f, 0);
   dt_bauhaus_widget_set_label(viewer->rotation_around_axis, _("azimuth"));
   dt_bauhaus_slider_set_format(viewer->rotation_around_axis, _("°"));
   gtk_box_pack_start(GTK_BOX(viewer->controls), viewer->rotation_around_axis, FALSE, FALSE, 0);
   g_signal_connect(G_OBJECT(viewer->rotation_around_axis), "value-changed", G_CALLBACK(_control_changed), viewer);
 
   viewer->rotation_of_axis
-      = dt_bauhaus_slider_new_with_range(darktable.bauhaus, module, 0.f, 90.f, 1.f, 0.f, 0);
+      = dt_bauhaus_slider_new_with_range(dt_bauhaus_get_global(), module, 0.f, 90.f, 1.f, 0.f, 0);
   dt_bauhaus_widget_set_label(viewer->rotation_of_axis, _("axis tilt"));
   dt_bauhaus_slider_set_format(viewer->rotation_of_axis, _("°"));
   gtk_box_pack_start(GTK_BOX(viewer->controls), viewer->rotation_of_axis, FALSE, FALSE, 0);
   g_signal_connect(G_OBJECT(viewer->rotation_of_axis), "value-changed", G_CALLBACK(_control_changed), viewer);
 
   viewer->slice_depth
-      = dt_bauhaus_slider_new_with_range(darktable.bauhaus, module, 0.f, 100.f, 1.f, 50.f, 0);
+      = dt_bauhaus_slider_new_with_range(dt_bauhaus_get_global(), module, 0.f, 100.f, 1.f, 50.f, 0);
   dt_bauhaus_widget_set_label(viewer->slice_depth, _("slice depth"));
   dt_bauhaus_slider_set_format(viewer->slice_depth, _(" %"));
   gtk_box_pack_start(GTK_BOX(viewer->controls), viewer->slice_depth, FALSE, FALSE, 0);
   g_signal_connect(G_OBJECT(viewer->slice_depth), "value-changed", G_CALLBACK(_control_changed), viewer);
 
   viewer->slice_thickness
-      = dt_bauhaus_slider_new_with_range(darktable.bauhaus, module, 0.f, 100.f, 1.f, 100.f, 0);
+      = dt_bauhaus_slider_new_with_range(dt_bauhaus_get_global(), module, 0.f, 100.f, 1.f, 100.f, 0);
   dt_bauhaus_widget_set_label(viewer->slice_thickness, _("slice thickness"));
   dt_bauhaus_slider_set_format(viewer->slice_thickness, _(" %"));
   gtk_box_pack_start(GTK_BOX(viewer->controls), viewer->slice_thickness, FALSE, FALSE, 0);
   g_signal_connect(G_OBJECT(viewer->slice_thickness), "value-changed", G_CALLBACK(_control_changed), viewer);
 
   viewer->shift_threshold
-      = dt_bauhaus_slider_new_with_range(darktable.bauhaus, module, 0.f, 100.f, 0.1f, 0.1f, 1);
+      = dt_bauhaus_slider_new_with_range(dt_bauhaus_get_global(), module, 0.f, 100.f, 0.1f, 0.1f, 1);
   dt_bauhaus_widget_set_label(viewer->shift_threshold, _("color shift threshold"));
   dt_bauhaus_slider_set_format(viewer->shift_threshold, _(" %"));
   gtk_box_pack_start(GTK_BOX(viewer->controls), viewer->shift_threshold, FALSE, FALSE, 0);
@@ -1331,7 +1337,7 @@ dt_lut_viewer_t *dt_lut_viewer_new(dt_gui_module_t *module)
   gtk_box_pack_start(GTK_BOX(viewer->controls), viewer->show_control_nodes, FALSE, FALSE, 0);
   g_signal_connect(G_OBJECT(viewer->show_control_nodes), "toggled", G_CALLBACK(_control_changed), viewer);
 
-  viewer->gamut = dt_bauhaus_combobox_new(darktable.bauhaus, module);
+  viewer->gamut = dt_bauhaus_combobox_new(dt_bauhaus_get_global(), module);
   dt_bauhaus_widget_set_label(viewer->gamut, _("target gamut"));
   dt_bauhaus_combobox_add(viewer->gamut, _("sRGB/Rec709"));
   dt_bauhaus_combobox_add(viewer->gamut, _("Adobe RGB"));

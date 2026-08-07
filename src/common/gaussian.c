@@ -27,7 +27,12 @@
 */
 
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include <assert.h>
 #include <math.h>
 #include "common/gaussian.h"
@@ -377,7 +382,7 @@ dt_gaussian_cl_t *dt_gaussian_init_cl(const int devid,
   dt_gaussian_cl_t *g = (dt_gaussian_cl_t *)malloc(sizeof(dt_gaussian_cl_t));
   if(IS_NULL_PTR(g)) return NULL;
 
-  g->global = darktable.opencl->gaussian;
+  g->global = dt_opencl_get_global()->gaussian;
   g->devid = devid;
   g->width = width;
   g->height = height;

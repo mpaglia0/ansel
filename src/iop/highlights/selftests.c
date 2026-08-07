@@ -19,8 +19,9 @@
 // CPU/GPU parity self-tests of the harmonic OpenCL port (each vs a CPU replica). (implementation; see selftests.h
 // for the public API.)
 
-#include "common/darktable.h"
-#include "common/gaussian.h"
+#include "common/macros.h"
+#include "common/simd.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "develop/imageop_math.h"
 #include "iop/highlights/blur.h"
 #include "iop/highlights/chroma.h"
@@ -31,6 +32,7 @@
 #include "iop/highlights/pde.h"
 #include "iop/highlights/region.h"
 #include "iop/highlights/selftests.h"
+#include <glib/gstdio.h>
 #include <math.h>
 #include <string.h>
 

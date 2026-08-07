@@ -40,20 +40,24 @@
 */
 /** a class to manage a table of thumbnail for lighttable and filmstrip.  */
 
-#include "common/darktable.h"
+#include "common/image_extensions.h"
+#include "common/act_on.h"
+#include "control/settings.h"
+#include "control/conf.h"
+#include "control/jobs/control_jobs.h"
 #include "gui/gdkkeys.h"
 #include "dtgtk/thumbtable.h"
 #include "dtgtk/thumbtable_internal.h"
 #include "dtgtk/thumbnail.h"
 #include "dtgtk/thumbtable_info.h"
 #include "common/collection.h"
-#include "common/colorlabels.h"
 #include "common/history.h"
 #include "common/image_cache.h"
-#include "common/grouping.h"
-#include "common/ratings.h"
+#include "common/hash.h"
 #include "common/selection.h"
-#include "common/undo.h"
+#include "common/times.h"
+#include "common/usermanual_url.h"
+#include "common/utility.h"
 #include "control/control.h"
 #include "control/jobs/import_jobs.h"
 
@@ -63,7 +67,6 @@
 #include "bauhaus/bauhaus.h"
 
 #ifdef GDK_WINDOWING_QUARTZ
-#include "osx/osx.h"
 #endif
 
 #include <glib-object.h>
@@ -72,13 +75,13 @@
 
 static gboolean _thumbtable_clone_lut(dt_thumbtable_t *dst)
 {
-  if(IS_NULL_PTR(dst) || IS_NULL_PTR(darktable.gui) || IS_NULL_PTR(darktable.gui->ui)) return FALSE;
+  if(IS_NULL_PTR(dst) || IS_NULL_PTR(dt_gui_get_global()) || IS_NULL_PTR(dt_gui_get_ui())) return FALSE;
 
   dt_thumbtable_t *src = NULL;
-  if(darktable.gui->ui->thumbtable_lighttable == dst)
-    src = darktable.gui->ui->thumbtable_filmstrip;
-  else if(darktable.gui->ui->thumbtable_filmstrip == dst)
-    src = darktable.gui->ui->thumbtable_lighttable;
+  if(dt_gui_get_ui()->thumbtable_lighttable == dst)
+    src = dt_gui_get_ui()->thumbtable_filmstrip;
+  else if(dt_gui_get_ui()->thumbtable_filmstrip == dst)
+    src = dt_gui_get_ui()->thumbtable_lighttable;
 
   if(IS_NULL_PTR(src) || src == dst) return FALSE;
 
@@ -443,7 +446,7 @@ int dt_thumbtable_scroll_to_active_rowid(dt_thumbtable_t *table)
 
 int dt_thumbtable_scroll_to_selection(dt_thumbtable_t *table)
 {
-  int id = dt_selection_get_first_id(darktable.selection);
+  int id = dt_selection_get_first_id(dt_selection_get_global());
   if(id < 0) id = dt_control_get_keyboard_over_id();
   if(id < 0) id = dt_control_get_mouse_over_id();
   //fprintf(stdout, "scrolling to %i\n", id);
@@ -644,12 +647,12 @@ void _add_thumbnail_at_rowid(dt_thumbtable_t *table, const size_t rowid, const i
 {
   const int32_t imgid = table->lut[rowid].imgid;
   dt_image_t info;
-  dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'r');
+  dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
   if(IS_NULL_PTR(img)) return;
 
   // Take a private copy
   info = *img;
-  dt_image_cache_read_release(darktable.image_cache, img);
+  dt_image_cache_read_release(dt_image_cache_get_global(), img);
 
   dt_thumbnail_t *thumb = NULL;
   gboolean new_item = TRUE;
@@ -974,18 +977,18 @@ static void _dt_image_info_changed_callback(gpointer instance, gpointer imgs, gp
     {
       // Refresh the cached LUT info from the image cache for write-driven updates
       // (ratings, color labels, etc.) while still keeping read paths cache-free.
-      const dt_image_t *img = dt_image_cache_testget(darktable.image_cache, imgid, 'r');
+      const dt_image_t *img = dt_image_cache_testget(dt_image_cache_get_global(), imgid, 'r');
       if(img)
       {
         dt_thumbnail_resync_info(thumb, img);
-        dt_image_cache_read_release(darktable.image_cache, img);
+        dt_image_cache_read_release(dt_image_cache_get_global(), img);
         dt_thumbnail_update_gui(thumb);
         _add_thumbnail_group_borders(table, thumb);
         gtk_widget_queue_draw(thumb->widget);
       }
     }
 
-    if(darktable.view_manager->image_info_id == imgid)
+    if(dt_view_manager_get_global()->image_info_id == imgid)
       dt_view_image_info_update(imgid);
   }
 
@@ -1017,7 +1020,7 @@ static void _dt_collection_lut(dt_thumbtable_t *table)
       // because it's unexpected that unvisible items might be selected,
       // and selection sanitization only deals with imgids outside of current collection,
       // but group members are always within the collection.
-      dt_selection_deselect(darktable.selection, imgid);
+      dt_selection_deselect(dt_selection_get_global(), imgid);
       continue;
     }
 
@@ -1084,12 +1087,12 @@ static void _dt_collection_lut(dt_thumbtable_t *table)
 static gboolean _dt_collection_get_hash(dt_thumbtable_t *table)
 {
   // Hash the collection query string
-  const char *const query = dt_collection_get_query(darktable.collection);
+  const char *const query = dt_collection_get_query(dt_collection_get_global());
   size_t len = strlen(query);
   uint64_t hash = dt_hash(5384, query, len);
 
   // Factor in the number of images in the collection result
-  uint32_t num_pics = dt_collection_get_count(darktable.collection);
+  uint32_t num_pics = dt_collection_get_count(dt_collection_get_global());
   hash = dt_hash(hash, (char *)&num_pics, sizeof(uint32_t));
 
   if(hash != table->collection_hash || table->reset_collection)
@@ -1522,7 +1525,7 @@ void _alternative_mode(dt_thumbtable_t *table, gboolean enable)
 
 gboolean dt_thumbtable_key_pressed_grid(GtkWidget *self, GdkEventKey *event, gpointer user_data)
 {
-  if(!gtk_window_is_active(GTK_WINDOW(darktable.gui->ui->main_window))) return FALSE;
+  if(!gtk_window_is_active(GTK_WINDOW(dt_gui_get_ui()->main_window))) return FALSE;
   if(IS_NULL_PTR(user_data)) return FALSE;
   dt_thumbtable_t *table = (dt_thumbtable_t *)user_data;
   if(IS_NULL_PTR(table->lut)) return FALSE;
@@ -1537,7 +1540,7 @@ gboolean dt_thumbtable_key_pressed_grid(GtkWidget *self, GdkEventKey *event, gpo
   // so they always take precedence.
   int32_t imgid = dt_control_get_keyboard_over_id();
   if(imgid < 0) imgid = dt_control_get_mouse_over_id();
-  if(imgid < 0) imgid = dt_selection_get_first_id(darktable.selection);
+  if(imgid < 0) imgid = dt_selection_get_first_id(dt_selection_get_global());
   if(imgid < 0 && table->lut)
   {
     dt_pthread_mutex_lock(&table->lock);
@@ -1600,7 +1603,7 @@ gboolean dt_thumbtable_key_pressed_grid(GtkWidget *self, GdkEventKey *event, gpo
       // (grid selects the thumbnail first; the filmstrip just activates.)
       if(table->ops->pre_activate) table->ops->pre_activate(table, imgid);
 
-      DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_VIEWMANAGER_THUMBTABLE_ACTIVATE, imgid);
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_VIEWMANAGER_THUMBTABLE_ACTIVATE, imgid);
       return TRUE;
     }
     case GDK_KEY_Alt_L:
@@ -1620,7 +1623,7 @@ gboolean dt_thumbtable_key_pressed_grid(GtkWidget *self, GdkEventKey *event, gpo
 
 gboolean dt_thumbtable_key_released_grid(GtkWidget *self, GdkEventKey *event, gpointer user_data)
 {
-  if(!gtk_window_is_active(GTK_WINDOW(darktable.gui->ui->main_window))) return FALSE;
+  if(!gtk_window_is_active(GTK_WINDOW(dt_gui_get_ui()->main_window))) return FALSE;
 
   if(IS_NULL_PTR(user_data)) return FALSE;
   dt_thumbtable_t *table = (dt_thumbtable_t *)user_data;
@@ -1791,17 +1794,17 @@ dt_thumbtable_t *dt_thumbtable_new(dt_thumbtable_mode_t mode)
   _thumbs_update_overlays_mode(table);
 
   // we register globals signals
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_COLLECTION_CHANGED,
                             G_CALLBACK(_dt_collection_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_SELECTION_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_SELECTION_CHANGED,
                             G_CALLBACK(_dt_selection_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_ACTIVE_IMAGES_CHANGE,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_ACTIVE_IMAGES_CHANGE,
                             G_CALLBACK(_dt_active_images_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_CONTROL_PROFILE_USER_CHANGED,
                             G_CALLBACK(_dt_profile_change_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_IMAGE_INFO_CHANGED,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_IMAGE_INFO_CHANGED,
                             G_CALLBACK(_dt_image_info_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_CONNECT(darktable.signals, DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE,
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_MOUSE_OVER_IMAGE_CHANGE,
                             G_CALLBACK(_mouse_over_image_callback), table);
 
   dt_thumbtable_set_parent(table, mode);
@@ -1811,10 +1814,10 @@ dt_thumbtable_t *dt_thumbtable_new(dt_thumbtable_mode_t mode)
   // paths so shortcut search, menus and dispatch stay in sync with the
   // currently active accel group.
   GtkAccelGroup *accel_groups[] = {
-    darktable.gui->accels->lighttable_accels,
-    darktable.gui->accels->darkroom_accels,
-    darktable.gui->accels->print_accels,
-    darktable.gui->accels->map_accels
+    dt_gui_get_accels()->lighttable_accels,
+    dt_gui_get_accels()->darkroom_accels,
+    dt_gui_get_accels()->print_accels,
+    dt_gui_get_accels()->map_accels
   };
   const char *path_bases[] = {
     _("Lighttable/Thumbtable"),
@@ -1842,61 +1845,61 @@ dt_thumbtable_t *dt_thumbtable_new(dt_thumbtable_mode_t mode)
     const char *path_base = path_bases[group_index];
 
     path = dt_accels_build_path(path_base, _("Move up"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Up, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Move down"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Down, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Move left"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Left, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Move right"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Right, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Go to previous page"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Page_Up, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Go to next page"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Page_Down, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Go to the start"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Home, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Go to the end"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_End, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Select the current thumbnail"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_space, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Toogle the current thumbnail from selection"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_space, GDK_CONTROL_MASK);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Expand the current selection up to the hovered thumbnail"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_space, GDK_SHIFT_MASK);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Open the current thumbnail in darkroom"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Return, 0);
     dt_free(path);
     path = dt_accels_build_path(path_base, _("Enable thumbnail transient alternative view"));
-    dt_accels_new_virtual_shortcut(darktable.gui->accels, accel_group,
+    dt_accels_new_virtual_shortcut(dt_gui_get_accels(), accel_group,
                                    path, table->grid, GDK_KEY_Alt_L, 0);
     dt_free(path);
   }
 
   path = dt_accels_build_path(_("Global/Menu/File"), _("Remove image from library"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->global_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->global_accels,
                                  path, table->grid, GDK_KEY_Delete, 0);
   dt_free(path);
   return table;
@@ -1951,11 +1954,11 @@ void dt_thumbtable_cleanup(dt_thumbtable_t *table)
     table->focus_idle_id = 0;
   }
 
-  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_dt_collection_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_dt_selection_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_dt_active_images_changed_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_dt_profile_change_callback), table);
-  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(darktable.signals, G_CALLBACK(_dt_image_info_changed_callback), table);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_dt_collection_changed_callback), table);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_dt_selection_changed_callback), table);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_dt_active_images_changed_callback), table);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_dt_profile_change_callback), table);
+  DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_dt_image_info_changed_callback), table);
 
   _dt_thumbtable_empty_list(table);
 
@@ -2047,7 +2050,7 @@ void dt_thumbtable_select_all(dt_thumbtable_t *table)
 
   if(img)
   {
-    dt_selection_select_list(darktable.selection, img);
+    dt_selection_select_list(dt_selection_get_global(), img);
     g_list_free(img);
     img = NULL;
   }
@@ -2068,7 +2071,7 @@ void dt_thumbtable_select_range(dt_thumbtable_t *table, const int rowid)
   // Find the bounds of the current selection
   size_t rowid_end = 0;
   size_t rowid_start = table->collection_count - 1;
-  GList *selected = dt_selection_get_list(darktable.selection);
+  GList *selected = dt_selection_get_list(dt_selection_get_global());
 
   if(selected)
   {
@@ -2117,7 +2120,7 @@ void dt_thumbtable_select_range(dt_thumbtable_t *table, const int rowid)
 
   if(img)
   {
-    dt_selection_select_list(darktable.selection, img);
+    dt_selection_select_list(dt_selection_get_global(), img);
     g_list_free(img);
     img = NULL;
   }
@@ -2128,11 +2131,11 @@ void dt_thumbtable_invert_selection(dt_thumbtable_t *table)
   if(!table->collection_inited || table->collection_count == 0) return;
 
   // Record initial selection, select all, then deselect initial selection
-  GList *to_deselect = dt_selection_get_list(darktable.selection);
+  GList *to_deselect = dt_selection_get_list(dt_selection_get_global());
   if(to_deselect)
   {
     dt_thumbtable_select_all(table);
-    dt_selection_deselect_list(darktable.selection, to_deselect);
+    dt_selection_deselect_list(dt_selection_get_global(), to_deselect);
     g_list_free(to_deselect);
     to_deselect = NULL;
   }

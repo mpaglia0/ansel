@@ -29,7 +29,9 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/locallaplacian.h"
 #include "common/math.h"
 

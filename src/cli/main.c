@@ -49,9 +49,7 @@
  *  - profit
  */
 
-#include "common/collection.h"
 #include "common/darktable.h"
-#include "common/debug.h"
 #include "common/exif.h"
 #include "common/film.h"
 #include "common/file_location.h"
@@ -63,8 +61,6 @@
 #include "common/imageio_module.h"
 #include "common/l10n.h"
 #include "common/points.h"
-#include "control/conf.h"
-#include "develop/imageop.h"
 
 #include <inttypes.h>
 #include <libintl.h>
@@ -589,17 +585,17 @@ int main(int argc, char *arg[])
   for(GList *l = imgids; !IS_NULL_PTR(l); l = g_list_next(l))
   {
     const int imgid = GPOINTER_TO_INT(l->data);
-    const dt_image_t *image = dt_image_cache_get(darktable.image_cache, imgid, 'r');
+    const dt_image_t *image = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
 
     if(image && image->id == imgid)
     {
-      dt_image_cache_read_release(darktable.image_cache, image);
+      dt_image_cache_read_release(dt_image_cache_get_global(), image);
       id_list = g_list_append(id_list, GINT_TO_POINTER(imgid));
     }
     else
     {
       if(image)
-        dt_image_cache_read_release(darktable.image_cache, image);
+        dt_image_cache_read_release(dt_image_cache_get_global(), image);
       fprintf(stderr, _("error: no image with id %d in the library"), imgid);
       fprintf(stderr, "\n");
     }
@@ -670,7 +666,7 @@ int main(int argc, char *arg[])
     for(GList *iter = id_list; iter; iter = g_list_next(iter))
     {
       int id = GPOINTER_TO_INT(iter->data);
-      dt_image_t *image = dt_image_cache_get(darktable.image_cache, id, 'w');
+      dt_image_t *image = dt_image_cache_get(dt_image_cache_get_global(), id, 'w');
       if(dt_exif_xmp_read(image, xmp_filename, 1) != 0)
       {
         fprintf(stderr, _("error: can't open xmp file %s"), xmp_filename);
@@ -684,7 +680,7 @@ int main(int argc, char *arg[])
         exit(1);
       }
       // don't write new xmp:
-      dt_image_cache_write_release(darktable.image_cache, image, DT_IMAGE_CACHE_RELAXED);
+      dt_image_cache_write_release(dt_image_cache_get_global(), image, DT_IMAGE_CACHE_RELAXED);
     }
   }
 

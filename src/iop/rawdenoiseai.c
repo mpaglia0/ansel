@@ -56,13 +56,21 @@
 #include "config.h"
 #endif
 #include "bauhaus/bauhaus.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/logging.h"
+#include "common/module_versioning.h"
+#include <json-glib/json-glib.h>
+#include "common/paths.h"
+#include "gui/gtk.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/file_location.h"
 #include "common/imagebuf.h"
 #include "common/nn_model.h"
 #include "common/noiseprofiles.h"
 #include "common/opencl.h"
-#include "control/control.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/imageop_math.h"
@@ -1695,7 +1703,7 @@ static void _custom_model_callback(GtkWidget *w, dt_iop_module_t *self)
     g_strlcpy(p->custom_model, txt, sizeof(p->custom_model));
   else
     p->custom_model[0] = '\0';
-  dt_dev_add_history_item(darktable.develop, self, TRUE, TRUE);
+  dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
 }
 
 static void _custom_model_populate(dt_iop_module_t *self)
@@ -1788,7 +1796,7 @@ void gui_init(dt_iop_module_t *self)
                                                   "coarse chroma pass and the low-band fusion — high quality,\n"
                                                   "recommended for high ISO."));
 
-  g->custom_model = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(self));
+  g->custom_model = dt_bauhaus_combobox_new(dt_bauhaus_get_global(), DT_GUI_MODULE(self));
   dt_bauhaus_widget_set_label(g->custom_model, N_("custom model"));
   gtk_box_pack_start(GTK_BOX(box_raw), g->custom_model, TRUE, TRUE, 0);
   gtk_widget_set_tooltip_text(g->custom_model,

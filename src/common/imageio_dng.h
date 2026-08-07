@@ -31,17 +31,21 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_COMMON_IMAGEIO_DNG_H
+#define DT_COMMON_IMAGEIO_DNG_H
 
 // writes buffers as digital negative (dng) raw images
 
+#include <glib/gstdio.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "common/darktable.h"
 #include "common/exif.h"
+#include "common/imageio.h"
+#include "common/simd.h"
 
 
 #define II 1
@@ -243,6 +247,8 @@ static inline void dt_imageio_write_dng(
 #undef LONG
 #undef RATIONAL
 #undef SRATIONAL
+
+#endif // DT_COMMON_IMAGEIO_DNG_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

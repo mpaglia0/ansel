@@ -22,8 +22,9 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+#include "common/macros.h"
+#include "common/mem_alloc.h"
 #ifdef HAVE_OPENCL
-#include "common/darktable.h"
 #include "common/opencl.h"
 #include "common/locallaplaciancl.h"
 
@@ -99,7 +100,7 @@ dt_local_laplacian_cl_t *dt_local_laplacian_init_cl(
   dt_local_laplacian_cl_t *g = malloc(sizeof(dt_local_laplacian_cl_t));
   if(IS_NULL_PTR(g)) return NULL;
 
-  g->global = darktable.opencl->local_laplacian;
+  g->global = dt_opencl_get_global()->local_laplacian;
   g->devid = devid;
   g->width = width;
   g->height = height;

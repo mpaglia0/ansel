@@ -22,15 +22,14 @@
  *        lives in thumbtable.c; see thumbtable_internal.h for the ops contract.
  */
 
-#include "common/darktable.h"
-#include "common/collection.h"
+#include "control/conf.h"
 #include "common/selection.h"
-#include "control/control.h"
+#include "common/usermanual_url.h"
 #include "dtgtk/thumbtable.h"
 #include "dtgtk/thumbtable_internal.h"
 #include "dtgtk/thumbnail.h"
-#include "gui/accelerators.h"
 #include "gui/gtk.h"
+#include "views/view.h"
 
 #include <math.h>
 
@@ -222,7 +221,7 @@ static gboolean _grid_relevant_scrollbar_changed(dt_thumbtable_t *table, GtkWidg
 // The grid highlights the lighttable selection.
 static gboolean _grid_is_thumb_highlighted(dt_thumbtable_t *table, int32_t imgid)
 {
-  return dt_selection_is_id_selected(darktable.selection, imgid);
+  return dt_selection_is_id_selected(dt_selection_get_global(), imgid);
 }
 
 static void _grid_on_thumbnail_added(dt_thumbtable_t *table, dt_thumbnail_t *thumb)
@@ -235,7 +234,7 @@ static void _grid_on_drag_begin(dt_thumbtable_t *table, int32_t imgid)
 {
   // Ensure the image that collects the drag event is properly part of the selection
   if(imgid > UNKNOWN_IMAGE)
-    dt_selection_select(darktable.selection, imgid);
+    dt_selection_select(dt_selection_get_global(), imgid);
 }
 
 
@@ -258,7 +257,7 @@ static void _grid_grab_focus(dt_thumbtable_t *table)
   // This runs from a g_idle() callback (see dt_thumbtable_schedule_focus), so by the time it
   // fires the user may already have switched to another view (e.g. Studio Capture). Grabbing
   // the grid's focus regardless would steal it back from that view's own center widget.
-  const dt_view_t *current_view = dt_view_manager_get_current_view(darktable.view_manager);
+  const dt_view_t *current_view = dt_view_manager_get_current_view(dt_view_manager_get_global());
   if(IS_NULL_PTR(current_view) || strcmp(current_view->module_name, "lighttable")) return;
 
   GtkWidget *focused = NULL;
@@ -297,9 +296,9 @@ static gboolean _grid_handle_key(dt_thumbtable_t *table, GdkEventKey *event, gui
         dt_thumbtable_select_range(table, rowid);
       }
       else if(dt_modifier_is(event->state, GDK_CONTROL_MASK))
-        dt_selection_toggle(darktable.selection, imgid);
+        dt_selection_toggle(dt_selection_get_global(), imgid);
       else
-        dt_selection_select_single(darktable.selection, imgid);
+        dt_selection_select_single(dt_selection_get_global(), imgid);
       return TRUE;
     }
     case GDK_KEY_nobreakspace:
@@ -320,7 +319,7 @@ static void _grid_pre_activate(dt_thumbtable_t *table, int32_t imgid)
   // This is only to be consistent with mouse events:
   // opening to darkroom happens with double click (aka ACTIVATE event),
   // but the first click always select the clicked thumbnail before.
-  dt_selection_select_single(darktable.selection, imgid);
+  dt_selection_select_single(dt_selection_get_global(), imgid);
 }
 
 

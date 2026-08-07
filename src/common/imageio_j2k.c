@@ -26,9 +26,12 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
+#include <glib/gstdio.h>
 #include "config.h"
 #endif
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/mem_alloc.h"
 #include "common/exif.h"
 #include "common/imageio_j2k.h"
 #include "develop/imageop.h"         // for IOP_CS_RGB
@@ -187,7 +190,7 @@ dt_imageio_retval_t dt_imageio_open_j2k(dt_image_t *img, const char *filename, d
   // opj_set_info_handler(d_codec, error_callback, stderr);
 
   /* Decode JPEG-2000 with using multiple threads */
-  if(!opj_codec_set_threads(d_codec, darktable.num_openmp_threads))
+  if(!opj_codec_set_threads(d_codec, dt_get_num_openmp_threads()))
   {
     /* This may not seem like a critical error but failure to initialise the treads
      is a symptom of major resource exhaustion, bail out as quickly as possible */

@@ -22,8 +22,9 @@
  *        thumbtable_internal.h for the ops contract.
  */
 
-#include "common/darktable.h"
-#include "control/control.h"
+#include "common/image.h"
+#include "common/logging.h"
+#include "common/usermanual_url.h"
 #include "control/signal.h"
 #include "dtgtk/thumbtable.h"
 #include "dtgtk/thumbtable_internal.h"
@@ -215,7 +216,7 @@ static void _filmstrip_on_drag_begin(dt_thumbtable_t *table, int32_t imgid)
   {
     /* Views that need drags to commit the hovered image must do it before
      * dt_act_on_get_images() snapshots the payload. */
-    DT_DEBUG_CONTROL_SIGNAL_RAISE(darktable.signals, DT_SIGNAL_VIEWMANAGER_FILMSTRIP_DRAG_BEGIN, imgid);
+    DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_VIEWMANAGER_FILMSTRIP_DRAG_BEGIN, imgid);
   }
 }
 

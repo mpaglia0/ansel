@@ -21,7 +21,9 @@
 */
 
 #include "common/eaw.h"
-#include "common/darktable.h"
+#include "common/iop_profile.h"
+#include "common/openmp.h"
+#include "common/simd.h"
 #include "common/math.h"
 #include "control/control.h"     // needed by dwt.h
 #include "common/dwt.h"          // for dwt_interleave_rows

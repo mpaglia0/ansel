@@ -25,6 +25,9 @@
 */
 
 #include "common/printing.h"
+#include "common/image.h"
+#include "common/pdf.h"
+#include "common/logging.h"
 #include "common/math.h"
 
 void _clear_pos(dt_image_pos *pos)

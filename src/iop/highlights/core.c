@@ -19,17 +19,17 @@
 // Self-dome fallback and all-clip joint core stages (CPU + OpenCL). (implementation; see core.h for the public
 // API.)
 
-#include "common/darktable.h"
-#include "common/solvers/choleski.h"
-#include "control/control.h"
+#include "common/openmp.h"
+#include "common/simd.h"
+#include "common/target_clones.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "develop/imageop.h"
-#include "develop/imageop_math.h"
-#include "iop/highlights/blur.h"
 #include "iop/highlights/coefficient_field.h"
 #include "iop/highlights/core.h"
 #include "iop/highlights/dome.h"
 #include "iop/highlights/knee.h"
 #include "iop/highlights/pde.h"
+#include <glib/gstdio.h>
 #include <math.h>
 #include <string.h>
 

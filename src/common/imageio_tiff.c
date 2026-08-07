@@ -35,11 +35,11 @@
 */
 #include "imageio_tiff.h"
 #include "common/colorspaces.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/mem_alloc.h"
+#include "common/logging.h"
 #include "common/exif.h"
-#include "control/conf.h"
 #include "develop/develop.h"
-#include "imageio.h"
 
 #include <inttypes.h>
 #include <memory.h>
@@ -339,7 +339,7 @@ static void _warning_error_handler(const char *type, const char* module, const c
 
 static void _warning_handler(const char* module, const char* fmt, va_list ap)
 {
-  if(darktable.unmuted & DT_DEBUG_IMAGEIO)
+  if(dt_get_debug_flags() & DT_DEBUG_IMAGEIO)
   {
     _warning_error_handler("warning", module, fmt, ap);
   }

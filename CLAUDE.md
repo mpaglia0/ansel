@@ -7,6 +7,50 @@ codebase. Read it before touching the areas it covers.
 
 ## Architectural rules
 
+### `#pragma once` is FORBIDDEN — use an include guard
+
+Every header in `src/` uses an explicit `#ifndef DT_<PATH>_H` / `#define` / `#endif` guard,
+named after the path relative to `src/` (`src/develop/masks/masks_history.h` →
+`DT_DEVELOP_MASKS_MASKS_HISTORY_H`). **Do not add `#pragma once` to an existing header, and do
+not start a new one with it.**
+
+This is not a style preference. `#pragma once` and an include guard behave identically at the
+preprocessor level, but `#pragma once` *silently* makes a cyclic include graph compile: a
+header re-entered mid-definition is skipped, and the first inclusion finishes with whatever it
+had at that point. That is how three include cycles survived unnoticed in this codebase for
+years, each one a header trailing-including a header that includes it back (see
+`doc/include-graph.md`). Explicit guards make the same situation greppable and reviewable
+instead of invisible.
+
+Enforcement: `python3 tools/pragma_once_to_guards.py --verify` exits non-zero if any
+`#pragma once` reappears. `python3 tools/include_graph.py --summary` must keep reporting
+`cycles 0`.
+
+**`common/darktable.h` has no guard either — it has a TRIPWIRE.** It ends up included by
+at most one path per translation unit (an entry point calling `dt_init()`, or a subsystem
+that owns one of the `darktable` members), so a *second* inclusion is never legitimate: it
+means the header arrived through a path nobody intended. A guard would absorb that
+silently; instead the file `#error`s on re-inclusion. If you hit it, do not add a guard —
+find who included it and give that code the specific lib it needs (`common/logging.h`,
+`common/mem_alloc.h`, …) or the accessor for the global it wants (`dt_dev_get_global()`,
+`dt_control_get_global()`, …). **No header may include it**; as of this writing none does.
+
+**When auditing this, grep for `darktable\.h"`, not `common/darktable.h"`.** Includes can be
+written relative to the including file's own directory, so `src/common/*` spells it
+`#include "darktable.h"`. Three files (and one *header*, `common/colorchecker.h`) hid behind
+that spelling through several audits of this series; the compile-time tripwire is what
+finally caught them. `tools/include_graph.py` resolves both spellings and was right when the
+ad-hoc greps were wrong.
+
+**Five headers deliberately have NO guard at all** and must never get one:
+`common/module_api.h`, `views/view_api.h`, `libs/lib_api.h`,
+`imageio/format/imageio_format_api.h`, `imageio/storage/imageio_storage_api.h`. They are
+X-macro headers, re-included several times in the *same* translation unit with different macros
+defined, and expanded *inside struct bodies* to generate members. For the same reason they must
+carry **no `#include` of their own** — an include at the top of one lands inside those structs.
+Symbols they use (`dt_version()`, `dt_print()`, `IS_NULL_PTR`) are the consuming `.c` file's
+responsibility.
+
 ### No SQL in GUI modules
 
 `src/libs/` and `src/views/` modules must contain no raw SQL. Database access belongs behind

@@ -35,11 +35,13 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #endif
 #include "common/exif.h"
 #include "common/imageio.h"
 #include "common/imageio_jpeg.h"
 #include "develop/imageop.h"         // for IOP_CS_RGB
+#include <glib/gstdio.h>
 #include <setjmp.h>
 
 // error functions

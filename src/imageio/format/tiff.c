@@ -39,8 +39,12 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "bauhaus/bauhaus.h"
+#include "develop/imageop.h"
 #include "common/colorspaces.h"
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/mem_alloc.h"
+#include "common/module_versioning.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/exif.h"
 #include "common/imageio.h"
 #include "common/imageio_module.h"
@@ -823,7 +827,7 @@ void gui_init(dt_imageio_module_format_t *self)
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
 
   // Bit depth combo box
-  gui->bpp = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(NULL));
+  gui->bpp = dt_bauhaus_combobox_new(dt_bauhaus_get_global(), DT_GUI_MODULE(NULL));
   dt_bauhaus_widget_set_label(gui->bpp, N_("bit depth"));
   dt_bauhaus_combobox_add(gui->bpp, _("8 bit"));
   dt_bauhaus_combobox_add(gui->bpp, _("16 bit"));
@@ -838,7 +842,7 @@ void gui_init(dt_imageio_module_format_t *self)
   g_signal_connect(G_OBJECT(gui->bpp), "value-changed", G_CALLBACK(bpp_combobox_changed), NULL);
 
   // Compression method combo box
-  gui->compress = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(NULL));
+  gui->compress = dt_bauhaus_combobox_new(dt_bauhaus_get_global(), DT_GUI_MODULE(NULL));
   dt_bauhaus_widget_set_label(gui->compress, N_("compression"));
   dt_bauhaus_combobox_add(gui->compress, _("uncompressed"));
   dt_bauhaus_combobox_add(gui->compress, _("deflate"));
@@ -847,7 +851,7 @@ void gui_init(dt_imageio_module_format_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), gui->compress, TRUE, TRUE, 0);
 
   // Compression level slider
-  gui->compresslevel = dt_bauhaus_slider_new_with_range(darktable.bauhaus, DT_GUI_MODULE(NULL),
+  gui->compresslevel = dt_bauhaus_slider_new_with_range(dt_bauhaus_get_global(), DT_GUI_MODULE(NULL),
                                                       dt_confgen_get_int("plugins/imageio/format/tiff/compresslevel", DT_MIN),
                                                       dt_confgen_get_int("plugins/imageio/format/tiff/compresslevel", DT_MAX),
                                                       1,
@@ -864,7 +868,7 @@ void gui_init(dt_imageio_module_format_t *self)
     gtk_widget_set_sensitive(gui->compresslevel, FALSE);
 
   // shortfile option combo box
-  gui->shortfiles = dt_bauhaus_combobox_new(darktable.bauhaus, DT_GUI_MODULE(NULL));
+  gui->shortfiles = dt_bauhaus_combobox_new(dt_bauhaus_get_global(), DT_GUI_MODULE(NULL));
   dt_bauhaus_widget_set_label(gui->shortfiles, N_("b&w image"));
   dt_bauhaus_combobox_add(gui->shortfiles, _("write rgb colors"));
   dt_bauhaus_combobox_add(gui->shortfiles, _("write grayscale"));

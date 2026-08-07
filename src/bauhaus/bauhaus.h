@@ -38,7 +38,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_BAUHAUS_BAUHAUS_H
+#define DT_BAUHAUS_BAUHAUS_H
 
 #include "common/colorlabels.h"
 #include "common/gui_module_api.h"
@@ -294,6 +295,15 @@ struct dt_bauhaus_t
 dt_bauhaus_t * dt_bauhaus_init();
 void dt_bauhaus_cleanup(dt_bauhaus_t *bauhaus);
 
+/* The application-wide bauhaus context. The subsystem itself is already fully
+ * parameterized (bauhaus.c never reads a global), and the widget constructors take a
+ * dt_bauhaus_t * so a different context can be injected; this accessor only gives
+ * callers a handle source. It is the end state: the context is process-wide (one
+ * theme, one font, one popup) and a third of the constructor call sites pass
+ * DT_GUI_MODULE(NULL), so the handle cannot ride on the module either.
+ * Implemented by the orchestrator (common/darktable.c). */
+dt_bauhaus_t *dt_bauhaus_get_global(void);
+
 // load theme colors, fonts, etc
 void dt_bauhaus_load_theme(dt_bauhaus_t *bauhaus);
 
@@ -459,6 +469,8 @@ void dt_bauhaus_set_use_default_callback(GtkWidget *widget);
 #ifdef __cplusplus
 }
 #endif
+
+#endif // DT_BAUHAUS_BAUHAUS_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

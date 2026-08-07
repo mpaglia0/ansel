@@ -57,19 +57,20 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/darktable.h"
 #include "gui/gdkkeys.h"
 #include "bauhaus/bauhaus.h"
 #include "common/calculator.h"
 #include "common/math.h"
-#include "common/debug.h"
+#include "common/logging.h"
+#include "common/macros.h"
+#include "common/utility.h"
 #include "control/conf.h"
 #include "control/control.h"
+#include "develop/develop.h"
 #include "develop/imageop.h"
 
 
 #include "gui/accelerators.h"
-#include "gui/color_picker_proxy.h"
 #include "gui/gui_throttle.h"
 #include "gui/gtk.h"
 #ifdef GDK_WINDOWING_QUARTZ
@@ -478,16 +479,16 @@ static gboolean ensure_focus_idle(gpointer data)
   if(gtk_widget_is_drawable(target))
   {
     gtk_widget_grab_focus(target);
-    darktable.gui->has_scroll_focus = target;
+    dt_gui_get_global()->has_scroll_focus = target;
     GtkWidget *gtk_focus = NULL;
-    if(!IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->ui))
-      gtk_focus = gtk_window_get_focus(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)));
+    if(!IS_NULL_PTR(dt_gui_get_global()) && !IS_NULL_PTR(dt_gui_get_ui()))
+      gtk_focus = gtk_window_get_focus(GTK_WINDOW(dt_gui_main_window()));
     dt_print(DT_DEBUG_SHORTCUTS,
              "[bauhaus] ensure_focus_idle success target=%s(%p) gtk_focus=%s(%p) scroll_focus=%s(%p)\n",
              gtk_widget_get_name(target), (void *)target,
              !IS_NULL_PTR(gtk_focus) ? gtk_widget_get_name(gtk_focus) : "<null>", (void *)gtk_focus,
-             !IS_NULL_PTR(darktable.gui->has_scroll_focus) ? gtk_widget_get_name(darktable.gui->has_scroll_focus) : "<null>",
-             (void *)darktable.gui->has_scroll_focus);
+             !IS_NULL_PTR(dt_gui_get_global()->has_scroll_focus) ? gtk_widget_get_name(dt_gui_get_global()->has_scroll_focus) : "<null>",
+             (void *)dt_gui_get_global()->has_scroll_focus);
     g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY, NULL);
     g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, NULL);
     return G_SOURCE_REMOVE;
@@ -513,7 +514,7 @@ gboolean dt_bauhaus_focus_in_callback(GtkWidget *widget, GdkEventFocus event, gp
   // Scroll focus needs to be managed separately from Gtk focus
   // because of Gtk notebooks (tabs): Gtk gives focus automatically to the first
   // notebook child, which is not what we want for scroll event capture.
-  darktable.gui->has_scroll_focus = widget;
+  dt_gui_get_global()->has_scroll_focus = widget;
   gtk_widget_queue_draw(widget);
   return FALSE;
 }
@@ -563,7 +564,7 @@ gboolean _action_request_focus(GtkAccelGroup *accel_group, GObject *accelerable,
     // If the target module is already marked as focused, modulegroups focus
     // signal may not be emitted and tab visibility can stay stale. Drop focus
     // once so the next focus request re-emits the full focus/update sequence.
-    if(!IS_NULL_PTR(darktable.develop) && darktable.develop->gui_module == module)
+    if(!IS_NULL_PTR(dt_dev_get_global()) && dt_dev_get_global()->gui_module == module)
       dt_iop_request_focus(NULL);
 
     w->module->focus(w->module, FALSE);
@@ -900,7 +901,7 @@ static gboolean dt_bauhaus_popup_scroll(GtkWidget *widget, GdkEventScroll *event
 {
   dt_bauhaus_t *bh = g_object_get_data(G_OBJECT(widget), "bauhaus");
   dt_bauhaus_widget_t *w = bh->current;
-  darktable.gui->has_scroll_focus = GTK_WIDGET(w);
+  dt_gui_get_global()->has_scroll_focus = GTK_WIDGET(w);
   return _widget_scroll(GTK_WIDGET(w), event);
 }
 
@@ -1076,9 +1077,9 @@ static gboolean _enter_leave(GtkWidget *widget, GdkEventCrossing *event)
     // leave from the widget itself.
     const gboolean real_leave = event->mode == GDK_CROSSING_NORMAL
                                 && event->detail != GDK_NOTIFY_INFERIOR
-                                && (!darktable.gui || !dt_gui_widgets_suppressed());
-    if(real_leave && darktable.gui->has_scroll_focus == widget)
-      darktable.gui->has_scroll_focus = NULL;
+                                && (!dt_gui_get_global() || !dt_gui_widgets_suppressed());
+    if(real_leave && dt_gui_get_global()->has_scroll_focus == widget)
+      dt_gui_get_global()->has_scroll_focus = NULL;
   }
 
   gtk_widget_queue_draw(widget);
@@ -1242,11 +1243,11 @@ static void _widget_finalize(GObject *widget)
   }
 
   const char *accel_path = g_object_get_data(G_OBJECT(widget), "accel-path");
-  if(!IS_NULL_PTR(accel_path) && !IS_NULL_PTR(darktable.gui) && !IS_NULL_PTR(darktable.gui->accels))
-    dt_accels_remove_accel(darktable.gui->accels, accel_path, widget);
+  if(!IS_NULL_PTR(accel_path) && !IS_NULL_PTR(dt_gui_get_global()) && !IS_NULL_PTR(dt_gui_get_accels()))
+    dt_accels_remove_accel(dt_gui_get_accels(), accel_path, widget);
 
-  if(darktable.gui && darktable.gui->has_scroll_focus == GTK_WIDGET(w))
-    darktable.gui->has_scroll_focus = NULL;
+  if(dt_gui_get_global() && dt_gui_get_global()->has_scroll_focus == GTK_WIDGET(w))
+    dt_gui_get_global()->has_scroll_focus = NULL;
   dt_gui_throttle_cancel(widget);
   if(w->type == DT_BAUHAUS_SLIDER)
   {
@@ -1292,7 +1293,7 @@ void dt_bauhaus_load_theme(dt_bauhaus_t *bauhaus)
   bauhaus->line_height = 16;
   bauhaus->marker_size = 0.25f;
 
-  GtkWidget *root_window = dt_ui_main_window(darktable.gui->ui);
+  GtkWidget *root_window = dt_gui_main_window();
   GtkStyleContext *ctx = gtk_widget_get_style_context(root_window);
   gtk_style_context_set_screen(ctx, gtk_widget_get_screen(root_window));
 
@@ -1407,7 +1408,7 @@ dt_bauhaus_t * dt_bauhaus_init()
 
   // Needed for Wayland and Sway :
   gtk_window_set_transient_for(GTK_WINDOW(bauhaus->popup_window),
-                               GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)));
+                               GTK_WINDOW(dt_gui_main_window()));
 
   gtk_window_set_decorated(GTK_WINDOW(bauhaus->popup_window), FALSE);
   gtk_window_set_attached_to(GTK_WINDOW(bauhaus->popup_window), NULL);
@@ -1425,7 +1426,7 @@ dt_bauhaus_t * dt_bauhaus_init()
   gtk_widget_add_events(bauhaus->popup_area, GDK_POINTER_MOTION_MASK
                                                        | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                                        | GDK_KEY_PRESS_MASK | GDK_LEAVE_NOTIFY_MASK
-                                                       | darktable.gui->scroll_mask);
+                                                       | dt_gui_get_global()->scroll_mask);
 
   GObject *window = G_OBJECT(bauhaus->popup_window);
   GObject *area = G_OBJECT(bauhaus->popup_area);
@@ -1442,56 +1443,56 @@ dt_bauhaus_t * dt_bauhaus_init()
 
   // Keys used by key-pressed event handler when the Bauhaus widget has the focus
   gchar *path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (normal step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Right, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (normal step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Left, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (fine step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Right, GDK_CONTROL_MASK);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (fine step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Left, GDK_CONTROL_MASK);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Increase value (coarse step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Right, GDK_SHIFT_MASK);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Decrease value (coarse step)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Left, GDK_SHIFT_MASK);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Sliders"), _("Toggle color-picker"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Insert, 0);
   dt_free(path);
 
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Open editing mode"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Return, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Exit editing mode"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Escape, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Select previous (in editing mode)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Up, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Select next (in editing mode)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Down, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Validate result (in editing mode)"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Return, 0);
   dt_free(path);
   path = dt_accels_build_path(_("Darkroom/Controls/Comboboxes"), _("Toggle color-picker"));
-  dt_accels_new_virtual_shortcut(darktable.gui->accels, darktable.gui->accels->darkroom_accels,
+  dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                   path, NULL, GDK_KEY_Insert, 0);
   dt_free(path);
 
@@ -1537,7 +1538,7 @@ static void _bauhaus_widget_init(dt_bauhaus_t *bauhaus, dt_bauhaus_widget_t *w, 
                                        | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                        | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK
                                        | GDK_FOCUS_CHANGE_MASK
-                                       | darktable.gui->scroll_mask);
+                                       | dt_gui_get_global()->scroll_mask);
 
   gtk_widget_set_can_focus(GTK_WIDGET(w), TRUE);
   gtk_widget_set_halign(GTK_WIDGET(w), GTK_ALIGN_FILL);
@@ -2226,7 +2227,7 @@ static void _delayed_combobox_commit(gpointer data)
 
   // If a reset started after the timeout was scheduled (e.g. while reloading history,
   // applying a style, etc.), don't commit anything to history from this stale callback.
-  if(darktable.gui && dt_gui_widgets_suppressed()) return;
+  if(dt_gui_get_global() && dt_gui_widgets_suppressed()) return;
 
   if(w->use_default_callback)
   {
@@ -3148,10 +3149,10 @@ static void _get_preferred_width(GtkWidget *widget, gint *minimum_size, gint *na
   // growing again when the parent grows.
   *minimum_size = 0;
 
-  if(dt_ui_panel_ancestor(darktable.gui->ui, DT_UI_PANEL_RIGHT, widget))
-    *natural_size = dt_ui_panel_get_size(darktable.gui->ui, DT_UI_PANEL_RIGHT);
-  else if(dt_ui_panel_ancestor(darktable.gui->ui, DT_UI_PANEL_LEFT, widget))
-    *natural_size = dt_ui_panel_get_size(darktable.gui->ui, DT_UI_PANEL_LEFT);
+  if(dt_ui_panel_ancestor(dt_gui_get_ui(), DT_UI_PANEL_RIGHT, widget))
+    *natural_size = dt_ui_panel_get_size(dt_gui_get_ui(), DT_UI_PANEL_RIGHT);
+  else if(dt_ui_panel_ancestor(dt_gui_get_ui(), DT_UI_PANEL_LEFT, widget))
+    *natural_size = dt_ui_panel_get_size(dt_gui_get_ui(), DT_UI_PANEL_LEFT);
   else
     *natural_size = DT_PIXEL_APPLY_DPI(300);
 }
@@ -3182,7 +3183,7 @@ void dt_bauhaus_hide_popup(dt_bauhaus_t *bh)
 
     // Give back focus to the attached widget
     gtk_widget_grab_focus(GTK_WIDGET(bh->current));
-    darktable.gui->has_scroll_focus = GTK_WIDGET(bh->current);
+    dt_gui_get_global()->has_scroll_focus = GTK_WIDGET(bh->current);
 
     bh->current = NULL;
   }
@@ -3253,7 +3254,7 @@ void dt_bauhaus_show_popup(GtkWidget *widget)
   wy += w->margin->top;
 
   gint wwx = 0, wwy = 0;
-  GdkWindow *main_window = gtk_widget_get_window(dt_ui_main_window(darktable.gui->ui));
+  GdkWindow *main_window = gtk_widget_get_window(dt_gui_main_window());
   if(main_window) gdk_window_get_origin(main_window, &wwx, &wwy);
 
   GdkRectangle anchor = {
@@ -3309,7 +3310,7 @@ static gboolean _widget_scroll(GtkWidget *widget, GdkEventScroll *event)
 {
   struct dt_bauhaus_widget_t *w = DT_BAUHAUS_WIDGET(widget);
   const gboolean popup_captured = (w->bauhaus->current == w);
-  const gboolean scroll_captured = (darktable.gui->has_scroll_focus == widget);
+  const gboolean scroll_captured = (dt_gui_get_global()->has_scroll_focus == widget);
   const gboolean key_captured = gtk_widget_has_focus(widget);
   const gboolean smooth = (event->direction == GDK_SCROLL_SMOOTH);
 
@@ -3325,7 +3326,7 @@ static gboolean _widget_scroll(GtkWidget *widget, GdkEventScroll *event)
     return FALSE;
 
   // Keep ownership of the whole touchpad gesture sequence.
-  darktable.gui->has_scroll_focus = widget;
+  dt_gui_get_global()->has_scroll_focus = widget;
 
   int delta_x = 0;
   int delta_y = 0;
@@ -3349,7 +3350,7 @@ static gboolean _widget_scroll(GtkWidget *widget, GdkEventScroll *event)
       _slider_add_step(widget, delta_x, event->state);
       return TRUE;
     }
-    else if(vscroll && darktable.gui->has_scroll_focus)
+    else if(vscroll && dt_gui_get_global()->has_scroll_focus)
     {
       // convert vertical scrolling to horizontal only if we have the scroll focus
       _slider_add_step(widget, -delta_y, event->state);
@@ -3361,7 +3362,7 @@ static gboolean _widget_scroll(GtkWidget *widget, GdkEventScroll *event)
   }
   else
   {
-    if(vscroll && darktable.gui->has_scroll_focus)
+    if(vscroll && dt_gui_get_global()->has_scroll_focus)
     {
       _combobox_next_sensitive(w, delta_y);
       return TRUE;
@@ -3437,12 +3438,12 @@ static gboolean dt_bauhaus_combobox_button_press(GtkWidget *widget, GdkEventButt
 
   if(activated == BH_REGION_OUT)
   {
-    darktable.gui->has_scroll_focus = NULL;
+    dt_gui_get_global()->has_scroll_focus = NULL;
     return FALSE;
   }
 
   gtk_widget_grab_focus(widget);
-  darktable.gui->has_scroll_focus = widget;
+  dt_gui_get_global()->has_scroll_focus = widget;
 
   if(activated == BH_REGION_QUAD && w->quad_toggle)
   {
@@ -3645,7 +3646,7 @@ static void _delayed_slider_commit(gpointer data)
 
   // If a reset started after the timeout was scheduled (e.g. while reloading history,
   // applying a style, etc.), don't commit anything to history from this stale callback.
-  if(darktable.gui && dt_gui_widgets_suppressed()) return;
+  if(dt_gui_get_global() && dt_gui_widgets_suppressed()) return;
 
   if(w->use_default_callback)
   {
@@ -3854,12 +3855,12 @@ static gboolean dt_bauhaus_slider_button_press(GtkWidget *widget, GdkEventButton
 
   if(activated == BH_REGION_OUT)
   {
-    darktable.gui->has_scroll_focus = NULL;
+    dt_gui_get_global()->has_scroll_focus = NULL;
     return FALSE;
   }
 
   gtk_widget_grab_focus(widget);
-  darktable.gui->has_scroll_focus = widget;
+  dt_gui_get_global()->has_scroll_focus = widget;
 
   if(activated == BH_REGION_QUAD && w->quad_toggle)
   {

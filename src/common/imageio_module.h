@@ -35,10 +35,10 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_COMMON_IMAGEIO_MODULE_H
+#define DT_COMMON_IMAGEIO_MODULE_H
 
 #include "common/colorspaces.h"
-#include "common/darktable.h"
 #include "common/metadata_export.h"
 #include <gmodule.h>
 #include <gtk/gtk.h>
@@ -126,6 +126,9 @@ typedef struct dt_imageio_t
 
 /* load all modules */
 void dt_imageio_init(dt_imageio_t *iio);
+
+// Interim accessor (Strategy B, doc/globals-migration.md): implemented by the orchestrator; long-term the handle should be carried on the job/view context (Strategy C).
+struct dt_imageio_t *dt_imageio_get_global(void);
 /* cleanup */
 void dt_imageio_cleanup(dt_imageio_t *iio);
 
@@ -160,6 +163,8 @@ gchar *dt_imageio_resizing_factor_get_and_parsing(double *num, double *denum);
 #ifdef __cplusplus
 }
 #endif
+
+#endif // DT_COMMON_IMAGEIO_MODULE_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

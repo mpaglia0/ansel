@@ -20,6 +20,9 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#ifndef DT_COMMON_DISTANCE_TRANSFORM_H
+#define DT_COMMON_DISTANCE_TRANSFORM_H
+
 /*
   eucledian distance transform for darktable Hanno Schwalm (hanno@schwalm-bremen.de) 2021/09
    - adopted to C
@@ -56,6 +59,7 @@
 */
 
 #include "common/imagebuf.h"
+#include "develop/pixelpipe_cache_alloc.h"
 
 typedef enum dt_distance_transform_t
 {
@@ -158,6 +162,8 @@ float dt_image_distance_transform(float *const restrict src, float *const restri
   }
   return max_distance;
 }
+
+#endif // DT_COMMON_DISTANCE_TRANSFORM_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

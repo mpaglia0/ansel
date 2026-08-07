@@ -30,13 +30,13 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_COMMON_IMAGEIO_H
+#define DT_COMMON_IMAGEIO_H
 
 #include "common/atomic.h"
 #include "common/image.h"
 #include "common/imageio_module.h"
 #include "common/mipmap_cache.h"
-#include "common/tags.h"
 #include <glib.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -169,6 +169,8 @@ dt_image_flags_t dt_imageio_get_type_from_extension(const char *extension);
 #ifdef __cplusplus
 }
 #endif
+
+#endif // DT_COMMON_IMAGEIO_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

@@ -16,11 +16,15 @@
    along with darktable.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#pragma once
+#ifndef DT_IOP_HIGHLIGHTS_COMMON_H
+#define DT_IOP_HIGHLIGHTS_COMMON_H
 
-#include "common/darktable.h"     // HL_PFOR/__OMP_PARALLEL_FOR__, CLAMP, dt_get_wtime, SIMD macros
+#include "common/openmp.h"        // HL_PFOR/__OMP_PARALLEL_FOR__
+#include "common/simd.h"          // dt_aligned_pixel_t + SIMD macros
 #include "common/gaussian.h"      // dt_gaussian_t / dt_gaussian_cl_t (in _hl_gauss_slot_t + CL protos)
 #include "develop/pixelpipe_hb.h" // dt_dev_pixelpipe_t (in _hl_region_ctx_t) + dt_dev_pixelpipe_iop_t
+#include <glib.h>                 // CLAMP
+#include <math.h>
 #include <stdint.h>
 
 // Shared macros and struct definitions for the highlights harmonic-transposition mode,
@@ -592,3 +596,4 @@ enum wavelets_scale_t
   FIRST_SCALE = 1 << 1, // first wavelets scale : reconstruct = 0
   LAST_SCALE = 1 << 2,  // last wavelets scale  : reconstruct += residual
 };
+#endif // DT_IOP_HIGHLIGHTS_COMMON_H

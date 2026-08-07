@@ -19,10 +19,13 @@
 // Per-region gather/composite + the region reconstruction driver (CPU + OpenCL). (implementation; see region.h for
 // the public API.)
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/target_clones.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/gaussian.h"
 #include "develop/imageop.h"
-#include "develop/imageop_math.h"
 #include "develop/noise_generator.h"
 #include "iop/highlights/blur.h"
 #include "iop/highlights/chroma.h"

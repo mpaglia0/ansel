@@ -27,11 +27,12 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_DEVELOP_FORMAT_H
+#define DT_DEVELOP_FORMAT_H
 
 #include <stddef.h>
 #include <stdint.h>
-#include "common/darktable.h"
+#include "common/simd.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +41,18 @@ extern "C" {
 struct dt_dev_pixelpipe_iop_t;
 struct dt_dev_pixelpipe_t;
 struct dt_iop_module_t;
+
+/**
+ * @brief Region of interest passed through the pixelpipe.
+ *
+ * @details `scale` must stay consistent with `x`, `y`, `width` and `height`,
+ * which all describe the same raster ROI seen by the current pipeline stage.
+ */
+typedef struct dt_iop_roi_t
+{
+  int x, y, width, height;
+  double scale;
+} dt_iop_roi_t;
 
 typedef enum dt_iop_buffer_type_t {
   TYPE_UNKNOWN,
@@ -104,6 +117,7 @@ int default_blend_colorspace(struct dt_iop_module_t *self, struct dt_dev_pixelpi
 }
 #endif
 
+#endif // DT_DEVELOP_FORMAT_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

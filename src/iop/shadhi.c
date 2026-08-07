@@ -45,20 +45,19 @@
 #endif
 #include "bauhaus/bauhaus.h"
 #include "common/bilateral.h"
-#include "common/bilateralcl.h"
-#include "common/debug.h"
 #include "common/gaussian.h"
-#include "common/opencl.h"
-#include "control/control.h"
 #include "develop/develop.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/module_versioning.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"
-#include "dtgtk/togglebutton.h"
 
-#include "gui/gtk.h"
-#include "gui/presets.h"
 #include "iop/iop_api.h"
 #include <assert.h>
 #include <math.h>

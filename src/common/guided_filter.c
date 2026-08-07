@@ -37,7 +37,13 @@
     
 */
 
-#include "common/darktable.h"
+#include "common/macros.h"
+#include "common/openmp.h"
+#include "common/target_clones.h"
+#include "common/mem_alloc.h"
+#include "common/simd.h"
+#include "common/logging.h"
+#include "develop/pixelpipe_cache_alloc.h"
 #include "common/box_filters.h"
 #include "common/guided_filter.h"
 #include "common/math.h"
@@ -415,7 +421,7 @@ void dt_guided_filter_free_cl_global(dt_guided_filter_cl_global_t *g)
 static int cl_split_rgb(const int devid, const int width, const int height, cl_mem guide, cl_mem imgg_r,
                         cl_mem imgg_g, cl_mem imgg_b, const float guide_weight)
 {
-  const int kernel = darktable.opencl->guided_filter->kernel_guided_filter_split_rgb;
+  const int kernel = dt_opencl_get_global()->guided_filter->kernel_guided_filter_split_rgb;
   dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &guide);
@@ -431,7 +437,7 @@ static int cl_split_rgb(const int devid, const int width, const int height, cl_m
 static int cl_box_mean(const int devid, const int width, const int height, const int w, cl_mem in, cl_mem out,
                        cl_mem temp)
 {
-  const int kernel_x = darktable.opencl->guided_filter->kernel_guided_filter_box_mean_x;
+  const int kernel_x = dt_opencl_get_global()->guided_filter->kernel_guided_filter_box_mean_x;
   dt_opencl_set_kernel_arg(devid, kernel_x, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel_x, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel_x, 2, sizeof(cl_mem), &in);
@@ -441,7 +447,7 @@ static int cl_box_mean(const int devid, const int width, const int height, const
   const int err = dt_opencl_enqueue_kernel_2d(devid, kernel_x, sizes_x);
   if(err != CL_SUCCESS) return err;
 
-  const int kernel_y = darktable.opencl->guided_filter->kernel_guided_filter_box_mean_y;
+  const int kernel_y = dt_opencl_get_global()->guided_filter->kernel_guided_filter_box_mean_y;
   dt_opencl_set_kernel_arg(devid, kernel_y, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel_y, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel_y, 2, sizeof(cl_mem), &temp);
@@ -456,7 +462,7 @@ static int cl_covariances(const int devid, const int width, const int height, cl
                           cl_mem cov_imgg_img_r, cl_mem cov_imgg_img_g, cl_mem cov_imgg_img_b,
                           const float guide_weight)
 {
-  const int kernel = darktable.opencl->guided_filter->kernel_guided_filter_guided_filter_covariances;
+  const int kernel = dt_opencl_get_global()->guided_filter->kernel_guided_filter_guided_filter_covariances;
   dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &guide);
@@ -474,7 +480,7 @@ static int cl_variances(const int devid, const int width, const int height, cl_m
                         cl_mem var_imgg_rg, cl_mem var_imgg_rb, cl_mem var_imgg_gg, cl_mem var_imgg_gb,
                         cl_mem var_imgg_bb, const float guide_weight)
 {
-  const int kernel = darktable.opencl->guided_filter->kernel_guided_filter_guided_filter_variances;
+  const int kernel = dt_opencl_get_global()->guided_filter->kernel_guided_filter_guided_filter_variances;
   dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &guide);
@@ -493,7 +499,7 @@ static int cl_variances(const int devid, const int width, const int height, cl_m
 static int cl_update_covariance(const int devid, const int width, const int height, cl_mem in, cl_mem out,
                                 cl_mem a, cl_mem b, float eps)
 {
-  const int kernel = darktable.opencl->guided_filter->kernel_guided_filter_update_covariance;
+  const int kernel = dt_opencl_get_global()->guided_filter->kernel_guided_filter_update_covariance;
   dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &in);
@@ -512,7 +518,7 @@ static int cl_solve(const int devid, const int width, const int height, cl_mem i
                     cl_mem var_imgg_gg, cl_mem var_imgg_gb, cl_mem var_imgg_bb, cl_mem a_r, cl_mem a_g, cl_mem a_b,
                     cl_mem b)
 {
-  const int kernel = darktable.opencl->guided_filter->kernel_guided_filter_solve;
+  const int kernel = dt_opencl_get_global()->guided_filter->kernel_guided_filter_solve;
   dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &img_mean);
@@ -541,7 +547,7 @@ static int cl_generate_result(const int devid, const int width, const int height
                               cl_mem a_g, cl_mem a_b, cl_mem b, cl_mem out, const float guide_weight,
                               const float min, const float max)
 {
-  const int kernel = darktable.opencl->guided_filter->kernel_guided_filter_generate_result;
+  const int kernel = dt_opencl_get_global()->guided_filter->kernel_guided_filter_generate_result;
   dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(int), &width);
   dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(int), &height);
   dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &guide);

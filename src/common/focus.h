@@ -27,7 +27,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
+#ifndef DT_COMMON_FOCUS_H
+#define DT_COMMON_FOCUS_H
 
 #include "common/image_cache.h"
 #include "develop/develop.h"
@@ -231,9 +232,9 @@ static void dt_focus_draw_clusters(cairo_t *cr, int width, int height, int32_t i
   cairo_save(cr);
   cairo_translate(cr, width / 2.0, height / 2.0f);
 
-  const dt_image_t *img = dt_image_cache_get(darktable.image_cache, imgid, 'r');
+  const dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
   dt_image_t image = *img;
-  dt_image_cache_read_release(darktable.image_cache, img);
+  dt_image_cache_read_release(dt_image_cache_get_global(), img);
 
   // FIXME: get those from rawprepare IOP somehow !!!
   int wd = buffer_width + image.crop_x;
@@ -283,7 +284,7 @@ static void dt_focus_draw_clusters(cairo_t *cr, int width, int height, int32_t i
     dt_dev_cleanup(&dev);
   }
 
-  const int32_t tb = darktable.develop->roi.border_size;
+  const int32_t tb = dt_dev_get_global()->roi.border_size;
   const float scale = fminf((width - 2 * tb) / (float)wd, (height - 2 * tb) / (float)ht) * full_zoom;
   cairo_scale(cr, scale, scale);
   float fx = 0.0f;
@@ -299,7 +300,7 @@ static void dt_focus_draw_clusters(cairo_t *cr, int width, int height, int32_t i
     if(ht * scale <= height) fy = 0;
   }
 
-  cairo_translate(cr, -wd / 2.0f + fx / scale * darktable.gui->ppd, -ht / 2.0f + fy / scale * darktable.gui->ppd);
+  cairo_translate(cr, -wd / 2.0f + fx / scale * dt_gui_get_global()->ppd, -ht / 2.0f + fy / scale * dt_gui_get_global()->ppd);
 
   cairo_rectangle(cr, 0, 0, wd, ht);
   cairo_clip(cr);
@@ -370,6 +371,8 @@ static void dt_focus_draw_clusters(cairo_t *cr, int width, int height, int32_t i
 #undef CHANNEL
 #undef gbuf
 #undef FOCUS_THRS
+
+#endif // DT_COMMON_FOCUS_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
