@@ -66,13 +66,11 @@
 #include "develop/develop.h"
 
 #include "gui/gtk.h"
-#include "gui/guides.h"
 #include "gui/presets.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
 #include <assert.h>
-#include <stdlib.h>
 
 const int dt_gui_presets_exposure_value_cnt = 24;
 const float dt_gui_presets_exposure_value[]
