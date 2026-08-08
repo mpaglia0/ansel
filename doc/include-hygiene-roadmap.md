@@ -602,3 +602,229 @@ initialises. Registration is the guard now.
 
 `common/database.c` is down to zero GTK tokens. Its remaining `gui/legacy_presets.h` include
 is a different problem (preset migration, not a dialog) and is left for its own pass.
+
+## 13. Done: `common/history_merge.c` stops calling the GUI
+
+This file's `#include "gui/common/history_merge_gui.h"` was two problems wearing one include.
+
+**Misplaced ownership.** `_hm_make_node_id()`, `_hm_id_to_op_name()` and
+`_hm_build_last_history_by_id()` are *defined in* `history_merge.c` but were *declared in*
+the GUI header — so the backend included a GUI header to see its own functions. The
+declarations moved to `common/history_merge.h`; the GUI half includes that.
+
+**Four real GUI calls**, now handler slots:
+
+| call | sites |
+|---|---|
+| `_hm_show_merge_report_popup()` | 3 |
+| `_hm_ask_user_constraints_choice()` | 1 |
+| `_hm_warn_missing_raster_producers()` | 1 |
+| `_hm_show_toposort_cycle_popup()` | 1 |
+
+Each took the handler-slot pattern already used by `dt_film_confirm_rmdir_handler`,
+`dt_folder_survey_confirm_import_handler_t` and `dt_database_prompt_handler_t`. Note the
+shapes differ: the report popup and the two warnings are one-way notifications (`void`,
+no-op with no handler), while `_hm_ask_user_constraints_choice()` returns a
+`dt_hm_constraint_choice_t` the merge algorithm branches on — so that one needs a defined
+no-handler answer, chosen the same way as the database prompts: the conservative option that
+does not silently discard the user's history.
+
+### Done — but not the way this section first said to do it
+
+Two earlier attempts, and the advice written here after them, were wrong in the same way,
+and it is worth recording because the wrong answer was the plausible one.
+
+`_hm_collect_labels_from_history_map()` is defined in `gui/common/history_merge_gui.c` and
+was *called from* `history_merge.c`, so the include could not go. It contains no GTK, which
+made it look like a backend helper stranded on the GUI side, and this section said to move
+it — with `_hm_clean_module_name()`, `_hm_module_row_label()`, `_hm_label_t` and
+`_hm_label_cmp()` behind it — down into `common/`.
+
+**That would have been a new violation, not a fix.** `_hm_clean_module_name()` calls
+`dt_capitalize_label()`, which lives in `widgets/widget_style.h` — layer 4. The whole chain
+is *presentation*: it builds the display strings the merge report's rows are made of. "No
+GTK in it" is not the same as "belongs below the GUI", and taking the first for the second
+is what cost two broken builds.
+
+The actual defect was one level up. `_hm_backup_dest()` snapshots the destination before a
+merge, and among that snapshot it captured `orig_labels` / `orig_styles` — **ready-made
+display strings, held by the backend purely so a dialog could show them later**. They were
+passed straight through to the report popup and used nowhere else.
+
+So the fix was to delete them from `_hm_dest_backup_t` entirely. The report derives them
+itself now, at report time, from `orig_ids` (the pre-merge module map, which is genuine
+backend data and was already being passed to it). That shortened the report signature by two
+parameters, and left nothing in `history_merge.c` needing anything from the GUI header.
+
+The four handler slots then went in as planned — `dt_hm_set_{constraints_choice,
+missing_raster,toposort_cycle,merge_report}_handler()`, registered from
+`dt_gui_gtk_init()`, with the no-handler defaults described above — and
+`#include "gui/common/history_merge_gui.h"` left `common/history_merge.c`. The
+`dt_hm_constraint_choice_t` enum moved to `common/history_merge.h`, since the merge
+algorithm is what branches on it.
+
+With #1108, #1109 and this one all landed, **`common/*.c` is down to a single `gui/`
+include**: `database.c`'s `gui/legacy_presets.h`. That one is preset migration rather than a
+dialog, so it is a different kind of problem and gets its own pass. Layering violations are
+at 219.
+
+## 14. Done: the last `gui/` includes leave `common/`
+
+Four things, found by pulling on the one thread §12 left dangling.
+
+### `gui/legacy_presets.h` was a database migration in the wrong directory
+
+A **1144-line header** holding ~1100 lines of SQL string literals, plus the function that
+runs them, so every translation unit including it got a private copy of the array. Presets
+are a GUI concept, which is presumably how it landed in `gui/`; creating a table of them
+from hard-coded SQL is a database migration and nothing else. No GUI code ever included it —
+`common/database.c` did, and was its only consumer.
+
+Now `common/legacy_presets.{c,h}`, with the data in the `.c` and one declaration in the `.h`.
+
+### …and it never committed its transaction
+
+The loop was bounded by a hand-maintained `static const int num_sql_lines = 99;` against an
+array of **100** elements. The last one is `"COMMIT"`. So every statement ran inside the
+transaction opened by the leading `"BEGIN TRANSACTION"`, which was then left dangling on the
+connection for whatever came next to commit or roll back.
+
+Bounded by `G_N_ELEMENTS(sql_lines)` now, which fixes it and makes the class of bug
+unrepresentable. Worth noting the shape: a hand-maintained count next to the array it counts
+is a bug waiting for someone to append an element.
+
+### `common/metadata.h` included `gui/gtk.h` and used no GTK at all
+
+A dead include **in a header**, so it propagated `gui/gtk.h` into all 16 of its includers.
+It was, however, where several of them were getting `<glib.h>` and `<stdint.h>` from —
+including `metadata.h` itself, for its own declarations. Those are declared directly now.
+
+This is the argument for the clang-tidy `misc-include-cleaner` gate in §10: nothing about
+this include was visible at the point of use, and it survived every previous audit in this
+series because the audits grepped `.c` files.
+
+### `dt_gui_gtk_t.selection_stacked` was selection state parked on the GUI struct
+
+Removing the above exposed `common/selection.c` reaching for `dt_gui_get_global()` — not for
+anything GUI, but to read and write a flag of its own that happened to live on
+`dt_gui_gtk_t`. Three touch points, no GUI code among them. It is `dt_selection_t.stacked`
+now, and the field is gone from `dt_gui_gtk_t` (same treatment as `has_scroll_focus`).
+
+Note this also corrects the claim in #1109 that `selection.c`'s `gui/gtk.h` include was
+"dead": it was *redundant* — `dt_gui_get_global()` was arriving through
+`metadata.h` → `gui/gtk.h` — not unused.
+
+### Where that leaves it
+
+`common/` has **one** `gui/` include: `history_merge.c`, removed by #1110. Layering
+violations 219 → 218, and 244 at the start of this series.
+## 15. CI gates: what each one can and cannot see
+
+Two checks, because neither covers the other's cases.
+
+### `tools/check_layering.sh` — a ratchet on the include graph
+
+Layering violations may fall, never rise; cycles must stay at zero. Baseline in
+`tools/include_baseline.txt`, updated with `--update` when the number improves.
+
+A ratchet rather than a threshold because the tree carries ~217 inherited violations:
+demanding zero would mean the check gets switched off. "No worse than yesterday" costs
+nothing to comply with and cannot be quietly eroded. Cycles are *not* ratcheted — the
+explicit include guards this repository uses instead of `#pragma once` exist precisely so a
+cycle is a hard error, and a baseline there would hand that back.
+
+Verified by injecting `#include "gui/gtk.h"` into `common/image_extensions.h`: 220 → 221,
+exit 1, restored → exit 0. And again in the other direction, unplanned: rebasing this branch
+onto a master that had gained #1110 and #1111 made the check fail with *fell 220 → 217*,
+which is the ratchet working — an improvement that is not recorded is an improvement the
+next regression gets to spend.
+
+### `tools/check_unused_includes.sh` — clang-tidy on the diff
+
+`misc-include-cleaner`, filtered to the "is not used directly" half and run only on the `.c`
+files a pull request touches.
+
+**Filtered**, because the other half ("no header providing X is directly included") is
+unusable on a glib/GTK codebase: include-cleaner attributes `g_strrstr()` to
+`glib/gstrfuncs.h` rather than to the `<glib.h>` umbrella everyone includes. Measured 46
+warnings on one file, 45 of them that half. `IgnoreHeaders` in `.clang-tidy` covers the
+umbrella and system headers for the same reason.
+
+**On the diff**, because the measured density is ~0.78 unused includes per translation unit —
+several hundred tree-wide. Gating the diff means every file anyone touches comes out clean,
+with no baseline file to drift.
+
+### The gap, stated plainly
+
+**The unused-include check cannot see headers, and that is not a configuration mistake.**
+include-cleaner analyses the symbols referenced by a translation unit's *main file*; a header
+is not one. `--header-filter` does not help — measured, it selects which files' diagnostics
+are printed, not which are analysed, and reports the `.c`'s unused includes while saying
+nothing about the `.h`. Compiling the header as a synthetic translation unit is worse: that
+unit references nothing, so every one of the header's includes comes out "unused".
+
+This matters because **the case that motivated both checks is exactly the case this one
+cannot see** — `common/metadata.h` including `gui/gtk.h` and using no GTK symbol (§14). The
+layering ratchet is what catches that class, which is why both exist.
+
+## 16. Backlog, and the end goal it serves
+
+### Why any of this
+
+**Ansel intends to move from GTK to Qt.** That is what the whole series is for, and it sets
+the bar for "done":
+
+1. **Backend and frontend entirely decoupled**, so the backend is untouched by a toolkit swap.
+2. **Within the frontend, pure-toolkit overlays separated from implementation and config** —
+   so what has to be rewritten for Qt is a thin, identifiable layer rather than smeared
+   through the application.
+
+There is a second, nearer benefit: **the blast radius of the migration cannot even be
+estimated today.** `gui/gtk.h` is a god-header and GTK calls run through `libs/`, `views/`
+and `iop/`. Layering first is what makes the question answerable.
+
+### 16.1 Definitions that live far from their declaration
+
+Find symbols declared in `example.h` but defined somewhere other than `example.c`. These are
+maintenance traps: the definition is not where anyone looks for it, and nothing warns.
+
+`common/history_merge.c` already produced two of these (§13) — `_hm_make_node_id()` and
+friends declared in the *GUI* header while defined in the backend, and
+`_hm_collect_labels_from_history_map()` the other way round. Both were invisible until an
+include had to be removed.
+
+Mechanical to detect: for every declaration in `X.h`, locate the definition and flag anything
+not in `X.c`/`X.cc`. Worth a tool alongside `check_layering.sh`, since the answer is a list,
+not a judgement.
+
+### 16.2 Split `common/` and parts of `develop/` into real modules
+
+Following §10, three named subsystems:
+
+| module | contents |
+|---|---|
+| `src/database` | everything touching SQLite, and the whole SQLite↔C conversion layer: image metadata rows, edit histories, styles, presets, tags |
+| `src/caches` | mipmap, image, pixelpipe caches |
+| `src/metadata` | XMP, IPTC, EXIF, ratings, colour labels, tags, titles — i.e. what happens *after* `database` has converted rows to C structures |
+
+The `database`/`metadata` boundary is the one to get right: `database` owns persistence and
+the row↔struct conversion, `metadata` owns the meaning of the fields and the sidecar formats.
+
+### 16.3 More `math/` and `pixel/` candidates
+
+Sweep for code that belongs in the existing low layers rather than where history left it:
+solvers, vector algebra and interpolation to `src/math`; generic image filters to
+`src/pixel`. `math/homography.{c,h}` (extracted from `apps/ansel-chart`) is the pattern.
+
+### 16.4 Break up the `gtk.{c,h}` god-header
+
+Two halves, and they belong in different directories:
+
+* **stateless GTK wrappers** — helpers that only wrap toolkit calls and carry no application
+  state → `src/widgets`, under the rule in its README;
+* **implementation** — anything that knows about views, panels, config or `dt_*_get_global()`
+  → stays in `src/gui`.
+
+This is 16.4 rather than 16.1 because it is the largest single lever on the goal above: the
+stateless half is roughly the part a Qt port must rewrite, and the implementation half is
+roughly the part that should survive it. Splitting them is how the estimate gets made.
