@@ -56,10 +56,10 @@
 #endif
 #include <assert.h>
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
@@ -67,9 +67,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
-#include "common/math.h"
+#include "math/math.h"
 #include "common/opencl.h"
 #include "control/control.h"
 #include "develop/develop.h"

@@ -16,7 +16,7 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/atomic.h"
+#include "system/atomic.h"
 #include "common/history.h"
 #include "common/history_merge.h"
 
@@ -294,6 +294,32 @@ void dt_dev_add_history_item_real(struct dt_develop_t *dev, struct dt_iop_module
 
 // Debug helper to follow calls to `dt_dev_add_history_item_real()`, but mostly to follow useless pipe recomputations.
 #define dt_dev_add_history_item(dev, module, enable, redraw) DT_DEBUG_TRACE_WRAPPER(DT_DEBUG_DEV, dt_dev_add_history_item_real, (dev), (module), (enable), (redraw))
+
+/**
+ * @brief Run every history commit still queued for @p dev, now.
+ *
+ * dt_dev_add_history_item_real() queues its commit rather than running it, so that a slider
+ * drag or a combobox scroll does not run one per step. A queued request IS the user's last
+ * edit, so it is run here, not discarded.
+ *
+ * Any code about to tear down @p dev's pipe nodes, iop list or history MUST call this while
+ * @p dev is still whole -- it is the last moment at which committing is safe, and a request
+ * draining after teardown is the darkroom race described in CLAUDE.md, which crashes far
+ * from where it is caused.
+ *
+ * @param dev the develop context, or NULL to flush every pending request.
+ */
+void dt_dev_history_flush_pending_commits(struct dt_develop_t *dev);
+
+/**
+ * @brief Discard every history commit still queued for @p dev, without running it.
+ *
+ * Last-resort counterpart to dt_dev_history_flush_pending_commits(), for a @p dev already
+ * too far torn down to commit to. Prefer the flush wherever the edit can still be saved.
+ *
+ * @param dev the develop context, or NULL to drop every pending request.
+ */
+void dt_dev_history_drop_pending_commits(struct dt_develop_t *dev);
 
 
 /**

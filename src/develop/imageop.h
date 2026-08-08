@@ -61,19 +61,18 @@
 
 #include "common/dtpthread.h"
 #include "common/logging.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 
 #include "common/introspection.h"
 #include "common/gui_module_api.h"
 #include "common/opencl.h"
 
 #include "control/settings.h"
-#include "develop/format.h"
+#include "pixel/format.h"
 #include "develop/pixelpipe_hb.h"
-#include "dtgtk/togglebutton.h"
+#include "widgets/togglebutton.h"
 #include "gui/gtk.h"
-#include "gui/gui_throttle.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -603,9 +602,6 @@ gboolean dt_iop_gui_move_module_after(dt_iop_module_t *module, dt_iop_module_t *
 // initializes memory.darktable_iop_names
 void dt_iop_set_darktable_iop_table();
 
-/** shared callback for throttled module history updates */
-void dt_iop_throttled_history_update(gpointer data);
-
 /** add/remove mask indicator to iop module header */
 void dt_iop_add_remove_mask_indicator(dt_iop_module_t *module);
 
@@ -707,7 +703,7 @@ void dt_iop_set_cache_bypass_variant(dt_iop_module_t *module, int variant);
 /** The list of loaded iop module shared objects (dt_iop_module_so_t*), built once at
  * startup by dt_iop_load_modules_so() in develop/imageop.c, which owns it. Readers use
  * this accessor instead of reaching into the application struct, so they need neither
- * common/darktable.h nor knowledge of where the list is stored. */
+ * darktable.h nor knowledge of where the list is stored. */
 GList *dt_iop_get_modules_so(void);
 
 

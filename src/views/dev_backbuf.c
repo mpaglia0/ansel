@@ -21,12 +21,12 @@
 
 #include "views/dev_backbuf.h"
 #include "common/colorspaces_inline_conversions.h"   // dt_Lab_to_XYZ(), dt_XYZ_to_sRGB()
-#include "control/conf.h"
+#include "common/conf.h"
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/macros.h"
-#include "common/simd.h"
+#include "system/simd.h"
 #include "gui/gtk.h"
 #include "control/control.h"
 #include "develop/develop.h"

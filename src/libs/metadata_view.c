@@ -55,7 +55,7 @@
 #include "common/collection.h"
 #include "common/act_on.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/paths.h"
 #include "common/image.h"
@@ -68,7 +68,7 @@
 #include "common/tags.h"
 #include "common/datetime.h"
 #include "common/selection.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "develop/develop.h"
 

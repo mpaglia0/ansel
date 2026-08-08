@@ -41,35 +41,35 @@
 */
 
 #ifdef HAVE_CONFIG_H
-#include "develop/pixelpipe_cache_alloc.h"
-#include "dtgtk/button.h"
-#include "control/conf.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "widgets/button.h"
+#include "common/conf.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/paths.h"
-#include "chart/common.h"
-#include "common/chromatic_adaptation.h"
+#include "math/homography.h"
+#include "pixel/chromatic_adaptation.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/colorchecker.h"
-#include "common/matrices.h"
+#include "math/matrices.h"
 #include "common/file_location.h"
-#include "common/illuminants.h"
+#include "pixel/illuminants.h"
 #include "common/imagebuf.h"
 #include "common/iop_profile.h"
 #include "common/opencl.h"
 #include "control/control.h"
 #include "develop/imageop_gui.h"
 #include "develop/imageop_math.h"
-#include "develop/openmp_maths.h"
-#include "common/solvers/gaussian_elimination.h"
+#include "math/openmp_maths.h"
+#include "math/gaussian_elimination.h"
 #include "gui/color_picker_proxy.h"
 #include "gui/gtk.h"
 #include "gui/presets.h"
@@ -4639,12 +4639,13 @@ void _auto_set_illuminant(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe)
 
     if(memcmp(&previous, p, sizeof(previous)) != 0)
     {
-      /* Auto-illuminant is driven by live picker motion. Writing history synchronously for every
-         sampled move can outpace the preview worker and keep it permanently in TOP_CHANGED.
-         Queue the standard throttled history update instead so the picker remains live while
-         the worker converges on the latest sampled state. */
+      /* Auto-illuminant is driven by live picker motion, so this commits once per sampled
+         move. That used to outpace the preview worker and keep it permanently in
+         TOP_CHANGED, which is why this call was routed through a throttle of its own; the
+         history commit now batches the resync it triggers, so the picker stays live without
+         any special handling here. */
       dt_print(DT_DEBUG_DEV, "[picker/channelmixerrgb] history commit source=auto_set_illuminant\n");
-      dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+      dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
     }
   }
 }

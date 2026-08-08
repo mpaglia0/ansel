@@ -73,14 +73,14 @@
 */
 /** this is the view for the lighttable module.  */
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/collection.h"
 #include "common/history.h"
 #include "common/module_versioning.h"
 #include "common/undo.h"
 #include "control/control.h"
 #include "control/jobs.h"
-#include "dtgtk/thumbtable.h"
+#include "gui/dtgtk/thumbtable.h"
 
 #include "gui/draw.h"
 #include "gui/gtk.h"

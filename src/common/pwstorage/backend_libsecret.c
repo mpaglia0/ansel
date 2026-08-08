@@ -21,9 +21,9 @@
 */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "backend_libsecret.h"
-#include "control/conf.h"
+#include "common/conf.h"
 
 #include <glib.h>
 #include <json-glib/json-glib.h>

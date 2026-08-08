@@ -30,10 +30,10 @@
 
 #include "common/colorspaces_inline_conversions.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
-#include "common/openmp.h"
-#include "common/simd.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "system/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/simd.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "common/histogram.h"
 #include "develop/imageop.h"
 

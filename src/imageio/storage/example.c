@@ -36,16 +36,16 @@
 */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/paths.h"
 #include "common/file_location.h"
 #include "common/image.h"
 #include "common/image_cache.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
+#include "imageio/imageio_core.h"
+#include "imageio/imageio_module.h"
 #include "control/control.h"
-#include "dtgtk/paint.h"
+#include "widgets/paint.h"
 #include "imageio/storage/imageio_storage_api.h"
 #include <stdio.h>
 #include <stdlib.h>

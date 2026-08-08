@@ -41,24 +41,25 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "widgets/widget_settings.h"
 #include "common/colorspaces_inline_conversions.h"
 #endif
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/iop_profile.h"
-#include "common/rgb_norms.h"
+#include "pixel/rgb_norms.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/module_versioning.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "gui/color_picker_proxy.h"
 #include "gui/gtk.h"
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
 #include "gui/presets.h"
 #include "gui/draw.h"
 #include "control/control.h"
@@ -608,7 +609,7 @@ static gboolean _move_point_internal(dt_iop_module_t *self, GtkWidget *widget, f
     curve[g->selected].x = new_x;
     curve[g->selected].y = new_y;
 
-    dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+    dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   }
 
   return TRUE;
@@ -1339,7 +1340,7 @@ void gui_init(struct dt_iop_module_t *self)
   // FIXME: that tooltip goes in the way of the numbers when you hover a node to get a reading
   // gtk_widget_set_tooltip_text(GTK_WIDGET(g->area), _("double click to reset curve"));
 
-  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   gtk_widget_set_can_focus(GTK_WIDGET(g->area), TRUE);
@@ -1387,7 +1388,6 @@ void gui_update(struct dt_iop_module_t *self)
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->chk_compensate_middle_grey), p->compensate_middle_grey);
   dt_bauhaus_combobox_set(g->cmb_preserve_colors, p->preserve_colors);
 
-  dt_gui_throttle_cancel(self);
 
   _rgbcurve_show_hide_controls(p, g);
 
@@ -1401,7 +1401,6 @@ void gui_cleanup(struct dt_iop_module_t *self)
 
   for(int k = 0; k < DT_IOP_RGBCURVE_MAX_CHANNELS; k++) dt_draw_curve_destroy(g->minmax_curve[k]);
 
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

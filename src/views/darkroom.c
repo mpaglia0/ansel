@@ -81,21 +81,22 @@
 */
 /** this is the view for the darkroom module.  */
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
+#include "widgets/widget_settings.h"
 #include <glib/gstdio.h>
 #include "common/paths.h"
 #include "common/collection.h"
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
 #include "common/hash.h"
 #include "common/history.h"
 #include "common/iop-autoset.h"
-#include "common/imageio_module.h"
+#include "imageio/imageio_module.h"
 #include "common/mipmap_cache.h"
 #include "common/module_versioning.h"
 #include "common/selection.h"
 #include "common/tags.h"
 #include "common/undo.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "control/jobs.h"
 #include "develop/blend.h"
@@ -104,13 +105,13 @@
 #include "develop/imageop.h"
 #include "develop/supervisor.h"
 #include "develop/masks.h"
-#include "dtgtk/button.h"
-#include "dtgtk/thumbtable.h"
+#include "widgets/button.h"
+#include "gui/dtgtk/thumbtable.h"
 
 #include "gui/color_picker_proxy.h"
 #include "gui/draw.h"
 #include "gui/gtk.h"
-#include "gui/gui_throttle.h"
+#include "develop/gui_throttle.h"
 #include "gui/guides.h"
 #include "libs/colorpicker.h"
 #include "libs/lib.h"
@@ -246,6 +247,7 @@ void cleanup(dt_view_t *self)
 
   _release_expose_source_caches();
   dt_gui_throttle_cancel(dev);
+  dt_dev_history_drop_pending_commits(dev);
   DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_darkroom_autoset_popover_refresh), dev);
   if(_autoset_manager)
   {
@@ -1756,10 +1758,10 @@ void gui_init(dt_view_t *self)
 static gboolean _is_scroll_captured_by_widget()
 {
   dt_accels_t *accels = dt_gui_get_accels();
-  if(!dt_gui_get_global()->has_scroll_focus || accels->active_key.accel_key == 0) return FALSE;
+  if(!dt_widget_scroll_focus() || accels->active_key.accel_key == 0) return FALSE;
 
   // When declaring shortcuts, bauhaus widgets write their accel path into a private data field
-  gchar *accel_path = g_object_get_data(G_OBJECT(dt_gui_get_global()->has_scroll_focus), "accel-path");
+  gchar *accel_path = g_object_get_data(G_OBJECT(dt_widget_scroll_focus()), "accel-path");
 
   // Find if the registered accel keys matches currently pressed keys
   GtkAccelKey key = { 0 };
@@ -1779,7 +1781,7 @@ gboolean _scroll_on_focus(GdkEventScroll event, void *data)
   {
     // Pass-through the scrolling event to the scrolling handler of the widget
     gboolean ret;
-    g_signal_emit_by_name(G_OBJECT(dt_gui_get_global()->has_scroll_focus), "scroll-event", &event, &ret);
+    g_signal_emit_by_name(G_OBJECT(dt_widget_scroll_focus()), "scroll-event", &event, &ret);
     return ret;
   }
 
@@ -1878,6 +1880,9 @@ void leave(dt_view_t *self)
   _darkroom_center_pan_drag = FALSE;
   _reset_edge_pan();
   dt_gui_throttle_cancel(dev);
+  // Last moment at which committing is still safe -- everything below tears down
+  // dev->pipe / dev->iop / dev->history. Run the pending edit rather than lose it.
+  dt_dev_history_flush_pending_commits(dev);
 
   _release_expose_source_caches();
   if(dev->image_surface) cairo_surface_destroy(dev->image_surface);

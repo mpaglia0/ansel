@@ -46,35 +46,36 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "control/conf.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
-#include "common/chromatic_adaptation.h"
+#include "pixel/chromatic_adaptation.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "develop/pixelpipe_cache_alloc.h"
-#include "common/bspline.h"
-#include "common/dwt.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "pixel/bspline.h"
+#include "pixel/dwt.h"
 #include "common/image.h"
 #include "common/iop_profile.h"
 #include "common/opencl.h"
 #include "develop/develop.h"
 #include "develop/imageop_gui.h"
 #include "develop/imageop_math.h"
-#include "develop/noise_generator.h"
-#include "develop/openmp_maths.h"
+#include "iop/noise_generator.h"
+#include "math/openmp_maths.h"
 #include "develop/tiling.h"
-#include "dtgtk/paint.h"
+#include "widgets/paint.h"
 
 #include "gui/color_picker_proxy.h"
 #include "gui/gtk.h"
-#include "common/solvers/gaussian_elimination.h"
+#include "math/gaussian_elimination.h"
 #include "iop/iop_api.h"
 
 
@@ -5328,7 +5329,7 @@ void gui_init(dt_iop_module_t *self)
 
   gtk_widget_set_can_focus(GTK_WIDGET(g->area), TRUE);
   gtk_widget_add_events(GTK_WIDGET(g->area), GDK_BUTTON_PRESS_MASK | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK
-                                                 | GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask);
+                                                 | GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask());
   g_signal_connect(G_OBJECT(g->area), "draw", G_CALLBACK(dt_iop_tonecurve_draw), self);
   g_signal_connect(G_OBJECT(g->area), "button-press-event", G_CALLBACK(area_button_press), self);
   g_signal_connect(G_OBJECT(g->area), "leave-notify-event", G_CALLBACK(area_leave_notify), self);

@@ -35,14 +35,14 @@
 */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "control/signal.h"
 #include <gdk/gdkkeysyms.h>
 
 #include "common/collection.h"
-#include "control/conf.h"
-#include "dtgtk/thumbtable.h"
+#include "common/conf.h"
+#include "gui/dtgtk/thumbtable.h"
 #include "gui/actions/menu.h"
 
 #include "gui/gtk.h"

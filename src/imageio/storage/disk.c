@@ -48,19 +48,19 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/global_mutexes.h"
 #include "common/image.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
+#include "imageio/imageio_core.h"
+#include "imageio/imageio_module.h"
 #include "common/utility.h"
 #include "common/variables.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
-#include "dtgtk/button.h"
-#include "dtgtk/paint.h"
+#include "widgets/button.h"
+#include "widgets/paint.h"
 #include "gui/gtk.h"
-#include "gui/gtkentry.h"
+#include "widgets/gtkentry.h"
 #include "imageio/storage/imageio_storage_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #endif

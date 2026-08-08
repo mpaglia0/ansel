@@ -53,17 +53,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
-#include "common/math.h"
+#include "widgets/bauhaus.h"
+#include "math/math.h"
 #include "develop/develop.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
-#include "dtgtk/gradientslider.h"
+#include "widgets/gradientslider.h"
 #include "gui/color_picker_proxy.h"
 
 #include "gui/gtk.h"

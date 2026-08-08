@@ -32,14 +32,14 @@
 */
 
 
-#include "common/sys_resources.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "system/sys_resources.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "develop/tiling.h"
 #include "common/opencl.h"
 #include "control/control.h"
 #include "develop/blend.h"
 #include "develop/pixelpipe.h"
-#include "common/solvers/nelder_mead_simplex.h"
+#include "math/nelder_mead_simplex.h"
 
 #include <assert.h>
 #include <math.h>

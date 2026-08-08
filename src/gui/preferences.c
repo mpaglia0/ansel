@@ -55,10 +55,10 @@
 #include <gdk/gdkkeysyms.h>
 #include <strings.h>
 
-#include "bauhaus/bauhaus.h"
-#include "control/conf.h"
-#include "gui/gdkkeys.h"
-#include "common/capabilities.h"
+#include "widgets/bauhaus.h"
+#include "common/conf.h"
+#include "widgets/gdkkeys.h"
+#include "system/capabilities.h"
 #include "common/debug.h"
 #include "common/file_location.h"
 #include "common/l10n.h"

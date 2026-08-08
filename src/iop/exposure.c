@@ -55,7 +55,7 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #endif
 
 #include <assert.h>
@@ -64,12 +64,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/histogram.h"
@@ -82,7 +82,7 @@
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "develop/pixelpipe.h"
-#include "dtgtk/paint.h"
+#include "widgets/paint.h"
 
 #include "gui/gtk.h"
 #include "gui/presets.h"

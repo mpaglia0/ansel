@@ -52,19 +52,19 @@
 #endif
 #include <assert.h>
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
-#include "common/math.h"
+#include "widgets/bauhaus.h"
+#include "math/math.h"
 #include "common/opencl.h"
-#include "common/tea.h"
+#include "pixel/tea.h"
 #include "control/control.h"
 #include "develop/blend.h"
 #include "develop/develop.h"

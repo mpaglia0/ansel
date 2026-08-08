@@ -65,30 +65,31 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
+#include "widgets/widget_settings.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "config.h"
 #endif
 #include <assert.h>
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/module_versioning.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
-#include "common/rgb_norms.h"
+#include "widgets/bauhaus.h"
+#include "pixel/rgb_norms.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
-#include "dtgtk/paint.h"
+#include "widgets/paint.h"
 #include "gui/draw.h"
 #include "gui/gtk.h"
 #include "gui/presets.h"
@@ -998,7 +999,7 @@ static gboolean _move_point_internal(dt_iop_module_t *self, GtkWidget *widget, f
 
   gtk_widget_queue_draw(widget);
 
-  dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+  dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   return TRUE;
 }
 
@@ -1126,7 +1127,7 @@ void gui_init(struct dt_iop_module_t *self)
   // FIXME: that tooltip goes in the way of the numbers when you hover a node to get a reading
   //gtk_widget_set_tooltip_text(GTK_WIDGET(c->area), _("double click to reset curve"));
 
-  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   gtk_widget_set_can_focus(GTK_WIDGET(c->area), TRUE);
@@ -1177,7 +1178,6 @@ void gui_cleanup(struct dt_iop_module_t *self)
   dt_draw_curve_destroy(c->minmax_curve[ch_L]);
   dt_draw_curve_destroy(c->minmax_curve[ch_a]);
   dt_draw_curve_destroy(c->minmax_curve[ch_b]);
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

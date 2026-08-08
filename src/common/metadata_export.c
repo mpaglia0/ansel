@@ -21,9 +21,9 @@
 */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/utility.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "common/metadata_export.h"
 
 uint32_t dt_lib_export_metadata_default_flags(void)

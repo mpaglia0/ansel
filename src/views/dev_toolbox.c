@@ -15,19 +15,19 @@
 
 #include "views/dev_toolbox.h"
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/file_location.h"
 #include "common/usermanual_url.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "control/signal.h"
 #include "develop/develop.h"
 #include "develop/dev_pixelpipe.h"
-#include "dtgtk/button.h"
-#include "dtgtk/paint.h"
-#include "dtgtk/togglebutton.h"
-#include "gui/accelerators.h"
+#include "widgets/button.h"
+#include "widgets/paint.h"
+#include "widgets/togglebutton.h"
+#include "widgets/accelerators.h"
 #include "gui/gtk.h"
 
 #include <limits.h>

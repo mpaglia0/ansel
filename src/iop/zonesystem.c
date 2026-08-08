@@ -51,25 +51,26 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "widgets/widget_settings.h"
 #endif
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/module_versioning.h"
 #include "common/utility.h"
-#include "common/gaussian.h"
-#include "common/math.h"
+#include "pixel/gaussian.h"
+#include "math/math.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
-#include "dtgtk/drawingarea.h"
+#include "widgets/drawingarea.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
 
@@ -443,7 +444,7 @@ void gui_init(struct dt_iop_module_t *self)
   g_signal_connect(G_OBJECT(g->zones), "scroll-event", G_CALLBACK(dt_iop_zonesystem_bar_scrolled), self);
   gtk_widget_add_events(GTK_WIDGET(g->zones), GDK_POINTER_MOTION_MASK
                                               | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
-                                              | GDK_LEAVE_NOTIFY_MASK | dt_gui_get_global()->scroll_mask);
+                                              | GDK_LEAVE_NOTIFY_MASK | dt_widget_scroll_mask());
   gtk_widget_set_size_request(g->zones, -1, DT_PIXEL_APPLY_DPI(40));
 
   gtk_box_pack_start(GTK_BOX(self->widget), g->preview, TRUE, TRUE, 0);

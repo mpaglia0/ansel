@@ -50,22 +50,22 @@
 */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/paths.h"
 #include <glib/gstdio.h>
 #include "common/image.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
+#include "imageio/imageio_core.h"
+#include "imageio/imageio_module.h"
 #include "common/metadata.h"
 #include "common/utility.h"
 #include "common/variables.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
-#include "dtgtk/button.h"
-#include "dtgtk/paint.h"
+#include "widgets/button.h"
+#include "widgets/paint.h"
 #include "gui/gtk.h"
-#include "gui/gtkentry.h"
+#include "widgets/gtkentry.h"
 #include "imageio/storage/imageio_storage_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #endif

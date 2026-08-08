@@ -42,20 +42,21 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/act_on.h"
 #include "common/history_actions.h"
 #include "common/collection.h"
 #include "common/history.h"
 #include "common/styles.h"
+#include "gui/common/styles_gui.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/glib_utils.h"
 #include "common/module_versioning.h"
 #include "control/signal.h"
 #include "common/database.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "control/jobs.h"
 

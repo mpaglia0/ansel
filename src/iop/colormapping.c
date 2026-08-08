@@ -37,18 +37,18 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/module_versioning.h"
 #include <glib/gstdio.h>
-#include "common/bilateral.h"
+#include "pixel/bilateral.h"
 #include "common/colorspaces.h"
 #include "common/imagebuf.h"
 #include "common/points.h"
@@ -58,7 +58,7 @@
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"
-#include "dtgtk/drawingarea.h"
+#include "widgets/drawingarea.h"
 
 #include "gui/gtk.h"
 #include "iop/iop_api.h"

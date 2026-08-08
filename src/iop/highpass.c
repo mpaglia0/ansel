@@ -40,20 +40,20 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
 #include "config.h"
 #endif
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
-#include "common/box_filters.h"
-#include "common/math.h"
+#include "widgets/bauhaus.h"
+#include "pixel/box_filters.h"
+#include "math/math.h"
 #include "common/opencl.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"

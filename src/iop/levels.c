@@ -52,6 +52,7 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "widgets/widget_settings.h"
 #endif
 #include <assert.h>
 #include <math.h>
@@ -59,19 +60,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/module_versioning.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
-#include "develop/openmp_maths.h"
+#include "math/openmp_maths.h"
 #include "gui/draw.h"
 #include "gui/gtk.h"
 
@@ -630,7 +631,7 @@ void gui_init(dt_iop_module_t *self)
 
   gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK
                                              | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
-                                             | GDK_LEAVE_NOTIFY_MASK | dt_gui_get_global()->scroll_mask);
+                                             | GDK_LEAVE_NOTIFY_MASK | dt_widget_scroll_mask());
   g_signal_connect(G_OBJECT(c->area), "draw", G_CALLBACK(dt_iop_levels_area_draw), self);
   g_signal_connect(G_OBJECT(c->area), "button-press-event", G_CALLBACK(dt_iop_levels_button_press), self);
   g_signal_connect(G_OBJECT(c->area), "button-release-event", G_CALLBACK(dt_iop_levels_button_release), self);

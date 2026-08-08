@@ -29,18 +29,18 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/file_location.h"
 #include "common/global_mutexes.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
+#include "imageio/imageio_core.h"
+#include "imageio/imageio_module.h"
 #include "common/metadata.h"
 #include "common/pwstorage/pwstorage.h"
 #include "common/tags.h"
 #include "common/curl_tools.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
-#include "dtgtk/button.h"
+#include "widgets/button.h"
 #include "gui/gtk.h"
 #include "imageio/storage/imageio_storage_api.h"
 #include <curl/curl.h>

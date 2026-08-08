@@ -27,13 +27,13 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
-#include "common/interpolation.h"
+#include "widgets/bauhaus.h"
+#include "pixel/interpolation.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/tiling.h"

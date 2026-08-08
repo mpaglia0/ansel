@@ -18,10 +18,10 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #endif
 // our includes go first:
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"

@@ -16,9 +16,10 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "control/conf.h"
+#include "common/conf.h"
 #include "common/act_on.h"
 #include "common/history_actions.h"
+#include "gui/common/history_actions_gui.h"
 #include "control/jobs/control_jobs.h"
 #include "gui/actions/menu.h"
 #ifdef __APPLE__
@@ -30,7 +31,7 @@
 #include "common/image_cache.h"
 #include "common/history.h"
 #include "common/history_merge.h"
-#include "common/history_merge_gui.h"
+#include "gui/common/history_merge_gui.h"
 #include "develop/dev_history.h"
 #include "develop/develop.h"
 #include "control/control.h"
@@ -144,8 +145,9 @@ static gboolean compress_history_callback(GtkAccelGroup *group, GObject *acceler
   return TRUE;
 }
 
-// delete_history_callback() now lives in common/history_actions.c: it is shared
-// verbatim with the darkroom history module's reset button (see libs/history.c).
+// delete_history_callback() sits in gui/common/history_actions_gui.c rather than here with
+// its siblings: it is shared verbatim with the darkroom history module's reset button
+// (libs/history.c), so neither menu owns it.
 
 static gboolean copy_callback(GtkAccelGroup *group, GObject *acceleratable, guint keyval, GdkModifierType mods, gpointer user_data)
 {

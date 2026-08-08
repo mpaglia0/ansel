@@ -66,17 +66,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/opencl.h"
 #include "control/control.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "develop/develop.h"
 #include "develop/imageop_gui.h"
 #include "develop/imageop_math.h"

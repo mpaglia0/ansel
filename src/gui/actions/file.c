@@ -19,9 +19,9 @@
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "common/macros.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/jobs/control_jobs.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/paths.h"
 #include "common/usermanual_url.h"
 #include "control/signal.h"
@@ -34,7 +34,7 @@
 #include "common/image.h"
 #include "common/selection.h"
 #include "libs/collect.h"
-#include "common/import.h"
+#include "gui/import.h"
 #include "libs/lib.h"
 #include "control/control.h"
 

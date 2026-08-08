@@ -43,14 +43,14 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
-#include "common/simd.h"
+#include "system/simd.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
-#include "common/nlmeans_core.h"
+#include "widgets/bauhaus.h"
+#include "pixel/nlmeans_core.h"
 #include "common/opencl.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"

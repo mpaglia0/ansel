@@ -18,17 +18,17 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #endif
 
 #include "common/imagebuf.h"
-#include "common/interpolation.h"
+#include "pixel/interpolation.h"
 #include "common/opencl.h"
 #include "develop/blend.h"
 #include "develop/develop.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "develop/imageop.h"

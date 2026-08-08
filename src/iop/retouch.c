@@ -40,25 +40,26 @@
 */
 
 #ifdef HAVE_CONFIG_H
-#include "develop/pixelpipe_cache_alloc.h"
-#include "control/conf.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "gui/gtk.h"
-#include "common/bilateral.h"
-#include "common/bilateralcl.h"
+#include "pixel/bilateral.h"
+#include "pixel/bilateralcl.h"
 #include "common/colorspaces_inline_conversions.h"
-#include "common/dwt.h"
-#include "common/gaussian.h"
-#include "common/heal.h"
+#include "pixel/dwt.h"
+#include "pixel/gaussian.h"
+#include "pixel/heal.h"
 #include "common/imagebuf.h"
 #include "common/opencl.h"
 #include "develop/blend.h"
@@ -2347,7 +2348,7 @@ void gui_init(dt_iop_module_t *self)
   g_signal_connect(G_OBJECT(g->wd_bar), "scroll-event", G_CALLBACK(rt_wdbar_scrolled), self);
   gtk_widget_add_events(GTK_WIDGET(g->wd_bar), GDK_POINTER_MOTION_MASK
                                                    | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
-                                                   | GDK_LEAVE_NOTIFY_MASK | dt_gui_get_global()->scroll_mask);
+                                                   | GDK_LEAVE_NOTIFY_MASK | dt_widget_scroll_mask());
   gtk_widget_set_size_request(g->wd_bar, -1, DT_PIXEL_APPLY_DPI(40));
 
   // toolbar display current scale / cut&paste / suppress&display masks

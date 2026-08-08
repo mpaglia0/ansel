@@ -53,8 +53,9 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "common/sentry.h"
+#include "widgets/widget_settings.h"
 #include "common/telemetry.h"
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
 #include "libs/lib.h"
 #include "views/view.h"
 #include "common/database.h"
@@ -62,11 +63,11 @@
 #include "common/macros.h"
 #include "common/module.h"
 #include "common/module_versioning.h" // dt_version(), used by libs/lib_api.h below
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "develop/develop.h"
-#include "dtgtk/button.h"
-#include "dtgtk/expander.h"
+#include "widgets/button.h"
+#include "widgets/expander.h"
 
 #include "gui/color_picker_proxy.h"
 #include "libs/colorpicker.h"
@@ -683,7 +684,7 @@ static int _lib_plugin_body_button_press(GtkWidget *w, GdkEventButton *e, gpoint
 {
   /* Reset the scrolling focus. If the click happened on any bauhaus element,
    * its internal button_press method will set it for itself */
-  dt_gui_get_global()->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
   int handled = FALSE;
   return handled;
 }
@@ -1191,7 +1192,7 @@ static gboolean _lib_plugin_header_button_press(GtkWidget *w, GdkEventButton *e,
 
   /* Reset the scrolling focus. If the click happened on any bauhaus element,
    * its internal button_press method will set it for itself */
-  dt_gui_get_global()->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
 
   if(e->button == 1)
   {

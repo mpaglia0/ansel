@@ -26,7 +26,7 @@ python3 tools/include_graph.py                    # cycles, inversions, god-head
 | `darktable_h_direct_includers` | 343 | **16** | −95% |
 | `max_closure` | 84 | **82** | |
 
-`darktable_h_reach` is the number of files that reach `common/darktable.h` transitively — i.e.
+`darktable_h_reach` is the number of files that reach `darktable.h` transitively — i.e.
 how much of the codebase the application orchestrator is welded to. That is the number this
 whole series exists to move.
 
@@ -50,7 +50,7 @@ precondition for fixing them. The two dominant ones are the next target:
 
 ## Why node-counting is the wrong metric, and what replaced it
 
-Counting *nodes* in a transitive closure rewards monoliths. `master`'s `common/darktable.h` was
+Counting *nodes* in a transitive closure rewards monoliths. `master`'s `darktable.h` was
 a 1277-line header that **defined** its content inline: it counted as **one node dragging in
 nine headers**. The same content split into eleven honest headers (`macros.h`, `mem_alloc.h`,
 `simd.h`, `openmp.h`, `logging.h`, …) counts as up to eleven — so a naive node metric got
@@ -104,7 +104,7 @@ geometry, not module API. That struct moved to `develop/format.h` beside `dt_iop
 module sees exactly what it saw before; **zero module churn**.
 
 Same reasoning rehomed `dt_sfence()` / `dt_omploop_sfence()` from `develop/imageop.h` to
-`common/openmp.h`: memory-fence helpers with no module API involvement, already used by
+`system/openmp.h`: memory-fence helpers with no module API involvement, already used by
 `common/interpolation.c` and `common/iop_profile.c`.
 
 ## Directory graph
@@ -170,7 +170,7 @@ X-macro headers: re-included several times per translation unit with different m
 and expanded *inside struct bodies* to generate members. An `#include` at the top of one of them
 lands inside those structs — a mistake worth making exactly once.
 
-## `common/darktable.h` carries a tripwire, not a guard
+## `darktable.h` carries a tripwire, not a guard
 
 It has no include guard. A second inclusion in one translation unit is never legitimate
 for the orchestrator, so instead of absorbing it silently the header `#error`s. That is
@@ -179,7 +179,7 @@ the same principle as banning `#pragma once`, taken to its end for the one heade
 
 Installing it immediately caught what several greps had missed: `common/colorchecker.h`
 — a *header* — plus `colorchecker.c` and `sqliteicu.c` were including it as
-`#include "darktable.h"` (relative to `src/common/`), not `#include "common/darktable.h"`.
+`#include "darktable.h"` (relative to `src/common/`), not `#include "darktable.h"`.
 All three were vestigial and are gone. Audit this with `grep -r 'darktable\.h"'`; the
 qualified spelling alone under-reports.
 
@@ -196,6 +196,6 @@ qualified spelling alone under-reports.
    `conf.c`, `imageop.c`, `exif.cc`); and `dbus.c` for `dt_load_from_string()`. No header
    includes it at all. The rest of the globals census is in `doc/globals-migration.md`.
 4. **Dead code the build never compiles**, found while sweeping: `src/iop/useless.c` (commented
-   out of `iop/CMakeLists.txt`) and `src/chart/{main,colorchart,pfm,tonecurve}.c` (only
+   out of `iop/CMakeLists.txt`) and `src/apps/ansel-chart/{main,colorchart,pfm,tonecurve}.c` (only
    `chart/common.c` is built). `useless.c` and `chart/{main,colorchart}.c` do not compile at all
    any more, independently of this series — verified by building pristine `HEAD` copies.

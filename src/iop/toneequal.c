@@ -98,6 +98,7 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "widgets/widget_settings.h"
 #endif
 #include <assert.h>
 #include <math.h>
@@ -106,23 +107,23 @@
 #include <string.h>
 #include <time.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/hash.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "develop/masks.h"
-#include "common/fast_guided_filter.h"
-#include "common/eigf.h"
-#include "common/interpolation.h"
-#include "common/luminance_mask.h"
+#include "pixel/fast_guided_filter.h"
+#include "pixel/eigf.h"
+#include "pixel/interpolation.h"
+#include "pixel/luminance_mask.h"
 #include "common/collection.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "develop/blend.h"
 #include "develop/develop.h"
@@ -137,7 +138,7 @@
 #include "gui/presets.h"
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
-#include "common/solvers/choleski.h"
+#include "math/choleski.h"
 #include "libs/colorpicker.h"
 
 #ifdef _OPENMP
@@ -3446,7 +3447,7 @@ void gui_init(struct dt_iop_module_t *self)
                      dt_ui_resizable_drawing_area(GTK_WIDGET(g->area),
                                                   "plugins/darkroom/toneequal/graphheight", 280, 120),
                      FALSE, FALSE, 0);
-  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   gtk_widget_set_can_focus(GTK_WIDGET(g->area), TRUE);

@@ -17,9 +17,9 @@
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "control/conf.h"
+#include "common/conf.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/hash.h"
 #include "common/logging.h"
 #include "common/times.h"

@@ -33,18 +33,18 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
+#include "system/openmp.h"
 #include "common/logging.h"
 #include "common/times.h"
 #include "gui/gtk.h"
-#include "develop/pixelpipe_cache_alloc.h"
-#include "control/conf.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "common/conf.h"
 #include "develop/blend.h"
 #include "develop/imageop.h"
 #include "develop/masks.h"
-#include "develop/openmp_maths.h"
+#include "math/openmp_maths.h"
 
 #define HARDNESS_MIN 0.0005f
 #define HARDNESS_MAX 1.0f

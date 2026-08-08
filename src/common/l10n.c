@@ -26,11 +26,11 @@
  */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/paths.h"
 #include "common/l10n.h"
 #include "common/file_location.h"
-#include "control/conf.h"
+#include "common/conf.h"
 
 #include <libintl.h>
 #include <locale.h>

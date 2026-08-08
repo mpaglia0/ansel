@@ -28,12 +28,12 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/paths.h"
 #include "common/exif.h"
 #include "common/image_cache.h"
-#include "common/imageio_module.h"
+#include "imageio/imageio_module.h"
 #include "common/utility.h"
 #include "imageio/format/imageio_format_api.h"
 #include "gui/gtk.h"

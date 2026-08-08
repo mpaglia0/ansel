@@ -19,11 +19,11 @@
 #include "common/macros.h"
 #include "common/act_on.h"
 #include "common/colorspaces.h"   // dt_colorspaces_get_global(), and lcms2 for cmsHTRANSFORM
-#include "common/openmp.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/paths.h"
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
 #include "common/datetime.h"
 #include "common/file_location.h"
 #include "common/image.h"
@@ -33,7 +33,7 @@
 #include "control/jobs.h"
 #include "control/signal.h"
 #include "gui/gtk.h"
-#include "gui/gtkentry.h"
+#include "widgets/gtkentry.h"
 #include "libs/lib.h"
 #include "views/view.h"
 

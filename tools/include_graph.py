@@ -27,14 +27,19 @@ INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
 # GUI toolkit code (gui/, dtgtk/, bauhaus/) is INFRASTRUCTURE used by modules, so it sits
 # below them, not above: an iop's gui_init() legitimately calls gtk/bauhaus helpers.
 LAYERS = [
-    ('external', 0), ('win', 0),
-    ('common', 1),
-    ('control', 2),
-    ('gui', 3), ('dtgtk', 3), ('bauhaus', 3),
-    ('develop', 4),
-    ('iop', 5), ('imageio', 5),
-    ('libs', 6), ('views', 6), ('chart', 6),
-    ('cli', 7), ('generate-cache', 7), ('cltest', 7),
+    ('external', 0), ('win', 0), ('system', 0),
+    ('common', 1), ('math', 1),
+    # pixel/: image-processing primitives (wavelets, guided filters, colour adaptation,
+    # interpolation). Above common/ because they are a domain library rather than
+    # infrastructure, below control/ because they must never reach the control loop.
+    ('pixel', 2),
+    ('control', 3),
+    ('gui', 4), ('widgets', 4),   # widgets/ = reusable GTK widgets, no app state
+    ('develop', 5),
+    ('iop', 6), ('imageio', 6),
+    ('libs', 7), ('views', 7), ('chart', 7),
+    ('apps', 10),   # executables link the orchestrator, so they sit ABOVE it
+    ('app', 9),                       # main.c, darktable.c/h -- directly in src/
 ]
 LAYER = dict(LAYERS)
 
@@ -42,12 +47,19 @@ def layer_of(path):
     parts = path.split(os.sep)
     if len(parts) < 2:
         return None
+    # A file directly in src/ (main.c, darktable.c/h) is the application root: the
+    # orchestrator sits ABOVE every module, so nothing it includes can be an inversion.
+    if len(parts) == 2:
+        return LAYER['app']
     return LAYER.get(parts[1])
 
 def collect():
     files = {}
     for root, _, names in os.walk(SRC):
-        if 'external' in root.split(os.sep):
+        parts = root.split(os.sep)
+        # skip vendored code and archived, non-built directories: neither is part of
+        # the program, and counting attic/ made dead code register as live inversions
+        if 'external' in parts or 'attic' in parts:
             continue
         for n in names:
             if n.endswith(('.c', '.h', '.cc', '.cpp', '.hpp')):
@@ -174,9 +186,59 @@ def main():
     if '--summary' in sys.argv:
         print("\n=== SUMMARY ===")
         summary(files, graph, headers, closure, comps, viol)
+    if '--what-if' in sys.argv:
+        what_if(files, graph)
     if '--mermaid' in sys.argv:
         print("\n=== DIRECTORY GRAPH (dotted = layering inversion) ===")
         mermaid(graph, set(viol.keys()))
+
+
+
+def what_if(files, graph):
+    """Re-count layering violations as if some files lived elsewhere.
+
+    Relocation is cheap to do and expensive to undo, and intuition is unreliable here:
+    moving the history/* cluster into develop/ LOOKS obviously right (it calls
+    dt_dev_* constantly) and measures at +15 violations, because its own consumers sit
+    below develop/. Simulate first.
+
+    Usage:  --what-if src/common/foo.c=develop src/common/foo.h=develop
+    """
+    moves = {}
+    for a in sys.argv:
+        if a.startswith('src/') and '=' in a:
+            src, dst = a.split('=', 1)
+            moves[os.path.normpath(src)] = dst
+    if not moves:
+        print('  pass moves as src/path/file.c=destdir')
+        return
+
+    def home(p, mv):
+        p = os.path.normpath(p)
+        if p in mv:
+            return mv[p]
+        parts = p.split(os.sep)
+        return parts[1] if len(parts) > 1 else None
+
+    def count(mv):
+        n = 0
+        for a, targets in graph.items():
+            la = LAYER.get(home(a, mv))
+            if la is None:
+                continue
+            for b in targets:
+                lb = LAYER.get(home(b, mv))
+                if lb is not None and lb > la:
+                    n += 1
+        return n
+
+    base = count({})
+    after = count(moves)
+    print('\n=== WHAT-IF ===')
+    for s_, d in moves.items():
+        print('  %s -> %s/' % (s_, d))
+    print('  layering violations %d -> %d  (%+d)' % (base, after, after - base))
+
 
 def summary(files, graph, headers, closure, comps, viol):
     """One-line-per-metric output, for before/after comparison."""
@@ -220,7 +282,7 @@ def summary(files, graph, headers, closure, comps, viol):
         print(f"tu_max_closure_lines\t{tu_line_costs[-1]}")
 
     # How far the application orchestrator still reaches.
-    dt_h = os.path.join(SRC, 'common', 'darktable.h')
+    dt_h = os.path.join(SRC, 'darktable.h')   # the orchestrator now lives at src/
     if dt_h in files:
         reach = sum(1 for f in files if dt_h in closure(f))
         direct = sum(1 for f in files if dt_h in graph.get(f, ()))

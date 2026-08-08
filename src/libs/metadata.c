@@ -49,12 +49,12 @@
 #include "common/collection.h"
 #include "common/selection.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
 #include "common/debug.h"
-#include "control/conf.h"
+#include "common/conf.h"
 
 static sqlite3_stmt *_metadata_update_stmt = NULL;
 #include "control/signal.h"

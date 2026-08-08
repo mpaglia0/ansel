@@ -28,10 +28,10 @@ import subprocess
 import sys
 
 # Same layer order as tools/include_graph.py -- keep them in sync.
-LAYER = {'external': 0, 'win': 0, 'common': 1, 'control': 2,
-         'gui': 3, 'dtgtk': 3, 'bauhaus': 3, 'develop': 4,
-         'iop': 5, 'imageio': 5, 'libs': 6, 'views': 6, 'chart': 6,
-         'cli': 7, 'generate-cache': 7, 'cltest': 7}
+LAYER = {'external': 0, 'win': 0, 'system': 0, 'common': 1, 'math': 1, 'pixel': 2, 'control': 3,
+         'gui': 4, 'widgets': 4,   # widgets/ = reusable GTK widgets, no app state 'develop': 5,
+         'iop': 6, 'imageio': 6, 'libs': 7, 'views': 7, 'chart': 7,
+         'apps': 10,   # executables link the orchestrator, so they sit ABOVE it 'app': 9}
 
 OBJ_RE = re.compile(r'\.dir/(.*)\.(?:c|cc|cpp)\.o$')
 

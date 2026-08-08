@@ -99,7 +99,7 @@ never remove in bulk without the verify pass.
    | MinGW: `near` / `grp2` as identifiers | same lost shim; the `#undef` came from `darktable.h` |
    | MinGW: unrelated parse errors | `<immintrin.h>` accidentally placed inside an `extern "C"` block |
 
-   The structural fix applied: the Windows legacy-macro shim moved from `common/darktable.h`
+   The structural fix applied: the Windows legacy-macro shim moved from `darktable.h`
    to `common/macros.h`, so it sits at the bottom of the stack where every TU reaches it,
    instead of riding on the orchestrator that low-level code is supposed to stop including.
 
@@ -277,3 +277,328 @@ the linker level, not inferred from include counts.
 `common → develop` (95) is the larger and harder one: base-layer code reaching into
 pipeline and iop internals. That is genuine design work, not a relocation.
 
+---
+
+## 7. Next: hoist the GUI out of the backend
+
+Measured with `tools/symbol_coupling.py` on the current build. **94 distinct GUI symbols
+are reached from `common/` and `develop/`, across 23 backend files.**
+
+| edge | symbols |
+|---|---:|
+| `develop → gui` | 45 |
+| `develop → dtgtk` | 41 |
+| `common → gui` | 36 |
+| `common → bauhaus` | 12 |
+| `common → dtgtk` | 2 |
+
+Where the calls actually are:
+
+| file | GUI calls |
+|---|---:|
+| `develop/blend_gui.c` | 172 |
+| `develop/imageop.c` | 66 |
+| `common/lut_viewer.c` | 47 |
+| `darktable.c` | 25 |
+| `develop/imageop_gui.c` | 17 |
+| `develop/masks/masks_gui.c` | 13 |
+| `common/history_merge_gui.c` | 12 |
+| `common/import.c` | 12 |
+
+This splits into three very different jobs, and conflating them is what makes it look
+daunting:
+
+1. **Already split by filename, wrong directory.** `blend_gui.c`, `imageop_gui.c`,
+   `masks_gui.c`, `history_merge_gui.c` are GUI files sitting in backend directories —
+   214 of the calls. No splitting needed, only relocation. Simulated: moving the two
+   `common/` ones (`history_merge_gui`, `lut_viewer`) is **−5** violations.
+   `common/lut_viewer.c` is a GUI widget living in `common/` outright.
+
+   Caveat measured, not assumed: these files are not one-directional. `blend_gui.c` also
+   makes 308 backend calls in 5103 lines, so relocating it moves an edge rather than
+   removing it — it becomes `gui → develop`, which is only an improvement if the layer
+   model says so. Simulate each before moving.
+
+2. **Genuinely mixed, needs splitting.** `develop/imageop.c` makes 66 GUI calls inside
+   the module that also owns pipeline logic. This is the real work: separate the module
+   API from its widget plumbing.
+
+3. **Legitimate.** `darktable.c` is the orchestrator; initialising the GUI is its
+   job. Not a defect.
+
+The pattern to apply is the one that worked for the two solvers in `math/`: the backend
+should not *decide* to show UI. `choleski.h` called `dt_control_log()` on OOM when it
+already returned an error code the caller checked — the reporting belonged to the caller.
+Most of the 94 are likely to be that shape: a toast, a redraw request, or a widget
+update issued from code whose job is to compute and return.
+
+---
+
+## 8. The orchestrator lives at `src/`
+
+`darktable.c` and `darktable.h` moved out of `src/common/` to `src/`, beside `main.c`.
+
+They are the application root, not a common library: `darktable.h` declares the
+`darktable_t` struct that owns every subsystem, and `darktable.c` initialises them. Being
+filed under `common/` — the BOTTOM layer — inverted that relationship on paper, and made
+the tooling count the orchestrator's legitimate reach into `gui/`, `control/` and
+`develop/` as `common/` violating the layer order.
+
+The layer model gains `app` (9), above every module: nothing the orchestrator includes can
+be an inversion, because there is nothing above it. Layering violations 253 -> 247, and the
+six that disappeared were misclassifications rather than fixes.
+
+It also settles the spelling trap recorded in `CLAUDE.md`: while the header lived in
+`src/common/`, files in that directory could spell it `#include "darktable.h"` relative to
+themselves, which hid them from audits grepping for `darktable.h`. That spelling is
+now the canonical root-relative one.
+
+---
+
+## 9. Directory structure: one module, one job
+
+A round of restructuring, driven by the maintainer, on top of section 8. None of it
+changes behaviour; all of it changes what the directory tree asserts.
+
+| move | why |
+|---|---|
+| `dtgtk/` -> `gui/dtgtk/` | a widget toolkit is GUI; top-level only by history |
+| `bauhaus/` -> `gui/bauhaus.{c,h}` | two files do not earn a directory |
+| `common/{lut_viewer,import,history_merge_gui}` -> `gui/` | GUI by content: 69, 243 and 281 GTK tokens |
+| `{cli,cltest,cmstest,generate-cache,chart}` -> `apps/ansel-*` | separate programs, separate build targets |
+| `main.c` -> `apps/ansel/main.c` | the entry point joins the other entry points |
+| hardware/platform/memory code -> `system/` | see below |
+
+| metric | before | after |
+|---|---:|---:|
+| layering violations | 247 | 233 |
+| include cycles | 0 | 0 |
+| files in `common/` | 183 | 162 |
+
+### Three things measurement caught that reading would not have
+
+**`src/chart` was not a program.** Of its 13 files, exactly one compiled -- `chart/common.c`,
+pulled into the `channelmixerrgb` IOP. Moving the directory into `apps/` wholesale would
+have made a live IOP (layer 6) depend on an app (layer 10). What that file actually held
+was 103 lines of projective geometry, so it became `math/homography.{c,h}` and the IOP now
+depends on `math/` instead of on a dead tool. The other 11 files are still built by nothing.
+
+**`ppc64le/altivec.h` has zero include sites.** It is an include-PATH shim, activated by
+`include_directories(.../ppc64le)` in `src/CMakeLists.txt` on that arch, and works by
+`#include_next`. A move that only rewrote `#include` lines would have silently disabled it,
+on an architecture with no CI job and no local cross toolchain.
+
+**`FILE(GLOB)` hides mistakes.** The source lists are glob *patterns*, so an entry matching
+no file is dropped without a configure error. Six had accumulated (`dtgtk/culling.c`,
+`common/matrices.c`, ...). The corollary matters more than the cleanup: a path this kind of
+refactor gets wrong does not fail at configure time -- it drops out of the build and
+surfaces as an undefined reference at link, or not at all.
+
+### Known and deliberate
+
+* `system/` sits at layer 0 and has four upward includes into `common/`
+  (`dtpthread.h`, `macros.h`, `logging.h`). Pre-existing coupling that was invisible while
+  both ends lived in `common/`; the +1 in the count is visibility, not regression.
+* `common/history_actions.c` (604 lines, 17 GTK tokens) stayed put. It is genuinely mixed,
+  and wants splitting rather than relocating.
+* `system/simd.h` overlaps conceptually with `math/matrices.h` and `math/math.h` --
+  `dt_mat3x4_mul_vec4` is a matrix op living among load/store primitives, while the matrix
+  headers hand-roll intrinsics instead of using them. Unification is outstanding.
+
+---
+
+## 10. Backlog: subsystems still to be extracted from `common/`
+
+Maintainer's list, each entry verified against the tree rather than taken on trust. Ordered
+by how much of `common/` it removes.
+
+| # | proposed home | files | lines | status |
+|---|---|---|---:|---|
+| 1 | `src/metadata/` | tags, ratings, colorlabels, grouping, gpx, exif.cc, metadata, dng_opcode | 10091 | all present in `common/` |
+| 2 | `src/database/` | database, sqliteicu (+ the `DT_DEBUG_SQLITE3_*` macros in `common/debug.h`) | 5536 | all present |
+| 3 | `src/caches/` | cache (the core), image_cache, mipmap_cache | 3354 | core + 2 of 3; `develop/pixelpipe_cache.{c,h}` is the third and lives elsewhere |
+| 4 | `src/math/` | colormatrices.c, curve_tools (1D interpolation) | 1264 | present |
+| 5 | `src/system/` | resource_limits, dtpthread | 925 | present |
+| 6 | `src/views/` | cups_print — used only by the print view | 813 | 4 consumers, all print-related |
+| 7 | `src/pixel/` | `common/lut3d.{c,h}` (distinct from `iop/lut3d.c`) | 368 | present |
+
+Two that are analysis, not moves:
+
+* **`iop_order.{c,h}` and `iop_profile.{c,h}`** belong with `develop/`, but overlap
+  `colorspaces.{c,h}`. The overlap has to be resolved before either can move cleanly.
+* **`common/colormatrices.c`** is a third maths library, colliding with `system/simd.h` and
+  `math/matrices.h`. Same unresolved overlap noted in section 9.
+
+### Do NOT judge these by the layering counter
+
+Simulated with `--what-if` against a 224 baseline:
+
+```
+curve_tools + colormatrices -> math/      224 -> 224   (+0)
+resource_limits + dtpthread -> system/    224 -> 225   (+1)
+cups_print -> views/                      224 -> 225   (+1)
+common/lut3d -> pixel/                    224 -> 224   (+0)
+```
+
+None of them helps, and two make it marginally worse -- `system/` sits BELOW `common/`, so
+moving a file down there turns its existing `common/` includes into upward edges, exactly
+as happened when `system/` was created.
+
+That is not an argument against the moves. It means the layering metric has largely done its
+job (315 -> 224 over this series) and the remaining work is organisational legibility:
+`common/` should stop being the drawer everything shared gets put in. Judge these by what
+leaves `common/` -- roughly 22000 lines across the seven groups -- not by the counter.
+
+---
+
+## 11. Done: the redraw throttle moved to the history commit
+
+`widgets/gui_throttle.c` currently exists to serve one caller. `bauhaus.c` defers its
+`value-changed` emission so that scrolling a slider or combobox does not trigger a pipeline
+recompute per step. Every other widget that could want the same behaviour would have to
+reimplement it.
+
+It belongs at the **history-commit bottleneck** instead, where it serves every widget without
+any of them knowing it exists.
+
+### Confirmed enabler
+
+`dt_dev_add_history_item_ext()` **already reuses the last history entry for the same module**
+(see `add_new_pipe_node` at `dev_history.c:863` and the "history entry reused" log). Consecutive
+edits of one module therefore coalesce into a single undo step *today*. Widgets can commit on
+every step without spamming the undo stack — only the pipeline recompute needs throttling.
+
+### The design: a queue, processed in order
+
+Each `dt_dev_add_history_item_real()` call enqueues its resync request and returns. The queue
+drains in FIFO order on the throttle's schedule.
+
+**Do NOT merge queued requests.** An earlier draft of this plan proposed collapsing N pending
+requests into one that takes the union of their `add_new_pipe_node` / `has_forms` /
+`has_raster` flags. That is the wrong shape: masks, module enable/disable, the mask manager
+and ordinary parameter edits all commit history with different resync needs, and any merging
+rule is a place to silently drop one. Keep every request, process them in order, stay boring.
+
+### The hazard that must be handled deliberately
+
+`CLAUDE.md` documents that darkroom `leave()` must join the worker before tearing down pipe
+state, because `dev->exit` / `pipe->shutdown` do not preempt it. **A queued resync draining
+after `leave()` is exactly that bug** — it would touch freed `dev->iop` / `pipe->nodes` and
+crash somewhere unrelated, as Sentry issue 133807805 did. `leave()` needs an explicit
+flush-or-drop of the pending queue, written as part of this change rather than discovered
+afterwards.
+
+### What the first attempt got wrong
+
+The first implementation deferred **only the resync** and kept the commit synchronous,
+on the theory that the commit was cheap because `dt_dev_add_history_item_ext()` reuses the
+last entry for the same module. Tested, it failed on both counts:
+
+* **The GUI lagged behind the scroll.** The commit runs on the GUI thread, so blocking in
+  it once per scroll tick starves the widget's own `gtk_widget_queue_draw()`. The value the
+  user is scrolling could not repaint.
+* **The queue filled with transient values and hung.** Every intermediate step of a gesture
+  became a queued request. Nothing was merged, as required -- but every one of them still
+  ran a full commit.
+
+The measurement that was right: the resync calls themselves are only an OR onto
+`pipe->changed` plus an atomic store, and `dt_dev_write_history()` already coalesces. The
+measurement that was **missing**: everything else in a commit -- an undo record, the
+`history_mutex` writer lock, a full history rehash, an image-cache write, a masks-list
+rebuild -- is not cheap, and none of it coalesces. Deferring the resync alone deferred the
+one part that was already free.
+
+### The design that followed
+
+Defer the **whole** commit, with two rules that must not be confused:
+
+1. **Nothing is merged.** As before, and for the same reason.
+2. **A repeat of the pending tail is not a new request.** If the tail of the queue is
+   already "commit this module, this enable state", asking for exactly that again adds
+   nothing: the queued request reads `module->params` when it drains, so it necessarily
+   commits the newest value. Suppression is against the **tail only** -- never a search of
+   the queue, never a combination of two different requests -- so ordering is exact. This is
+   what stops a 300-tick scroll from queueing 300 commits. A transient intermediate value of
+   an ongoing gesture is not a history event, which is the thing the old per-widget throttle
+   knew and the first attempt threw away.
+
+`dt_dev_add_history_item_ext()` is not throttled and never was, so everything that must land
+before the next statement (bulk history loads, style application, image duplication) is
+unaffected -- it already goes through `_ext`.
+
+`dt_dev_history_flush_pending_commits()` **runs** the pending requests at darkroom `leave()`,
+before any teardown: a pending request is the user's last edit, and dropping it would lose
+the value they left a slider on. `dt_dev_history_drop_pending_commits()` is the last-resort
+counterpart for a `dev` already too far gone.
+
+### Scope this actually reached
+
+Bigger than "bauhaus": the same throttle-my-own-commit dance existed in **nine IOP modules**
+with curve or graph editors, wrapping a one-line helper (`dt_iop_throttled_history_update`,
+now deleted) plus matching cancels in `gui_update()`/`gui_cleanup()`. All gone. Separating
+history throttling from GUI throttling in `colorequal` exposed a real bug: `gui_cleanup()`
+cancelled the history task and not the `&g->viewer_lut` one, so a queued LUT rebuild could
+fire after the `gui_data` it reads was freed.
+
+`gui_throttle.{c,h}` then had no consumer under `widgets/` at all, and half of it is a
+rolling average of pixelpipe render times -- application state that directory forbids. It
+moved to `develop/`.
+
+### Verification this still needs
+
+Not a compile, and not the metrics: realtime slider drags, combobox scrolling, mask edits,
+and darkroom exit under load.
+
+### Left deliberately alone
+
+`views/darkroom.c`'s mask-edit throttle (`_delayed_history_commit` on `dev`). It does not
+merely defer a commit: it defers `dt_dev_masks_update_hash()`, a scan over every form, and
+only commits if that scan reports a change. Removing it would run that scan on every
+mouse-motion event of a mask drag. Different mechanism, different cost, no request behind
+touching it.
+
+
+## 12. The last GUI calls in `common/`
+
+Two of the three remaining files are done (PR after #1106):
+
+* **`history_actions.c`** — a *relocation*. Three of its functions asked the user something
+  (`dt_history_copy_parts`, `dt_history_paste_parts_prepare`, `delete_history_callback`) and
+  were the only reason it included `gui/hist_dialog.h`, `gui/gtk.h` and `gui/actions/menu.h`.
+  Both callers already live above this layer, so no handler slot was needed.
+* **`folder_survey.c`** — one relocation and one *inversion*. The resume-at-startup prompt is
+  GUI orchestration end to end and moved whole; the pending-import prompt is interleaved with
+  private session state under the survey lock, so it goes through a handler registered from
+  `dt_gui_gtk_init()`, next to the film and collection ones.
+
+### `common/database.c` — done
+
+Three dialogs (~120 lines, 88 GTK tokens), all inside `dt_database_init()`: "database is
+read-only", and two "error opening database" variants offering to restore a snapshot or
+delete and start over.
+
+They were left out of the `dt_database_take_error()` inversion in #1103 for a concrete
+reason: that pattern has the backend *record* an error for the caller to report afterwards,
+and these are **interactive mid-init** — the answer decides whether init aborts, restores or
+starts over, so there is no "afterwards" to report to. The backend therefore states the
+question and takes back a value: `dt_database_prompt_t` in, `dt_database_response_t` out.
+
+Registration cannot go where the film/collection/folder-survey handlers go:
+
+```
+darktable.c:1244   gtk_init()              <- GTK is up
+darktable.c:1259   dt_database_init()      <- the prompts happen here
+darktable.c:1402   dt_gui_gtk_init()       <- too late to register from
+```
+
+It goes in `darktable.c` between the first two, guarded by `init_gui` — legitimate, since
+that is the only thing which knows this early whether there will be anybody to ask.
+
+With no handler every prompt answers `CLOSE`. That is not a fallback that guesses: a corrupt
+database is not deleted or restored on the strength of a question nobody was asked. It also
+closes a latent headless bug — these dialogs had **no `has_gui` guard at all**, so a run
+without a GUI reached `gtk_dialog_new_with_buttons()` on a GTK that `ansel-cli` never
+initialises. Registration is the guard now.
+
+`common/database.c` is down to zero GTK tokens. Its remaining `gui/legacy_presets.h` include
+is a different problem (preset migration, not a dialog) and is left for its own pass.

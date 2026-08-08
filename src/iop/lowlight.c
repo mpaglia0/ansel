@@ -46,13 +46,14 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "widgets/widget_settings.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
 #include "develop/develop.h"
@@ -252,7 +253,6 @@ void gui_update(struct dt_iop_module_t *self)
   dt_iop_lowlight_gui_data_t *g = (dt_iop_lowlight_gui_data_t *)self->gui_data;
   dt_iop_lowlight_params_t *p = (dt_iop_lowlight_params_t *)self->params;
   dt_bauhaus_slider_set(g->scale_blueness, p->blueness);
-  dt_gui_throttle_cancel(self);
   gtk_widget_queue_draw(self->widget);
 }
 
@@ -669,7 +669,7 @@ static gboolean lowlight_motion_notify(GtkWidget *widget, GdkEventMotion *event,
       dt_iop_lowlight_get_params(p, c->mouse_x, c->mouse_y + c->mouse_pick, c->mouse_radius);
     }
     gtk_widget_queue_draw(widget);
-    dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+    dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   }
   else if(event->y > height)
   {
@@ -791,7 +791,7 @@ void gui_init(struct dt_iop_module_t *self)
                                                   "plugins/darkroom/lowlight/graphheight", 280, 100),
                      FALSE, FALSE, 0);
 
-  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   g_signal_connect(G_OBJECT(c->area), "draw", G_CALLBACK(lowlight_draw), self);
@@ -810,7 +810,6 @@ void gui_cleanup(struct dt_iop_module_t *self)
 {
   dt_iop_lowlight_gui_data_t *c = (dt_iop_lowlight_gui_data_t *)self->gui_data;
   dt_draw_curve_destroy(c->transition_curve);
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

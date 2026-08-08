@@ -43,13 +43,14 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
+#include "widgets/widget_settings.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
+#include "widgets/bauhaus.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/colorspaces.h"
@@ -57,7 +58,7 @@
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
-#include "dtgtk/drawingarea.h"
+#include "widgets/drawingarea.h"
 
 #include "gui/gtk.h"
 #include "gui/presets.h"
@@ -294,7 +295,7 @@ void gui_init(struct dt_iop_module_t *self)
                                                      "bright means highlights, dark means shadows. "
                                                      "use mouse wheel to change saturation."));
 
-  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   gtk_widget_set_can_focus(GTK_WIDGET(g->area), TRUE);

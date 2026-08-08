@@ -481,7 +481,7 @@ static inline int dt_pthread_rwlock_unlock(dt_pthread_rwlock_t *rwlock)
 // before declaring dt_debug_thread_t/darktable_t/dt_print) for dt_print() to be callable
 // directly from the inline functions below -- so the actual logging is delegated to these two
 // non-inline helpers, implemented in dtpthread.c (which, being a .c file and not part of the
-// header cycle, can include common/darktable.h and call dt_print(DT_DEBUG_HISTORY, ...) there).
+// header cycle, can include darktable.h and call dt_print(DT_DEBUG_HISTORY, ...) there).
 // This makes the traces respect `-d history` like every other diagnostic instead of always
 // firing via a raw fprintf. Only ever called for locks opted in via dt_pthread_rwlock_set_name();
 // zero-cost (one pointer compare) for every other lock. Temporary, for
@@ -557,6 +557,7 @@ static inline int dt_pthread_rwlock_wrlock(dt_pthread_rwlock_t *rwlock)
     if(!res)
     {
       __sync_lock_test_and_set(&(rwlock->writer), pthread_self());
+      rwlock->writer_depth = 1;
       rwlock->last_holder_tid = (long)pthread_self();
       rwlock->last_holder_was_writer = TRUE;
     }

@@ -56,7 +56,7 @@
 #include "config.h"
 #endif
 
-#include "common/atomic.h"
+#include "system/atomic.h"
 #include "common/database.h"
 #include "common/datetime.h"
 #include "common/file_location.h"
@@ -2645,100 +2645,53 @@ static void _sanitize_db(dt_database_t *db)
 #undef TRY_PREPARE
 #undef FINALIZE
 
-gboolean dt_database_show_error(const dt_database_t *db)
+void dt_database_take_error(dt_database_t *db, dt_database_error_t *error)
 {
-  gboolean error = TRUE;
+  if(IS_NULL_PTR(db) || IS_NULL_PTR(error)) return;
 
-  if(!db->lock_acquired)
+  // Ownership of the strings moves to the caller; the database keeps no pending error.
+  error->lock_acquired = db->lock_acquired;
+  error->other_pid = db->error_other_pid;
+  error->message = db->error_message;
+  error->dbfilename = db->error_dbfilename;
+
+  db->error_other_pid = 0;
+  db->error_message = NULL;
+  db->error_dbfilename = NULL;
+}
+
+void dt_database_error_free(dt_database_error_t *error)
+{
+  if(IS_NULL_PTR(error)) return;
+  dt_free(error->message);
+  dt_free(error->dbfilename);
+  error->message = NULL;
+  error->dbfilename = NULL;
+}
+
+int dt_database_delete_lock_files(const char *dbfilename)
+{
+  if(IS_NULL_PTR(dbfilename)) return -1;
+
+  char lck_pathname[1024];
+  snprintf(lck_pathname, sizeof(lck_pathname), "%s.lock", dbfilename);
+  char *lck_dirname = g_strdup(lck_pathname);
+  char *slash_pos = g_strrstr(lck_dirname, "/");
+  if(!IS_NULL_PTR(slash_pos)) *slash_pos = '\0';
+
+  int status = 0;
+  const char *names[] = { "/data.db.lock", "/library.db.lock" };
+  for(size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
   {
-    char lck_pathname[1024];
-    snprintf(lck_pathname, sizeof(lck_pathname), "%s.lock", db->error_dbfilename);
-    char *lck_dirname = g_strdup(lck_pathname);
-    char *slash_pos = g_strrstr(lck_dirname, "/");
-    if(!IS_NULL_PTR(slash_pos)) *slash_pos = '\0';
-    // clang-format off
-    char *label_text = g_markup_printf_escaped(
-        _("\n"
-          "  Sorry, Ansel could not be started because the database is locked.\n"
-          "\n"
-          "  How to solve this problem?\n"
-          "\n"
-          "  1 - If another Ansel instance is already running, \n"
-          "      click \"Quit\" and either use that instance or close it before trying to start Ansel again. \n"
-          "      (process ID <i><b>%d</b></i> created the database lock files)\n"
-          "\n"
-          "  2 - If you cannot find any running instance of Ansel, try restarting your session or your computer. \n"
-          "      This will close all running programs and should release any database locks. \n"
-          "\n"
-            "  3 - If you have already tried the above steps, or you are certain that no other instances of Ansel are running, \n"
-            "      this likely means the previous instance ended unexpectedly. \n"
-            "      Click the \"Delete database lock files\" button to remove <i>data.db.lock</i> and <i>library.db.lock</i>. \n"
-            "      Ansel will then attempt to load the database again. \n"
-          "\n\n"
-          "      <i><u>Caution!</u> Do not delete these files without first undertaking the above checks, \n"
-          "      otherwise you risk generating serious inconsistencies in your database.</i>\n"),
-      db->error_other_pid);
-    // clang-format on
-
-    const int choice = dt_gui_show_standalone_three_choice_dialog(_("Error starting Ansel"), label_text,
-                                        _("Quit"), _("Retry"), _("Delete database lock files and try again"));
-
-    if(choice == 1)
-    {
-      // Just try to acquire the lock again: useful once the other instance that held it has
-      // since closed. dt_database_show_error() returning FALSE makes the caller's init loop
-      // (common/darktable.c) re-run dt_database_init() without touching any lock file.
-      error = FALSE;
-    }
-    else if(choice == 2)
-    {
-      gboolean really_delete_lockfiles =
-        dt_gui_show_standalone_yes_no_dialog
-        (_("Confirmation"),
-         _("\n<u>Caution!</u> Are you sure you want to delete the database lock files?\n"
-          "This action should only be performed if you are certain no other Ansel instances are running.\n"), _("Quit"), _("Yes"));
-      if(really_delete_lockfiles)
-      {
-        int status = 0;
-
-        char *lck_filename = g_strconcat(lck_dirname, "/data.db.lock", NULL);
-        if(g_access(lck_filename, F_OK) != -1)
-          status += remove(lck_filename);
-
-        lck_filename = g_strconcat(lck_dirname, "/library.db.lock", NULL);
-        if(g_access(lck_filename, F_OK) != -1)
-          status += remove(lck_filename);
-        dt_free(lck_filename);
-
-        if(status==0)
-        {
-          dt_gui_show_standalone_yes_no_dialog(_("Done"),
-                                        _("\nThe database lock files have been deleted successfully.\n"),
-                                        _("Continue"), NULL);
-          error = FALSE;
-        }
-
-        else
-          dt_gui_show_standalone_yes_no_dialog
-            (_("Error"), g_markup_printf_escaped(
-              _("\nAt least one lock file could not be removed.\n"
-                "You may try to manually delete the files <i>data.db.lock</i> and <i>library.db.lock</i>\n"
-                "in folder <a href=\"file:///%s\">%s</a>.\n"), lck_dirname, lck_dirname),
-             _("Quit"), NULL);
-      }
-    }
-
-    dt_free(lck_dirname);
-    dt_free(label_text);
+    char *lck_filename = g_strconcat(lck_dirname, names[i], NULL);
+    if(g_access(lck_filename, F_OK) != -1) status += remove(lck_filename);
+    dt_free(lck_filename);
   }
 
-  dt_free(db->error_message);
-  dt_free(db->error_dbfilename);
-  ((dt_database_t *)db)->error_other_pid = 0;
-  ((dt_database_t *)db)->error_message = NULL;
-  ((dt_database_t *)db)->error_dbfilename = NULL;
-  return error;
+  dt_free(lck_dirname);
+  return status;
 }
+
 
 static gboolean pid_is_alive(int pid)
 {
@@ -3009,6 +2962,27 @@ gchar* _get_pragma_string_val(sqlite3 *db, const char* pragma)
   return val;
 }
 
+static dt_database_prompt_handler_t _prompt_handler = NULL;
+
+void dt_database_set_prompt_handler(dt_database_prompt_handler_t handler)
+{
+  _prompt_handler = handler;
+}
+
+/* Ask, or answer CLOSE if there is nobody to ask. Deliberately not a fallback that guesses:
+ * deleting or restoring a database is not something to do on nobody's authority. */
+static dt_database_response_t _ask_user(const dt_database_prompt_t prompt, const char *dbfilename,
+                                        const char *quick_check, const gboolean snapshot_available)
+{
+  if(IS_NULL_PTR(_prompt_handler))
+  {
+    fprintf(stderr, "[init] cannot ask the user about `%s': no prompt handler registered\n", dbfilename);
+    return DT_DATABASE_RESPONSE_CLOSE;
+  }
+
+  return _prompt_handler(prompt, dbfilename, quick_check, snapshot_available);
+}
+
 dt_database_t *dt_database_init(const char *alternative, const gboolean load_data, const gboolean has_gui)
 {
   /*  set the threading mode to Serialized */
@@ -3130,31 +3104,10 @@ start:
   {
     fprintf(stderr, "%s database is read only. Abort...\n", db->dbfilename_library);
 
-    GtkWidget *dialog;
-    GtkDialogFlags dflags = GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT;
-
-    dialog = gtk_dialog_new_with_buttons(_("Ansel - Database is read-only"),
-                                           NULL, dflags,
-                                           _("Close Ansel"), GTK_RESPONSE_CLOSE, NULL);
-    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CLOSE);
-    char *label_options
-        = g_strdup_printf(_("<span weight='bold'>Ansel library database is read-only</span>\n\n"
-                            "This happens if you don't have permissions to write on the filesystem\n"
-                            "or if you have restored a write-protected backup snapshot.\n\n"
-                            "Please change the filesystem access permissions for:\n\n"
-                            "\t<span style='italic'>%s</span>"),
-                          db->dbfilename_library);
-
-    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG (dialog));
-    GtkWidget *label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(label), label_options);
-    gtk_container_add(GTK_CONTAINER (content_area), label);
-    gtk_widget_show_all(content_area);
-    gtk_dialog_run(GTK_DIALOG(dialog));
-    gtk_widget_destroy(dialog);
+    // Informational: there is nothing the user can decide here, only be told.
+    _ask_user(DT_DATABASE_PROMPT_READONLY, db->dbfilename_library, NULL, FALSE);
     dt_database_destroy(db);
     dt_free(dbname);
-    dt_free(label_options);
     db = NULL;
     return NULL;
   }
@@ -3256,75 +3209,18 @@ start:
 
       gchar *data_snap = dt_database_get_most_recent_snap(dbfilename_data);
 
-      GtkWidget *dialog;
-      GtkDialogFlags dflags = GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT;
-
-      const char* label_options = NULL;
-
-      if(data_snap)
-      {
-        dialog = gtk_dialog_new_with_buttons(_("ansel - error opening database"),
-                                            NULL,
-                                            dflags,
-                                            _("close Ansel"),
-                                            GTK_RESPONSE_CLOSE,
-                                            _("attempt restore"),
-                                            GTK_RESPONSE_ACCEPT,
-                                            _("delete database"),
-                                            GTK_RESPONSE_REJECT,
-                                            NULL);
-        gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
-        label_options = _("do you want to close Ansel now to manually restore\n"
-                          "the database from a backup, attempt an automatic restore\n"
-                          "from the most recent snapshot or delete the corrupted database\n"
-                          "and start with a new one?");
-      }
-      else
-      {
-        dialog = gtk_dialog_new_with_buttons(_("ansel - error opening database"),
-                                            NULL,
-                                            dflags,
-                                            _("close Ansel"),
-                                            GTK_RESPONSE_CLOSE,
-                                            _("delete database"),
-                                            GTK_RESPONSE_REJECT,
-                                            NULL);
-        gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CLOSE);
-        label_options = _("do you want to close Ansel now to manually restore\n"
-                          "the database from a backup or delete the corrupted database\n"
-                          "and start with a new one?");
-      }
-
-
-
-      char *label_text = g_markup_printf_escaped(_("an error has occurred while trying to open the database from\n"
-                                                   "\n"
-                                                   "<span style='italic'>%s</span>\n"
-                                                   "\n"
-                                                   "it seems that the database is corrupted.\n"
-                                                   "%s"
-                                                   "%s"),
-                                                 dbfilename_data, quick_check_text, label_options);
+      // The user's answer decides whether init aborts, restores or starts fresh, so it has to
+      // come back as a value. Everything about how it is obtained -- and whether anybody can be
+      // asked at all -- belongs to whoever registered the handler.
+      const dt_database_response_t resp
+          = _ask_user(DT_DATABASE_PROMPT_CORRUPTED, dbfilename_data, quick_check_text, data_snap != NULL);
 
       dt_free(quick_check_text);
-      dt_free(data_status);
-
-      GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG (dialog));
-      GtkWidget *label = gtk_label_new(NULL);
-      gtk_label_set_markup(GTK_LABEL(label), label_text);
-      dt_free(label_text);
-      gtk_container_add(GTK_CONTAINER (content_area), label);
-
-      gtk_widget_show_all(content_area);
-
-      const int resp = gtk_dialog_run(GTK_DIALOG(dialog));
-
-      gtk_widget_destroy(dialog);
 
       dt_database_destroy(db);
       db = NULL;
 
-      if(resp != GTK_RESPONSE_ACCEPT && resp != GTK_RESPONSE_REJECT)
+      if(resp != DT_DATABASE_RESPONSE_RESTORE && resp != DT_DATABASE_RESPONSE_DELETE)
       {
         fprintf(stderr, "[init] database `%s' is corrupt and can't be opened! either replace it from a backup or "
         "delete the file so that darktable can create a new one the next time. aborting\n", dbfilename_data);
@@ -3341,7 +3237,7 @@ start:
       else
         fprintf(stderr, " ... failed\n");
 
-      if(resp == GTK_RESPONSE_ACCEPT && data_snap)
+      if(resp == DT_DATABASE_RESPONSE_RESTORE && data_snap)
       {
         fprintf(stderr, "[init] restoring `%s' from `%s'...", dbfilename_data, data_snap);
         GError *gerror = NULL;
@@ -3434,73 +3330,18 @@ start:
 
     gchar *data_snap = dt_database_get_most_recent_snap(dbfilename_library);
 
-    GtkWidget *dialog;
-    GtkDialogFlags dflags = GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT;
-
-    const char* label_options = NULL;
-
-    if(data_snap)
-    {
-      dialog = gtk_dialog_new_with_buttons(_("ansel - error opening database"),
-                                          NULL,
-                                          dflags,
-                                          _("close Ansel"),
-                                          GTK_RESPONSE_CLOSE,
-                                          _("attempt restore"),
-                                          GTK_RESPONSE_ACCEPT,
-                                          _("delete database"),
-                                          GTK_RESPONSE_REJECT,
-                                          NULL);
-      gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
-      label_options = _("do you want to close Ansel now to manually restore\n"
-                        "the database from a backup, attempt an automatic restore\n"
-                        "from the most recent snapshot or delete the corrupted database\n"
-                        "and start with a new one?");
-    }
-    else
-    {
-      dialog = gtk_dialog_new_with_buttons(_("ansel - error opening database"),
-                                          NULL,
-                                          dflags,
-                                          _("close Ansel"),
-                                          GTK_RESPONSE_CLOSE,
-                                          _("delete database"),
-                                          GTK_RESPONSE_REJECT,
-                                          NULL);
-      gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CLOSE);
-      label_options = _("do you want to close Ansel now to manually restore\n"
-                        "the database from a backup or delete the corrupted database\n"
-                        "and start with a new one?");
-    }
-
-    char *label_text = g_markup_printf_escaped(_("an error has occurred while trying to open the database from\n"
-                                                 "\n"
-                                                 "<span style='italic'>%s</span>\n"
-                                                 "\n"
-                                                 "it seems that the database is corrupted.\n"
-                                                 "%s"
-                                                 "%s"),
-                                               dbfilename_data, quick_check_text, label_options);
+    // The user's answer decides whether init aborts, restores or starts fresh, so it has to
+    // come back as a value. Everything about how it is obtained -- and whether anybody can be
+    // asked at all -- belongs to whoever registered the handler.
+    const dt_database_response_t resp
+        = _ask_user(DT_DATABASE_PROMPT_CORRUPTED, dbfilename_library, quick_check_text, data_snap != NULL);
 
     dt_free(quick_check_text);
-    dt_free(libdb_status);
-
-    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG (dialog));
-    GtkWidget *label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(label), label_text);
-    dt_free(label_text);
-    gtk_container_add(GTK_CONTAINER (content_area), label);
-
-    gtk_widget_show_all(content_area);
-
-    const int resp = gtk_dialog_run(GTK_DIALOG(dialog));
-
-    gtk_widget_destroy(dialog);
 
     dt_database_destroy(db);
     db = NULL;
 
-    if(resp != GTK_RESPONSE_ACCEPT && resp != GTK_RESPONSE_REJECT)
+    if(resp != DT_DATABASE_RESPONSE_RESTORE && resp != DT_DATABASE_RESPONSE_DELETE)
     {
       fprintf(stderr, "[init] database `%s' is corrupt and can't be opened! either replace it from a backup or "
         "delete the file so that darktable can create a new one the next time. aborting\n", dbfilename_library);
@@ -3517,7 +3358,7 @@ start:
     else
       fprintf(stderr, " ... failed\n");
 
-    if(resp == GTK_RESPONSE_ACCEPT && data_snap)
+    if(resp == DT_DATABASE_RESPONSE_RESTORE && data_snap)
     {
       fprintf(stderr, "[init] restoring `%s' from `%s'...", dbfilename_library, data_snap);
       GError *gerror = NULL;

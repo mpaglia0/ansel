@@ -61,20 +61,21 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "develop/pixelpipe_cache_alloc.h"
-#include "gui/gdkkeys.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "widgets/widget_settings.h"
+#include "widgets/gdkkeys.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
 #include "common/colorspaces_inline_conversions.h"
-#include "common/math.h"
-#include "common/rgb_norms.h"
+#include "math/math.h"
+#include "pixel/rgb_norms.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
@@ -964,7 +965,6 @@ void gui_update(struct dt_iop_module_t *self)
   gtk_widget_set_visible(g->exposure_step, p->exposure_fusion != 0);
   gtk_widget_set_visible(g->exposure_bias, p->exposure_fusion != 0);
 
-  dt_gui_throttle_cancel(self);
   // gui curve is read directly from params during expose event.
   gtk_widget_queue_draw(self->widget);
 }
@@ -1447,7 +1447,7 @@ static gboolean _move_point_internal(dt_iop_module_t *self, GtkWidget *widget, f
   dt_iop_basecurve_sanity_check(self, widget);
 
   gtk_widget_queue_draw(widget);
-  dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+  dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   return TRUE;
 }
 
@@ -1592,7 +1592,7 @@ void gui_init(struct dt_iop_module_t *self)
   dt_bauhaus_widget_set_label(c->logbase, N_("scale for graph"));
   gtk_box_pack_start(GTK_BOX(self->widget), c->logbase , TRUE, TRUE, 0);  g_signal_connect(G_OBJECT(c->logbase), "value-changed", G_CALLBACK(logbase_callback), self);
 
-  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   gtk_widget_set_can_focus(GTK_WIDGET(c->area), TRUE);
@@ -1610,7 +1610,6 @@ void gui_cleanup(struct dt_iop_module_t *self)
 {
   dt_iop_basecurve_gui_data_t *c = (dt_iop_basecurve_gui_data_t *)self->gui_data;
   dt_draw_curve_destroy(c->minmax_curve);
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

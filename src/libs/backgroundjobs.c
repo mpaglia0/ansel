@@ -32,15 +32,15 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/atomic.h"
+#include "system/atomic.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/dtpthread.h"
 #include "control/control.h"
 #include "control/progress.h"
 #include "develop/develop.h"
-#include "dtgtk/button.h"
+#include "widgets/button.h"
 #include "gui/draw.h"
 #include "gui/gtk.h"
 #include "libs/lib.h"

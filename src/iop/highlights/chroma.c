@@ -19,10 +19,10 @@
 // Anisotropic (divergence-form) chrominance-coherence stage (CPU + OpenCL). (implementation; see chroma.h for the
 // public API.)
 
-#include "common/openmp.h"
-#include "common/simd.h"
-#include "common/target_clones.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "system/openmp.h"
+#include "system/simd.h"
+#include "system/target_clones.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "develop/imageop.h"
 #include "iop/highlights/chroma.h"
 #include "iop/highlights/pde.h"
@@ -303,7 +303,7 @@ int _aniso_div_solve(float *const restrict ratios, const float *const restrict v
 
     if(success)
     {
-      _sp_chol_t *factor = _sp_chol_factor(n_unknowns, matrix_col_ptr, matrix_row_index, matrix_values, pipe);
+      _sp_chol_t *factor = _sp_chol_factor(n_unknowns, matrix_col_ptr, matrix_row_index, matrix_values, pipe->type);
       if(factor)
       {
         for(int c = 0; c < 3; c++)

@@ -56,9 +56,9 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/debug.h"
 #include "common/presets.h"
 #include "control/control.h"

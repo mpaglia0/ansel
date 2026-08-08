@@ -54,31 +54,33 @@
 #include <stdint.h>
 #include <inttypes.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
+#include "widgets/resize_handle.h"
+#include "widgets/widget_settings.h"
 #include "common/color_picker.h"
 #include "common/color_vocabulary.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "common/histogram.h"
 #include "common/image.h"
-#include "common/imageio.h"
+#include "imageio/imageio_core.h"
 #include "common/iop_profile.h"
 #include "common/imagebuf.h"
 #include "common/image_cache.h"
 #include "common/logging.h"
 #include "common/macros.h"
-#include "common/math.h"
-#include "common/mem_alloc.h"
+#include "math/math.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
-#include "common/openmp.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/simd.h"
 #include "common/times.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "control/signal.h"
 #include "develop/dev_pixelpipe.h"
 #include "develop/develop.h"
 #include "develop/pixelpipe_cache.h"
-#include "dtgtk/button.h"
+#include "widgets/button.h"
 #include "gui/color_picker_proxy.h"
 #include "gui/draw.h"
 #include "gui/gtk.h"
@@ -3014,7 +3016,7 @@ void gui_init(dt_lib_module_t *self)
 
   self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_GUI_BOX_SPACING);
   d->scope_draw = gtk_drawing_area_new();
-  gtk_widget_add_events(GTK_WIDGET(d->scope_draw), dt_gui_get_global()->scroll_mask);
+  gtk_widget_add_events(GTK_WIDGET(d->scope_draw), dt_widget_scroll_mask());
   d->scope_height = dt_conf_key_exists(DT_LIB_HISTOGRAM_SCOPE_HEIGHT_CONF)
       ? dt_conf_get_int(DT_LIB_HISTOGRAM_SCOPE_HEIGHT_CONF)
       : DT_PIXEL_APPLY_DPI(DT_LIB_HISTOGRAM_SCOPE_DEFAULT_HEIGHT);
@@ -3044,7 +3046,7 @@ void gui_init(dt_lib_module_t *self)
    * Handle to resize the scope vertically. Drag the handle up or down to adjust the height of the scope display.
    */
 
-  d->scope_resize_handle = dt_bauhaus_resize_handle_new(GTK_ORIENTATION_VERTICAL, FALSE,
+  d->scope_resize_handle = dtgtk_resize_handle_new(GTK_ORIENTATION_VERTICAL, FALSE,
                                                         _("Drag to resize the scope vertically"),
                                                         _scope_resize_handle_get_size,
                                                         _scope_resize_handle_resize, d);

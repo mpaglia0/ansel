@@ -24,7 +24,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/database.h"
 #include "common/debug.h"
@@ -34,12 +34,12 @@
 #include "common/module_versioning.h"
 #include "control/signal.h"
 #include "develop/develop.h"
-#include "develop/format.h"
+#include "pixel/format.h"
 #include "develop/imageop.h"
 #include "develop/pixelpipe_hb.h"
-#include "dtgtk/button.h"
-#include "dtgtk/paint.h"
-#include "dtgtk/togglebutton.h"
+#include "widgets/button.h"
+#include "widgets/paint.h"
+#include "widgets/togglebutton.h"
 #include "gui/gtk.h"
 #include "gui/presets.h"
 #include "libs/lib.h"

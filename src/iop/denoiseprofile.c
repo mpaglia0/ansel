@@ -55,22 +55,23 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "develop/pixelpipe_cache_alloc.h"
-#include "control/conf.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include <json-glib/json-glib.h>
-#include "common/eaw.h"
+#include "pixel/eaw.h"
 #include "common/imagebuf.h"
-#include "common/nlmeans_core.h"
+#include "pixel/nlmeans_core.h"
 #include "common/noiseprofiles.h"
 #include "common/opencl.h"
 #include "develop/blend.h"
@@ -3626,7 +3627,7 @@ void gui_init(dt_iop_module_t *self)
 
   gtk_widget_add_events(GTK_WIDGET(g->area), GDK_POINTER_MOTION_MASK
                                                  | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
-                                                 | GDK_LEAVE_NOTIFY_MASK | dt_gui_get_global()->scroll_mask);
+                                                 | GDK_LEAVE_NOTIFY_MASK | dt_widget_scroll_mask());
   g_signal_connect(G_OBJECT(g->area), "draw", G_CALLBACK(denoiseprofile_draw), self);
   g_signal_connect(G_OBJECT(g->area), "button-press-event", G_CALLBACK(denoiseprofile_button_press), self);
   g_signal_connect(G_OBJECT(g->area), "button-release-event", G_CALLBACK(denoiseprofile_button_release), self);

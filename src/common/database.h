@@ -54,8 +54,78 @@ sqlite3 *dt_database_get_sqlite3_global(void);
 const gchar *dt_database_get_path(const struct dt_database_t *db);
 /** test if database was already locked by another instance */
 gboolean dt_database_get_lock_acquired(const struct dt_database_t *db);
-/** show an error popup. this has to be postponed until after we tried using dbus to reach another instance */
-gboolean dt_database_show_error(const struct dt_database_t *db);
+/* Why the database would not open, handed to whoever can report it.
+ *
+ * Reporting used to live here as dt_database_show_error(), a stack of modal dialogs inside
+ * a SQL file. The backend now only says what went wrong; the dialogs, and the decision to
+ * retry or delete lock files, are gui/common/database_gui.c's business. */
+typedef struct dt_database_error_t
+{
+  gboolean lock_acquired; /**< TRUE when the database opened fine and there is nothing to report */
+  int other_pid;          /**< the process that holds the lock, 0 if unknown */
+  char *message;          /**< owned by the caller after the take; free with dt_database_error_free() */
+  char *dbfilename;       /**< owned by the caller after the take */
+} dt_database_error_t;
+
+/** Move the pending error out of `db` into `error`, clearing it on the database.
+ *  Consumes it: a second call reports no error. */
+void dt_database_take_error(struct dt_database_t *db, dt_database_error_t *error);
+
+/** Release the strings owned by `error`. */
+void dt_database_error_free(dt_database_error_t *error);
+
+/* Questions dt_database_init() must ask before it can continue.
+ *
+ * These are NOT the dt_database_error_t path below. That one records what went wrong for
+ * whoever can report it afterwards; these three happen mid-init and the answer decides
+ * whether init aborts, restores from a snapshot, or starts over -- there is no "afterwards"
+ * to report to. So the backend states the question and takes back a value, and every trace
+ * of how it is put to the user lives in gui/common/database_gui.c.
+ */
+typedef enum dt_database_prompt_t
+{
+  /** The library database cannot be written to. Informational: nothing to decide. */
+  DT_DATABASE_PROMPT_READONLY = 0,
+  /** The database is corrupt. Offer to close, restore a snapshot, or delete and start over. */
+  DT_DATABASE_PROMPT_CORRUPTED
+} dt_database_prompt_t;
+
+typedef enum dt_database_response_t
+{
+  /** Give up and abort startup. Also what a caller with no handler gets. */
+  DT_DATABASE_RESPONSE_CLOSE = 0,
+  /** Delete the corrupt file and restore the most recent snapshot over it. */
+  DT_DATABASE_RESPONSE_RESTORE,
+  /** Delete the corrupt file and start with a fresh database. */
+  DT_DATABASE_RESPONSE_DELETE
+} dt_database_response_t;
+
+/** Put @p prompt to the user and return their answer.
+ *
+ *  @param dbfilename          the database file the question is about.
+ *  @param quick_check         sqlite's quick_check output, or NULL. Never NULL-terminated markup:
+ *                             the handler escapes it, since only the handler knows the format.
+ *  @param snapshot_available  TRUE when a snapshot exists, i.e. RESTORE is worth offering. */
+typedef dt_database_response_t (*dt_database_prompt_handler_t)(dt_database_prompt_t prompt,
+                                                               const char *dbfilename,
+                                                               const char *quick_check,
+                                                               gboolean snapshot_available);
+
+/** Install the handler dt_database_init() asks through. NULL removes it.
+ *
+ *  Must be registered BEFORE dt_database_init() runs -- which is before dt_gui_gtk_init(),
+ *  so this one cannot go where the film/collection/folder-survey handlers go. darktable.c
+ *  registers it, being the only thing that knows this early whether there will be a GUI.
+ *
+ *  With no handler, every prompt answers CLOSE: a corrupt database is not deleted or
+ *  restored on the strength of a question nobody was asked. That is also what makes a
+ *  headless run safe -- these dialogs used to be built unconditionally, with no has_gui
+ *  guard, on a GTK that ansel-cli never initialises. */
+void dt_database_set_prompt_handler(dt_database_prompt_handler_t handler);
+
+/** Delete data.db.lock and library.db.lock beside `dbfilename`. Returns 0 when every lock
+ *  file that existed was removed. Call only once the user has agreed. */
+int dt_database_delete_lock_files(const char *dbfilename);
 /** perform pre-db-close optimizations (always call when quiting darktable) */
 void dt_database_optimize(const struct dt_database_t *);
 /** conditionally perfrom db maintenance */

@@ -71,21 +71,30 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/darktable.h"
+#include "darktable.h"
+#include "system/screen_metrics.h"
+#include "widgets/widget_settings.h"
+#include "widgets/resize_handle.h"
 #include "common/colorspaces.h"
 #include "common/l10n.h"
 #include "common/file_location.h"
 #include "common/utility.h"
 #include "gui/guides.h"
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
-#include "dtgtk/expander.h"
+#include "widgets/expander.h"
 
 #include "gui/gtk.h"
+#include "common/thumbnail_notify.h"
+#include "gui/common/film_gui.h"
+#include "gui/common/folder_survey_gui.h"
+#include "gui/common/collection_gui.h"
+#include "common/startup_progress.h"
+#include "gui/dtgtk/thumbtable.h"
 #include "gui/splash.h"
 
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "control/jobs.h"
 #include "control/signal.h"
@@ -118,31 +127,21 @@
  */
 
 /* generic callback for redraw widget signals */
+
+/* widgets/ carries its own colour-label indices so it needs no application header. This is
+ * the only place both enums are visible, so this is where they are pinned together. */
+_Static_assert((int)DT_WIDGET_COLORLABEL_RED == (int)DT_COLORLABELS_RED
+                   && (int)DT_WIDGET_COLORLABEL_PURPLE == (int)DT_COLORLABELS_PURPLE
+                   && (int)DT_WIDGET_COLORLABEL_COUNT == (int)DT_COLORLABELS_LAST,
+               "widget colour-label indices drifted from dt_colorlabels_enum");
+
 static void _ui_widget_redraw_callback(gpointer instance, GtkWidget *widget);
 /* callback for redraw log signals */
 static void _ui_log_redraw_callback(gpointer instance, GtkWidget *widget);
 static void _ui_toast_redraw_callback(gpointer instance, GtkWidget *widget);
 
 // set class function to add CSS classes with just a simple line call
-void dt_gui_add_class(GtkWidget *widget, const gchar *class_name)
-{
-  GtkStyleContext *context = gtk_widget_get_style_context(widget);
-  if(!gtk_style_context_has_class(context, class_name))
-  {
-    gtk_style_context_add_class(context, class_name);
-    gtk_widget_queue_draw(widget);
-  }
-}
 
-void dt_gui_remove_class(GtkWidget *widget, const gchar *class_name)
-{
-  GtkStyleContext *context = gtk_widget_get_style_context(widget);
-  if(gtk_style_context_has_class(context, class_name))
-  {
-    gtk_style_context_remove_class(context, class_name);
-    gtk_widget_queue_draw(widget);
-  }
-}
 
 void dt_gui_set_symbolic_icon(GtkWidget *image, const char *icon_name, GtkIconSize size, const GdkRGBA *color)
 {
@@ -177,14 +176,8 @@ void dt_gui_set_symbolic_icon(GtkWidget *image, const char *icon_name, GtkIconSi
 }
 
 /* ------------------------------------------------------------------------------------------
- * Widget-callback suppression depth (see common/darktable.h for the rationale and API).
+ * Widget-callback suppression depth (see darktable.h for the rationale and API).
  * ------------------------------------------------------------------------------------------ */
-static inline gboolean _dt_on_gui_thread(void)
-{
-  // Same idiom as dt_control_signal (control/signal.c): is the caller the GUI/main thread?
-  return dt_control_get_global() && pthread_equal(dt_control_get_global()->gui_thread, pthread_self());
-}
-
 /* Sub-handle accessors for the GUI singleton (declared in gui/gtk.h). The orchestrator
  * binds darktable.gui via dt_gui_get_global(); these narrow it to the parts callers
  * actually want, so they stop walking the application struct. */
@@ -208,45 +201,9 @@ GtkWidget *dt_gui_center_widget(void)
   return dt_ui_center(dt_gui_get_global()->ui);
 }
 
-gboolean dt_gui_widgets_suppressed(void)
-{
-  return darktable.gui && darktable.gui->_widget_suppress_depth > 0;
-}
 
-void dt_gui_freeze_begin_(const char *file, int line)
-{
-  // Only the GUI thread owns widget state. Off-thread callers (notably worker-thread
-  // reload_defaults during thumbnail/export, which has no widgets to suppress) must not touch
-  // the shared depth, or concurrent non-atomic ++/-- drift it and break suppression for the
-  // GUI thread. For them this is a deliberate no-op.
-  if(!darktable.gui || !_dt_on_gui_thread()) return;
-  // MAX(.,0) heals any pre-existing negative drift so the depth is always genuinely suppressing.
-  darktable.gui->_widget_suppress_depth = MAX(darktable.gui->_widget_suppress_depth, 0) + 1;
-  (void)file;
-  (void)line;
-}
 
-void dt_gui_freeze_end_(const char *file, int line)
-{
-  if(!darktable.gui || !_dt_on_gui_thread()) return;
-  if(darktable.gui->_widget_suppress_depth <= 0)
-  {
-    // A bare end with nothing to match: an unbalanced freeze bracket exists. Surface it (with
-    // the offending site) instead of letting the counter go negative and silently disable
-    // suppression for the rest of the session.
-    fprintf(stderr, "[dt_gui_freeze] unbalanced end at %s:%d (depth was %d); "
-                    "look for a freeze begin without a matching end.\n",
-            file, line, darktable.gui->_widget_suppress_depth);
-    darktable.gui->_widget_suppress_depth = 0;
-    return;
-  }
-  darktable.gui->_widget_suppress_depth--;
-}
 
-void dt_gui_freeze_reset(void)
-{
-  if(darktable.gui) darktable.gui->_widget_suppress_depth = 0;
-}
 
 /*
  * OLD UI API
@@ -314,88 +271,6 @@ gboolean dt_gui_get_scroll_deltas(const GdkEventScroll *event, gdouble *delta_x,
   return handled;
 }
 
-gboolean dt_gui_get_scroll_unit_deltas(const GdkEventScroll *event, int *delta_x, int *delta_y)
-{
-  // avoid double counting real and emulated events when receiving smooth scrolls
-  if(gdk_event_get_pointer_emulated((GdkEvent*)event)) return FALSE;
-
-  // accumulates scrolling regardless of source or the widget being scrolled
-  static gdouble acc_x = 0.0, acc_y = 0.0;
-
-  gboolean handled = FALSE;
-
-  switch(event->direction)
-  {
-    // is one-unit cardinal, e.g. from a mouse scroll wheel
-    case GDK_SCROLL_LEFT:
-      if(delta_x)
-      {
-        *delta_x = dt_conf_get_bool("scroll/reverse_x") ? 1 : -1;
-        if(delta_y) *delta_y = 0;
-        handled = TRUE;
-      }
-      break;
-    case GDK_SCROLL_RIGHT:
-      if(delta_x)
-      {
-        *delta_x = dt_conf_get_bool("scroll/reverse_x") ? -1 : 1;
-        if(delta_y) *delta_y = 0;
-        handled = TRUE;
-      }
-      break;
-    case GDK_SCROLL_UP:
-      if(delta_y)
-      {
-        if(delta_x) *delta_x = 0;
-        *delta_y = dt_conf_get_bool("scroll/reverse_y") ? 1 : -1;
-        handled = TRUE;
-      }
-      break;
-    case GDK_SCROLL_DOWN:
-      if(delta_y)
-      {
-        if(delta_x) *delta_x = 0;
-        *delta_y = dt_conf_get_bool("scroll/reverse_y") ? -1 : 1;
-        handled = TRUE;
-      }
-      break;
-    // is trackpad (or touch) scroll
-    case GDK_SCROLL_SMOOTH:
-      // stop events reset accumulated delta
-      if(event->is_stop)
-      {
-        acc_x = acc_y = 0.0;
-        break;
-      }
-      // accumulate trackpad/touch scrolls until they make a unit
-      // scroll, and only then tell caller that there is a scroll to
-      // handle
-#ifdef GDK_WINDOWING_QUARTZ // on macOS deltas need to be scaled
-      acc_x += dt_conf_get_bool("scroll/reverse_x") ? -event->delta_x / 50. : event->delta_x / 50.;
-      acc_y += dt_conf_get_bool("scroll/reverse_y") ? -event->delta_y / 50. : event->delta_y / 50.;
-#else
-      acc_x += dt_conf_get_bool("scroll/reverse_x") ? -event->delta_x : event->delta_x;
-      acc_y += dt_conf_get_bool("scroll/reverse_y") ? -event->delta_y : event->delta_y;
-#endif
-      const gdouble amt_x = trunc(acc_x);
-      const gdouble amt_y = trunc(acc_y);
-      if(amt_x != 0 || amt_y != 0)
-      {
-        acc_x -= amt_x;
-        acc_y -= amt_y;
-        if((delta_x && amt_x != 0) || (delta_y && amt_y != 0))
-        {
-          if(delta_x) *delta_x = (int)amt_x;
-          if(delta_y) *delta_y = (int)amt_y;
-          handled = TRUE;
-        }
-      }
-      break;
-    default:
-      break;
-  }
-  return handled;
-}
 
 gboolean dt_gui_get_scroll_delta(const GdkEventScroll *event, gdouble *delta)
 {
@@ -408,16 +283,6 @@ gboolean dt_gui_get_scroll_delta(const GdkEventScroll *event, gdouble *delta)
   return FALSE;
 }
 
-gboolean dt_gui_get_scroll_unit_delta(const GdkEventScroll *event, int *delta)
-{
-  int delta_x, delta_y;
-  if(dt_gui_get_scroll_unit_deltas(event, &delta_x, &delta_y))
-  {
-    *delta = delta_x + delta_y;
-    return TRUE;
-  }
-  return FALSE;
-}
 
 
 static gboolean _draw(GtkWidget *da, cairo_t *cr, gpointer user_data)
@@ -628,8 +493,8 @@ static gboolean _configure(GtkWidget *da, GdkEventConfigure *event, gpointer use
     // we're done with our old pixmap, so we can get rid of it and replace it with our properly-sized one.
     cairo_surface_destroy(darktable.gui->surface);
     darktable.gui->surface = tmpsurface;
-    dt_colorspaces_set_display_profile(
-        DT_COLORSPACE_DISPLAY); // maybe we are on another screen now with > 50% of the area
+    // maybe we are on another screen now with > 50% of the area
+    dt_colorspaces_set_display_profile(DT_COLORSPACE_DISPLAY, dt_gui_center_widget());
   }
   oldw = event->width;
   oldh = event->height;
@@ -647,8 +512,8 @@ static gboolean _window_configure(GtkWidget *da, GdkEvent *event, gpointer user_
   static int oldy = 0;
   if(oldx != event->configure.x || oldy != event->configure.y)
   {
-    dt_colorspaces_set_display_profile(
-        DT_COLORSPACE_DISPLAY); // maybe we are on another screen now with > 50% of the area
+    // maybe we are on another screen now with > 50% of the area
+    dt_colorspaces_set_display_profile(DT_COLORSPACE_DISPLAY, dt_gui_center_widget());
     oldx = event->configure.x;
     oldy = event->configure.y;
   }
@@ -1082,7 +947,7 @@ static gboolean _button_pressed(GtkWidget *w, GdkEventButton *event, gpointer us
   if(!gtk_window_is_active(GTK_WINDOW(darktable.gui->ui->main_window))) return FALSE;
 
   /* Reset Gtk focus */
-  darktable.gui->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
   gtk_widget_grab_focus(w);
 
   const dt_control_pointer_input_t input = _extract_pointer_input((const GdkEvent *)event, event->x, event->y,
@@ -1197,6 +1062,86 @@ static const char* _get_axis_name(int pos)
   return AXIS_NAMES[pos];
 }
 
+
+/* ---- Host hooks for the shortcut system (widgets/accelerators.c) --------------------- */
+#define DT_ACCEL_SEARCH_RECENT_KEY "plugins/accel_search/recent_entries"
+
+static GtkWidget *_widget_root_window(void)
+{
+  return dt_gui_main_window();
+}
+
+static gint _widget_natural_width(GtkWidget *widget)
+{
+  if(IS_NULL_PTR(dt_gui_get_ui())) return -1;
+  if(dt_ui_panel_ancestor(dt_gui_get_ui(), DT_UI_PANEL_RIGHT, widget))
+    return dt_ui_panel_get_size(dt_gui_get_ui(), DT_UI_PANEL_RIGHT);
+  if(dt_ui_panel_ancestor(dt_gui_get_ui(), DT_UI_PANEL_LEFT, widget))
+    return dt_ui_panel_get_size(dt_gui_get_ui(), DT_UI_PANEL_LEFT);
+  return -1;
+}
+
+/* dt_control_change_cursor() and dt_toast_log() are macros, so the widget hooks need real
+ * functions to point at. */
+static void _widget_cursor(GdkCursorType cursor)
+{
+  dt_control_change_cursor(cursor);
+}
+
+static void _widget_message(const char *message)
+{
+  dt_toast_log("%s", message);
+}
+
+static gint _accels_top_offset(void)
+{
+  if(IS_NULL_PTR(dt_gui_get_global()) || IS_NULL_PTR(dt_gui_get_ui())) return 0;
+  GtkWidget *top_panel = dt_gui_get_ui()->panels[DT_UI_PANEL_TOP];
+  if(IS_NULL_PTR(top_panel) || !gtk_widget_get_visible(top_panel)) return 0;
+  return gtk_widget_get_allocated_height(top_panel);
+}
+
+static gchar *_accels_recent_get(int index)
+{
+  gchar *key = g_strdup_printf("%s/%d", DT_ACCEL_SEARCH_RECENT_KEY, index);
+  gchar *value = dt_conf_key_exists(key) ? dt_conf_get_string(key) : NULL;
+  dt_free(key);
+  return value;
+}
+
+static void _accels_recent_set(int index, const char *value)
+{
+  gchar *key = g_strdup_printf("%s/%d", DT_ACCEL_SEARCH_RECENT_KEY, index);
+  dt_conf_set_string(key, value ? value : "");
+  dt_free(key);
+}
+
+/* common/ reports startup progress; opening the splash on the first message is display
+ * state, so it lives here rather than in whatever subsystem happens to be slow. */
+static void _gui_startup_progress(const char *message)
+{
+  // dt_gui_splash_init() already no-ops once the splash exists, so no "have I opened it?"
+  // flag is needed here -- which is the same flag common/opencl.c used to carry.
+  dt_gui_splash_init();
+  dt_gui_splash_updatef("%s", message);
+}
+
+/* common/ announces that an image's thumbnail is stale; this turns that into the two
+ * widget refreshes. Registered at the end of dt_gui_gtk_init(), so headless runs never
+ * have a handler and the notification is a no-op there. */
+static void _gui_refresh_thumbnail(int32_t imgid, gboolean refresh_filmstrip)
+{
+  struct dt_ui_t *ui = dt_gui_get_ui();
+  if(IS_NULL_PTR(ui)) return;
+
+  dt_thumbtable_refresh_thumbnail(ui->thumbtable_lighttable, imgid, TRUE);
+
+  // Best-effort: refreshing the filmstrip spawns an export thread that competes with the
+  // realtime darkroom main preview, so darkroom write paths ask for it to be skipped.
+  if(refresh_filmstrip)
+    dt_thumbtable_refresh_thumbnail(ui->thumbtable_filmstrip, imgid, TRUE);
+}
+
 int dt_gui_gtk_init(dt_gui_gtk_t *gui)
 {
   /* lets zero mem */
@@ -1252,11 +1197,11 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
   gui->styles_popup.module = NULL;
 
   // smooth scrolling must be enabled to handle trackpad/touch events
-  gui->scroll_mask = GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK;
+  dt_widget_set_scroll_mask(GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK);
 
   // Emulates the same feature as Gtk focus but for scrolling events
   // The GtkWidget capturing scrolling events will write its address in this pointer
-  gui->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
 
   // Init global accels. We localize the config because accels pathes use translated GUI labels.
   // User switching between languages may loose their custom shortcuts if we didn't localize them.
@@ -1306,7 +1251,7 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
 
   dt_gui_presets_init();
 
-  dt_colorspaces_set_display_profile(DT_COLORSPACE_DISPLAY);
+  dt_colorspaces_set_display_profile(DT_COLORSPACE_DISPLAY, dt_gui_center_widget());
   // update the profile when the window is moved. resize is already handled in configure()
   widget = dt_ui_main_window(darktable.gui->ui);
   g_signal_connect(G_OBJECT(widget), "configure-event", G_CALLBACK(_window_configure), NULL);
@@ -1374,13 +1319,34 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
 
   // Gtk seems to capture some reserved shortcuts (Tab). We need to bypass it entirely
   // by hacking all events.
-  gtk_widget_add_events(dt_ui_main_window(gui->ui), gui->scroll_mask);
+  gtk_widget_add_events(dt_ui_main_window(gui->ui), dt_widget_scroll_mask());
   g_signal_connect(G_OBJECT(dt_ui_main_window(gui->ui)), "event", G_CALLBACK(dt_accels_dispatch), gui->accels);
 
   // finally set the cursor to be the default.
   // for some reason this is needed on some systems to pick up the correctly themed cursor
   dt_control_change_cursor(GDK_LEFT_PTR);
   gui->mouse.effect_radius = DT_UI_SCALE_DEVICE(15.0f);
+
+  // Tell common/ how to repaint a stale thumbnail. The backend announces staleness and
+  // knows nothing about thumbtables; this is the only place the two are connected.
+  // Tell the widget layer which thread owns widget state, and how the user wants scrolling.
+  if(dt_control_get_global()) dt_widget_set_gui_thread(dt_control_get_global()->gui_thread);
+  dt_widget_set_scroll_reversed(dt_conf_get_bool("scroll/reverse_x"), dt_conf_get_bool("scroll/reverse_y"));
+
+  dt_widget_set_root_window_handler(_widget_root_window);
+  dt_widget_set_natural_width_handler(_widget_natural_width);
+  dt_widget_set_cursor_handler(_widget_cursor);
+  dt_widget_set_message_handler(_widget_message);
+  dt_accels_set_global(gui->accels);
+  dt_accels_set_top_offset_handler(_accels_top_offset);
+  dt_accels_set_refocus_handler(dt_gui_refocus_center);
+  dt_accels_set_recent_handlers(_accels_recent_get, _accels_recent_set);
+
+  dt_thumbnail_notify_set_handler(_gui_refresh_thumbnail);
+  dt_startup_progress_set_handler(_gui_startup_progress);
+  dt_film_gui_register_handlers();
+  dt_collection_gui_register_handlers();
+  dt_folder_survey_gui_register_handlers();
 
   return 0;
 }
@@ -1448,7 +1414,9 @@ void dt_configure_ppd_dpi(dt_gui_gtk_t *gui)
   GtkWidget *widget = gui->ui->main_window;
 
   gui->ppd = dt_get_system_gui_ppd(widget);
+  dt_widget_set_ppd(gui->ppd);
   gui->filter_image = CAIRO_FILTER_GOOD;
+  dt_widget_set_image_filter(gui->filter_image);
 
   // get the screen resolution
   const float screen_dpi_overwrite = dt_conf_get_float("screen_dpi_overwrite");
@@ -1476,7 +1444,9 @@ void dt_configure_ppd_dpi(dt_gui_gtk_t *gui)
       dt_print(DT_DEBUG_CONTROL, "[screen resolution] setting the screen resolution to %f dpi\n", gui->dpi);
   }
   gui->dpi_factor
-      = gui->dpi / 96; // according to man xrandr and the docs of gdk_screen_set_resolution 96 is the default
+      = gui->dpi / 96;
+  dt_screen_set_dpi(gui->dpi); // the raw resolution, for whoever reports it rather than scales by it
+  dt_widget_set_dpi_factor(gui->dpi_factor); // according to man xrandr and the docs of gdk_screen_set_resolution 96 is the default
 
   // em depends on the screen DPI (point -> px), so refresh it here too.
   dt_gui_update_em();
@@ -1555,6 +1525,8 @@ void dt_gui_update_em(void)
     else
       // points -> px at the screen DPI, matching how GTK renders point-sized fonts
       gui->em = (double)size / PANGO_SCALE * gui->dpi / 72.0;
+
+    dt_widget_set_em_size(gui->em);
   }
   pango_font_description_free(desc);
 
@@ -1570,36 +1542,6 @@ void dt_gui_set_pango_resolution(PangoLayout *layout)
   pango_cairo_context_set_resolution(pango_layout_get_context(layout), darktable.gui->dpi);
 }
 
-void dt_gui_cairo_set_font_options(cairo_t *cr, GtkWidget *widget)
-{
-  if(IS_NULL_PTR(cr)) return;
-
-  // Source GTK's resolved text-rendering options (anti-aliasing, hinting, subpixel order,
-  // hint-metrics/kerning), which GTK populates from GtkSettings/Xft/fontconfig. The widget's
-  // Pango context is the same source native widgets use; fall back to the main window, then to the
-  // screen defaults, so an off-screen/scratch Cairo surface never silently reverts to Cairo's
-  // AA-on defaults (which would make our cairo-drawn text look unlike the rest of the UI).
-  const cairo_font_options_t *fo = NULL;
-
-  if(widget)
-  {
-    PangoContext *pc = gtk_widget_get_pango_context(widget);
-    if(pc) fo = pango_cairo_context_get_font_options(pc);
-  }
-  if(!fo && darktable.gui && darktable.gui->ui && darktable.gui->ui->main_window)
-  {
-    PangoContext *pc = gtk_widget_get_pango_context(darktable.gui->ui->main_window);
-    if(pc) fo = pango_cairo_context_get_font_options(pc);
-  }
-  if(!fo)
-  {
-    GdkScreen *screen = gdk_screen_get_default();
-    if(screen) fo = gdk_screen_get_font_options(screen);
-  }
-
-  // cairo_set_font_options() copies internally, so the const pointer's lifetime is not a concern.
-  if(fo) cairo_set_font_options(cr, fo);
-}
 
 static gboolean _focus_in_out_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
@@ -1785,7 +1727,7 @@ static void _init_widgets(dt_gui_gtk_t *gui)
   darktable.gui->ui->toast_msg = gtk_label_new("");
   g_signal_connect(G_OBJECT(eb), "button-press-event", G_CALLBACK(_ui_toast_button_press_event),
                    darktable.gui->ui->toast_msg);
-  gtk_widget_set_events(eb, GDK_BUTTON_PRESS_MASK | darktable.gui->scroll_mask);
+  gtk_widget_set_events(eb, GDK_BUTTON_PRESS_MASK | dt_widget_scroll_mask());
   g_signal_connect(G_OBJECT(eb), "scroll-event", G_CALLBACK(_scrolled), NULL);
   gtk_label_set_ellipsize(GTK_LABEL(darktable.gui->ui->toast_msg), PANGO_ELLIPSIZE_MIDDLE);
 
@@ -3007,7 +2949,7 @@ GtkWidget *dt_ui_scroll_wrap(GtkWidget *w, gint min_size, char *config_str, dt_u
   // Drag grip floating on the scrolled window's bottom edge (overlay): it takes no layout space,
   // so the wrapper leaves no margin-like gap and stays aligned with neighbouring widgets. The grip
   // is centered on the bottom border via CSS and is invisible until hovered.
-  GtkWidget *handle = dt_bauhaus_resize_handle_new(GTK_ORIENTATION_VERTICAL, FALSE,
+  GtkWidget *handle = dtgtk_resize_handle_new(GTK_ORIENTATION_VERTICAL, FALSE,
                                                    _("Drag to resize"),
                                                    _resizable_scroll_handle_get_size,
                                                    _resizable_scroll_handle_resize, w);
@@ -3100,7 +3042,7 @@ GtkWidget *dt_ui_resizable_drawing_area(GtkWidget *area, char *config_str, int d
   // Drag grip floating on the area's bottom edge (an overlay, not a packed sibling), so it takes
   // no layout space -- the area stays flush with neighbouring widgets, no margin-like gap. It sits
   // over the graph's bottom inset/axis margin (graphs reserve one), invisible until hovered.
-  GtkWidget *handle = dt_bauhaus_resize_handle_new(GTK_ORIENTATION_VERTICAL, FALSE,
+  GtkWidget *handle = dtgtk_resize_handle_new(GTK_ORIENTATION_VERTICAL, FALSE,
                                                    _("Drag to resize"),
                                                    _resizable_area_get_size, _resizable_area_resize, area);
 
@@ -3398,34 +3340,6 @@ void dt_gui_new_collapsible_section(dt_gui_collapsible_section_t *cs,
                    (gpointer)cs);
 }
 
-void dt_capitalize_label(gchar *text)
-{
-  if(!text || !text[0]) return;
-
-  // Deal with strings beginning with a Mnemonics underscore
-  gchar *p = text;
-  if(*p == '_' && p[1]) p++;
-
-  // `p[0] = g_unichar_toupper(p[0])` used to write here directly, but `p[0]` is only
-  // the first *byte* of `p`, not the first character: translated labels routinely
-  // start with a multi-byte UTF-8 character (accented capitals, non-Latin scripts).
-  // Mutating one byte of a multi-byte sequence produces a different, still
-  // "valid-looking" sequence followed by an orphaned continuation byte - invalid
-  // UTF-8 that crashes later collation (e.g. g_utf8_collate -> glibc wcscoll_l).
-  gunichar c = g_utf8_get_char_validated(p, -1);
-  if(c == (gunichar)-1 || c == (gunichar)-2) return; // invalid UTF-8, leave untouched
-
-  gunichar upper = g_unichar_toupper(c);
-  if(upper == c) return;
-
-  gchar utf8_buf[6] = { 0 };
-  gint n = g_unichar_to_utf8(upper, utf8_buf);
-  gint orig_len = g_utf8_next_char(p) - p;
-
-  // Callers pass buffers sized exactly for the original string (often g_strdup'd),
-  // not a longer one - only mutate in place if the uppercase form fits.
-  if(n == orig_len) memcpy(p, utf8_buf, n);
-}
 
 GtkBox * attach_popover(GtkWidget *widget, const char *icon, GtkWidget *content)
 {

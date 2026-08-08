@@ -40,11 +40,11 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/module_versioning.h"
-#include "common/target_clones.h"
-#include "common/bilateral.h"
-#include "common/math.h"
+#include "system/target_clones.h"
+#include "pixel/bilateral.h"
+#include "math/math.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"

@@ -39,7 +39,7 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "common/capabilities.h"
+#include "system/capabilities.h"
 #endif
 
 #include "pwstorage.h"
@@ -52,7 +52,7 @@
 #include "backend_kwallet.h"
 #endif
 
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 
 #include <glib.h>

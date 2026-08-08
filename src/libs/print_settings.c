@@ -37,11 +37,11 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "control/conf.h"
+#include "common/conf.h"
 #include "common/mipmap_cache.h"
 #include <glib.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/cups_print.h"
 #include "common/file_location.h"

@@ -63,19 +63,20 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/darktable.h"
-#include "control/conf.h"
+#include "darktable.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #include "common/sentry.h"
 #include "common/telemetry.h"
 #include "develop/imageop.h"
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/collection.h"
 #include "common/debug.h"
 #include "common/exif.h"
 #include "common/history.h"
 #include "common/imagebuf.h"
-#include "common/imageio_rawspeed.h"
-#include "common/interpolation.h"
+#include "imageio/imageio_rawspeed.h"
+#include "pixel/interpolation.h"
 #include "common/module.h"
 #include "common/opencl.h"
 #include "common/usermanual_url.h"
@@ -83,17 +84,17 @@
 #include "control/signal.h"
 #include "develop/blend.h"
 #include "develop/develop.h"
-#include "develop/format.h"
+#include "pixel/format.h"
 #include "develop/masks.h"
 #include "develop/tiling.h"
-#include "gui/gdkkeys.h"
+#include "widgets/gdkkeys.h"
 #include "gui/presets.h"
-#include "dtgtk/button.h"
-#include "dtgtk/expander.h"
+#include "widgets/button.h"
+#include "widgets/expander.h"
 
 #include "gui/color_picker_proxy.h"
 #include "gui/gtk.h"
-#include "gui/gui_throttle.h"
+#include "develop/gui_throttle.h"
 #include "gui/presets.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #endif
@@ -404,6 +405,29 @@ void dt_iop_default_init(dt_iop_module_t *module)
   }
 }
 
+
+/* The bauhaus widgets ask a module to make itself visible before grabbing focus inside it.
+ * For an IOP that means expanding a collapsed expander, and dropping stale focus first --
+ * both develop/ concerns, which is why this lives here and not in the widget. */
+static void _iop_ensure_visible(dt_gui_module_t *m)
+{
+  dt_iop_module_t *module = (dt_iop_module_t *)m;
+  if(IS_NULL_PTR(module)) return;
+
+  if(!IS_NULL_PTR(module->expander))
+  {
+    g_object_set_data(G_OBJECT(module->expander), "dt-modulegroups-switch-from-active-once",
+                      GINT_TO_POINTER(TRUE));
+    dt_iop_gui_set_expanded(module, TRUE, TRUE);
+  }
+
+  // If the module is already marked focused, modulegroups may not re-emit its focus signal
+  // and tab visibility can stay stale. Drop focus once so the next request replays the
+  // full focus/update sequence.
+  if(!IS_NULL_PTR(dt_dev_get_global()) && dt_dev_get_global()->gui_module == module)
+    dt_iop_request_focus(NULL);
+}
+
 int default_iop_focus(dt_gui_module_t *m, gboolean toggle)
 {
   dt_iop_module_t *module = (dt_iop_module_t *) m;
@@ -557,6 +581,7 @@ int dt_iop_load_module_by_so(dt_iop_module_t *module, dt_iop_module_so_t *so, dt
   module->common_fields.widget_list = NULL;
   module->common_fields.widget_list_bh = NULL;
   module->common_fields.focus = module->iop_focus;
+  module->common_fields.ensure_visible = _iop_ensure_visible;
   module->common_fields.deprecated = (module->flags() & IOP_FLAGS_DEPRECATED) == IOP_FLAGS_DEPRECATED;
 
   return 0;
@@ -1079,15 +1104,6 @@ static void _gui_off_callback(GtkToggleButton *togglebutton, gpointer user_data)
 
   if(!dt_gui_widgets_suppressed())
   {
-    /**
-     * Modules may keep a delayed history commit queued while the user edits a
-     * control, for example through gui-throttled graph interactions. Enabling
-     * or disabling a module is an immediate history state change, so any stale
-     * delayed task must be canceled first or it may land afterwards and replay
-     * an older enabled+params state over the newer toggle action.
-     */
-    dt_gui_throttle_cancel(module);
-
     if(gtk_toggle_button_get_active(togglebutton))
     {
       module->enabled = 1;
@@ -2246,10 +2262,10 @@ void dt_iop_request_focus(dt_iop_module_t *module)
   if(out_focus_module)
   {
     GtkWidget *out_focus_widget = dt_iop_gui_get_pluginui(out_focus_module);
-    GtkWidget *scroll_focus = dt_gui_get_global()->has_scroll_focus;
+    GtkWidget *scroll_focus = dt_widget_scroll_focus();
     if(scroll_focus && out_focus_widget && gtk_widget_is_ancestor(scroll_focus, out_focus_widget))
     {
-      dt_gui_get_global()->has_scroll_focus = NULL;
+      dt_widget_set_scroll_focus(NULL);
       gtk_widget_queue_draw(scroll_focus);
     }
 
@@ -2419,7 +2435,7 @@ static gboolean _iop_plugin_body_button_press(GtkWidget *w, GdkEventButton *e, g
 
   /* Reset the scrolling focus. If the click happened on any bauhaus element,
    * its internal button_press method will set it for itself */
-  dt_gui_get_global()->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
 
   gboolean handled = FALSE;
 
@@ -2511,7 +2527,7 @@ static gboolean _iop_plugin_header_button_press(GtkWidget *w, GdkEventButton *e,
 
   /* Reset the scrolling focus. If the click happened on any bauhaus element,
    * its internal button_press method will set it for itself */
-  dt_gui_get_global()->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
 
   if(e->button == 1)
   {
@@ -3218,12 +3234,6 @@ gboolean dt_iop_is_first_instance(GList *modules, dt_iop_module_t *module)
   }
 
   return is_first;
-}
-
-void dt_iop_throttled_history_update(gpointer data)
-{
-  dt_iop_module_t *self = (dt_iop_module_t*)data;
-  dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
 }
 
 const char **dt_iop_set_description(dt_iop_module_t *module, const char *main_text, const char *purpose, const char *input, const char *process,

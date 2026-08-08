@@ -124,8 +124,8 @@
          This is done by using the dt_ioppr_get_iop_order.
  */
 
-#ifndef DT_IOP_ORDER_H
-#define DT_IOP_ORDER_H
+#ifndef DT_COMMON_IOP_ORDER_H
+#define DT_COMMON_IOP_ORDER_H
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -133,7 +133,7 @@
 
 /* Self-containment: the declarations below use GList/gboolean (glib) and int32_t.
  * This header used to compile only because its consumers happened to include
- * common/darktable.h first. */
+ * darktable.h first. */
 #include <glib.h>
 #include <stdint.h>
 

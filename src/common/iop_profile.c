@@ -41,9 +41,9 @@
 #endif
 
 #include "common/colorspaces.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "common/iop_profile.h"
-#include "common/matrices.h"
+#include "math/matrices.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/pixelpipe.h"
@@ -53,7 +53,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "common/target_clones.h"
+#include "system/target_clones.h"
 #include "common/times.h"
 
 static inline __attribute__((always_inline)) void _mark_as_nonmatrix_profile(dt_iop_order_iccprofile_info_t *const profile_info)

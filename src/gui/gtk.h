@@ -55,12 +55,14 @@
 #define DT_GUI_GTK_H
 
 #include "common/glib_utils.h"
+#include "widgets/widget_settings.h"
+#include "widgets/widget_style.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/paths.h"
-#include "dtgtk/thumbtable.h"
+#include "gui/dtgtk/thumbtable.h"
 #include "gui/window_manager.h"
-#include "gui/accelerators.h"
+#include "widgets/accelerators.h"
 
 #include <gtk/gtk.h>
 #include <stdint.h>
@@ -71,7 +73,7 @@
 extern "C" {
 #endif
 
-/* --- Moved from common/darktable.h: GUI-flavored helpers belong to the GUI layer, and
+/* --- Moved from darktable.h: GUI-flavored helpers belong to the GUI layer, and
  * the orchestrator header must not export GTK/Pango API to the whole application. --- */
 
 /* ------------------------------------------------------------------------------------------
@@ -86,10 +88,8 @@ extern "C" {
  * drift it), clamped at >= 0, and any unbalanced end is logged with its file:line rather than
  * silently drifting negative and disabling suppression for the rest of the session.
  * ------------------------------------------------------------------------------------------ */
-gboolean dt_gui_widgets_suppressed(void);
-void dt_gui_freeze_begin_(const char *file, int line);
-void dt_gui_freeze_end_(const char *file, int line);
-void dt_gui_freeze_reset(void); // hard-reset depth to 0 (GUI init only)
+// Implemented in widgets/widget_settings.c -- declared there, re-exposed here so existing
+// consumers keep including only gui/gtk.h.
 #define dt_gui_freeze_begin() dt_gui_freeze_begin_(__FILE__, __LINE__)
 #define dt_gui_freeze_end()   dt_gui_freeze_end_(__FILE__, __LINE__)
 
@@ -110,12 +110,6 @@ static inline void dt_gui_freeze_release_(dt_gui_freeze_token_t *t)
 
 // check whether the specified mask of modifier keys exactly matches, among the set Shift+Control+(Alt/Meta).
 // ignores the state of any other shifting keys
-static inline gboolean dt_modifier_is(const GdkModifierType state, const GdkModifierType desired_modifier_mask)
-{
-  const GdkModifierType modifiers = gtk_accelerator_get_default_mod_mask();
-//TODO: on Macs, remap the GDK_CONTROL_MASK bit in desired_modifier_mask to be the bit for the Cmd key
-  return (state & modifiers) == desired_modifier_mask;
-}
 
 // check whether the given modifier state includes AT LEAST the specified mask of modifier keys
 static inline gboolean dt_modifiers_include(const GdkModifierType state, const GdkModifierType desired_modifier_mask)
@@ -159,9 +153,9 @@ static inline gchar *strip_markup(const char *s)
 }
 
 /* Application-wide GUI singleton accessor: declared here by the owning lib, implemented by
- * the orchestrator (common/darktable.c, next to dt_pixelpipe_cache_get_global()). It binds
+ * the orchestrator (darktable.c, next to dt_pixelpipe_cache_get_global()). It binds
  * this header's macros and inline helpers to the `dt_gui_get_global()` instance without importing
- * common/darktable.h into every GUI translation unit. */
+ * darktable.h into every GUI translation unit. */
 struct dt_gui_gtk_t;
 struct dt_gui_gtk_t *dt_gui_get_global(void);
 
@@ -198,13 +192,10 @@ GtkWidget *dt_gui_center_widget(void);
  *   UI zoom (dpi_factor) and the integer scale-factor (ppd) ourselves.
  *
  * Input values are device-independent pixels at the 96 DPI baseline. */
-#define DT_UI_SCALE_UI(value) ((value) * dt_gui_get_global()->dpi_factor)
-#define DT_UI_SCALE_DEVICE(value) ((value) * dt_gui_get_global()->dpi_factor * dt_gui_get_global()->ppd)
+// DT_UI_SCALE_* / DT_PIXEL_APPLY_DPI* now come from widgets/widget_settings.h
 
 /* Deprecated spellings kept so the existing call sites keep compiling. Prefer the
  * intent-named macros above in new code. */
-#define DT_PIXEL_APPLY_DPI(value) DT_UI_SCALE_UI(value)
-#define DT_PIXEL_APPLY_DPI_DPP(value) DT_UI_SCALE_DEVICE(value)
 
 /* Spacing between children widgets within Gtk boxes/grids/flowboxes cannot be set from
  * CSS (margins/paddings on the children would recess the ones sitting on the container
@@ -220,10 +211,7 @@ GtkWidget *dt_gui_center_widget(void);
  * Falls back to the 10px reference before the GUI exists or before gui->em has
  * been resolved. Standalone dialogs may run after gtk_init() but before the
  * main Ansel GUI allocation when startup needs user input. */
-#define DT_GUI_EM_SIZE ((gint)((!IS_NULL_PTR(dt_gui_get_global()) && dt_gui_get_global()->em > 0.0) ? dt_gui_get_global()->em : 16.0))
-#define DT_GUI_BOX_SPACING_EM 0.625
-#define DT_GUI_BOX_SPACING                                                                                     \
-  ((gint)(DT_GUI_EM_SIZE * DT_GUI_BOX_SPACING_EM + 0.5))
+// DT_GUI_BOX_SPACING now comes from widgets/widget_settings.h
 
 enum
 {
@@ -290,7 +278,6 @@ typedef struct dt_gui_gtk_t
   // dt_gui_freeze_begin()/end() / dt_gui_widget_freeze() / dt_gui_widgets_suppressed()
   // (declared at the top of this header). Those manage it centrally: GUI-thread-only, clamped
   // at >= 0, and unbalanced ends are logged instead of silently drifting the counter.
-  int32_t _widget_suppress_depth;
   GdkRGBA colors[DT_GUI_COLOR_LAST];
 
   int32_t center_tooltip; // 0 = no tooltip, 1 = new tooltip, 2 = old tooltip
@@ -343,11 +330,9 @@ typedef struct dt_gui_gtk_t
   GtkWidget *scroll_to[2]; // one for left, one for right
   GtkWidget *scroll_to_header_once; // one-shot: module expander that should scroll to its header once
 
-  gint scroll_mask;
 
   // scrolling focus
   // This emulates the same feature as Gtk focus, but to capture scrolling events
-  GtkWidget *has_scroll_focus;
 
   cairo_filter_t filter_image;    // filtering used for all modules expect darkroom
   cairo_filter_t dr_filter_image; // filtering used in the darkroom
@@ -435,17 +420,7 @@ void dt_gtk_toggle_button_set_active_ext(GtkToggleButton *toggle_button, const c
 #endif
 
 
-static inline cairo_surface_t *dt_cairo_image_surface_create(cairo_format_t format, int width, int height) {
-  cairo_surface_t *cst = cairo_image_surface_create(format, width * dt_gui_get_global()->ppd, height * dt_gui_get_global()->ppd);
-  cairo_surface_set_device_scale(cst, dt_gui_get_global()->ppd, dt_gui_get_global()->ppd);
-  return cst;
-}
 
-static inline cairo_surface_t *dt_cairo_image_surface_create_for_data(unsigned char *data, cairo_format_t format, int width, int height, int stride) {
-  cairo_surface_t *cst = cairo_image_surface_create_for_data(data, format, width, height, stride);
-  cairo_surface_set_device_scale(cst, dt_gui_get_global()->ppd, dt_gui_get_global()->ppd);
-  return cst;
-}
 
 static inline cairo_surface_t *dt_cairo_image_surface_create_from_png(const char *filename) {
   cairo_surface_t *cst = cairo_image_surface_create_from_png(filename);
@@ -472,8 +447,6 @@ static inline GdkPixbuf *dt_gdk_pixbuf_new_from_file_at_size(const char *filenam
 }
 
 // call class function to add or remove CSS classes (need to be set on top of this file as first function is used in this file)
-void dt_gui_add_class(GtkWidget *widget, const gchar *class_name);
-void dt_gui_remove_class(GtkWidget *widget, const gchar *class_name);
 
 /**
  * @brief Set a symbolic icon on an image widget, optionally forcing a specific color.
@@ -505,7 +478,6 @@ gboolean dt_gui_get_scroll_deltas(const GdkEventScroll *event, gdouble *delta_x,
  * only set deltas and return TRUE once scrolls accumulate to >= 1.
  * Effectively makes smooth scroll events act like old-style unit
  * scroll events. */
-gboolean dt_gui_get_scroll_unit_deltas(const GdkEventScroll *event, int *delta_x, int *delta_y);
 
 /* Note that on macOS Shift+vertical scroll can be reported as Shift+horizontal scroll.
  * So if Shift changes scrolling effect, both scrolls should be handled the same.
@@ -519,7 +491,6 @@ gboolean dt_gui_get_scroll_delta(const GdkEventScroll *event, gdouble *delta);
  * only set delta and return TRUE once scrolls accumulate to >= 1.
  * Effectively makes smooth scroll events act like old-style unit
  * scroll events. */
-gboolean dt_gui_get_scroll_unit_delta(const GdkEventScroll *event, int *delta);
 
 /** \brief gives a widget focus in the container */
 void dt_ui_container_focus_widget(dt_ui_t *ui, const dt_ui_container_t c, GtkWidget *w);
@@ -557,11 +528,10 @@ void dt_ellipsize_combo(GtkComboBox *cbox);
 
 // capitalize strings. Because grammar says sentences start with a capital,
 // and typography says it makes it easier to extract the structure of the text.
-void dt_capitalize_label(gchar *text);
 
 #define dt_accels_new_global_action(a, b, c, d, e, f, g) dt_accels_new_action_shortcut(dt_gui_get_global()->accels, a, b, dt_gui_get_global()->accels->global_accels, c, d, e, f, FALSE, g)
 
-#define dt_accels_new_darkroom_action(a, b, c, d, e, f, g) dt_accels_new_action_shortcut(dt_gui_get_global()->accels, a, b, dt_gui_get_global()->accels->darkroom_accels, c, d, e, f, FALSE, g)
+// dt_accels_new_darkroom_action() now lives in widgets/accelerators.h
 
 #define dt_accels_new_lighttable_action(a, b, c, d, e, f, g) dt_accels_new_action_shortcut(dt_gui_get_global()->accels, a, b, dt_gui_get_global()->accels->lighttable_accels, c, d, e, f, FALSE, g)
 
@@ -660,7 +630,6 @@ void dt_gui_set_pango_resolution(PangoLayout *layout);
 // settings native GTK widgets use). Call on any off-screen/scratch Cairo surface before drawing
 // text so it matches the rest of the UI instead of Cairo's defaults. @p widget may be NULL (falls
 // back to the main window, then the screen). Pair with dt_gui_set_pango_resolution() for the DPI.
-void dt_gui_cairo_set_font_options(cairo_t *cr, GtkWidget *widget);
 
 // return modifier keys currently pressed, independent of any key event
 GdkModifierType dt_key_modifier_state();

@@ -54,8 +54,8 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
-#include "common/darktable.h"
+#include "widgets/bauhaus.h"
+#include "darktable.h"
 #include "control/control.h"
 #include "develop/develop.h"
 

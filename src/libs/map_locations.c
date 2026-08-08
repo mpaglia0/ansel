@@ -26,14 +26,14 @@
 */
 #include "common/tags.h"
 #include "control/settings.h"
-#include "dtgtk/togglebutton.h"
-#include "dtgtk/paint.h"
+#include "widgets/togglebutton.h"
+#include "widgets/paint.h"
 #include "common/collection.h"
 #include "common/macros.h"
 #include "common/module_versioning.h"
 #include "common/utility.h"
 #include "common/map_locations.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 
 #include "libs/lib.h"

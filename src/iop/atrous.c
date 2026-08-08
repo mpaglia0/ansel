@@ -57,19 +57,20 @@
 */
 
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "widgets/widget_settings.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
-#include "develop/pixelpipe_cache_alloc.h"
-#include "bauhaus/bauhaus.h"
-#include "common/eaw.h"
+#include "common/pixelpipe_cache_alloc.h"
+#include "widgets/bauhaus.h"
+#include "pixel/eaw.h"
 #include "common/imagebuf.h"
 #include "common/opencl.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/imageop_math.h"
@@ -1084,7 +1085,6 @@ static void reset_mix(dt_iop_module_t *self)
 void gui_update(struct dt_iop_module_t *self)
 {
   reset_mix(self);
-  dt_gui_throttle_cancel(self);
   gtk_widget_queue_draw(self->widget);
 }
 
@@ -1470,7 +1470,7 @@ static gboolean area_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpo
       get_params(p, c->channel2, c->mouse_x, c->mouse_y + c->mouse_pick, c->mouse_radius);
     }
     gtk_widget_queue_draw(widget);
-    dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+    dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   }
   else if(event->y > height)
   {
@@ -1637,7 +1637,7 @@ void gui_init(struct dt_iop_module_t *self)
                         GDK_POINTER_MOTION_MASK
                         | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                         | GDK_LEAVE_NOTIFY_MASK | GDK_ENTER_NOTIFY_MASK
-                        | dt_gui_get_global()->scroll_mask);
+                        | dt_widget_scroll_mask());
   g_object_set_data(G_OBJECT(c->area), "iop-instance", self);
   g_signal_connect(G_OBJECT(c->area), "draw", G_CALLBACK(area_draw), self);
   g_signal_connect(G_OBJECT(c->area), "button-press-event", G_CALLBACK(area_button_press), self);
@@ -1658,7 +1658,6 @@ void gui_cleanup(struct dt_iop_module_t *self)
   dt_iop_atrous_gui_data_t *c = (dt_iop_atrous_gui_data_t *)self->gui_data;
   dt_conf_set_int("plugins/darkroom/atrous/gui_channel", c->channel);
   dt_draw_curve_destroy(c->minmax_curve);
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

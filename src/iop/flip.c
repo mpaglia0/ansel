@@ -44,8 +44,8 @@
 #include "config.h"
 #endif
 #include <assert.h>
-#include "common/openmp.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
@@ -57,12 +57,13 @@
 #include <string.h>
 
 #include "common/debug.h"
-#include "common/imageio.h"
+#include "imageio/imageio_core.h"
 #include "common/opencl.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
-#include "dtgtk/resetlabel.h"
+#include "develop/imageop_gui.h"
+#include "widgets/resetlabel.h"
 
 #include "gui/draw.h"
 #include "gui/gtk.h"
@@ -578,7 +579,7 @@ void gui_init(struct dt_iop_module_t *self)
 
   self->widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_GUI_BOX_SPACING);
 
-  GtkWidget *label = dtgtk_reset_label_new(_("transform"), self, &p->orientation, sizeof(int32_t));
+  GtkWidget *label = dt_iop_gui_reset_label_new(_("transform"), self, &p->orientation, sizeof(int32_t));
   gtk_box_pack_start(GTK_BOX(self->widget), label, TRUE, TRUE, 0);
 
   dt_iop_button_new(self, N_("rotate 90 degrees CCW."),

@@ -24,16 +24,16 @@
     protect the engine's baseline. */
 
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "control/signal.h"
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/datetime.h"
 #include "common/folder_survey.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/jobs/import_jobs.h"
 #include "gui/gtk.h"
-#include "gui/gtkentry.h"
+#include "widgets/gtkentry.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 

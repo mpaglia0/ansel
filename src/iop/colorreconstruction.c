@@ -39,16 +39,16 @@
 
 #ifdef HAVE_CONFIG_H
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
-#include "common/openmp.h"
-#include "common/simd.h"
-#include "common/target_clones.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "system/openmp.h"
+#include "system/simd.h"
+#include "system/target_clones.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "config.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/imagebuf.h"
 #include "common/opencl.h"

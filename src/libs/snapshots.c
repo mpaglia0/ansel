@@ -39,7 +39,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/logging.h"
 #include "common/macros.h"
 #include "common/module_versioning.h"
@@ -49,7 +49,7 @@
 #include "develop/develop.h"
 #include "develop/dev_history.h"
 #include "develop/dev_snapshot.h"
-#include "dtgtk/paint.h"
+#include "widgets/paint.h"
 
 #include "gui/color_picker_proxy.h"
 #include "gui/gtk.h"

@@ -48,7 +48,7 @@
 #include "common/collection.h"
 #include "common/tags.h"
 #include "common/selection.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/times.h"
 #include "common/module_versioning.h"
 #include "control/signal.h"
@@ -56,10 +56,10 @@
 #include "develop/develop.h"
 
 #include "gui/gtk.h"
-#include "dtgtk/button.h"
+#include "widgets/button.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 
 DT_MODULE(1)
 

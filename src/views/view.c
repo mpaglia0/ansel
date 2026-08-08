@@ -71,8 +71,9 @@
 */
 
 #include "views/view.h"
+#include "widgets/widget_settings.h"
 #include "common/variables.h"
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/sentry.h"
 #include "common/telemetry.h"
 #include "common/image_cache.h"
@@ -82,12 +83,12 @@
 #include "common/times.h"
 #include "common/undo.h"
 #include "common/usermanual_url.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/supervisor.h"
-#include "dtgtk/expander.h"
-#include "dtgtk/thumbtable.h"
+#include "widgets/expander.h"
+#include "gui/dtgtk/thumbtable.h"
 
 #include "gui/draw.h"
 #include "gui/gtk.h"
@@ -262,7 +263,7 @@ int dt_view_manager_switch_by_view(dt_view_manager_t *vm, const dt_view_t *nv)
 
   /* Reset Gtk focus */
   gtk_window_set_focus(GTK_WINDOW(dt_gui_main_window()), NULL);
-  dt_gui_get_global()->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
 
   // also ignore what scrolling there was previously happening
   memset(dt_gui_get_global()->scroll_to, 0, sizeof(dt_gui_get_global()->scroll_to));
@@ -599,7 +600,7 @@ int dt_view_manager_button_pressed(dt_view_manager_t *vm, double x, double y, do
 
   /* Reset Gtk focus */
   gtk_window_set_focus(GTK_WINDOW(dt_gui_main_window()), NULL);
-  dt_gui_get_global()->has_scroll_focus = NULL;
+  dt_widget_set_scroll_focus(NULL);
 
   /* lets check if any plugins want to handle button press */
   gboolean handled = FALSE;

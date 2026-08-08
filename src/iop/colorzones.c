@@ -58,24 +58,25 @@
 */
 
 #ifdef HAVE_CONFIG_H
-#include "gui/gdkkeys.h"
-#include "control/conf.h"
+#include "widgets/gdkkeys.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #include "config.h"
 #endif
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
 #include "common/iop_profile.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/imagebuf.h"
-#include "common/math.h"
+#include "math/math.h"
 #include "control/control.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
@@ -1629,7 +1630,7 @@ static gboolean _move_point_internal(dt_iop_module_t *self, GtkWidget *widget, i
       curve[node].y = new_y;
     }
 
-    dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+    dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   }
 
   gtk_widget_queue_draw(widget);
@@ -2375,7 +2376,7 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK
-                                           | dt_gui_get_global()->scroll_mask);
+                                           | dt_widget_scroll_mask());
   g_object_set_data(G_OBJECT(c->area), "iop-instance", self);
   gtk_widget_set_can_focus(GTK_WIDGET(c->area), TRUE);
   g_signal_connect(G_OBJECT(c->area), "draw", G_CALLBACK(_area_draw_callback), self);
@@ -2419,7 +2420,6 @@ void gui_update(struct dt_iop_module_t *self)
 
   dt_bauhaus_combobox_set(g->interpolator, p->curve_type[g->channel]);
 
-  dt_gui_throttle_cancel(self);
 
   gtk_widget_queue_draw(self->widget);
 }
@@ -2431,7 +2431,6 @@ void gui_cleanup(struct dt_iop_module_t *self)
 
   for(int ch = 0; ch < DT_IOP_COLORZONES_MAX_CHANNELS; ch++) dt_draw_curve_destroy(c->minmax_curve[ch]);
 
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

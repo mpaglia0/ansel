@@ -68,12 +68,12 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include "common/atomic.h"
+#include "system/atomic.h"
 #include "common/history.h"
 #include "common/image_cache.h"
 #include "common/mipmap_cache.h"
 #include "common/tags.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "control/signal.h"
 #include "control/jobs.h"
@@ -84,7 +84,7 @@
 #include "develop/masks.h"
 #include "develop/pixelpipe_cache.h"
 #include "gui/gtk.h"
-#include "gui/gui_throttle.h"
+#include "develop/gui_throttle.h"
 #include "libs/colorpicker.h"
 
 #define DT_IOP_ORDER_INFO (dt_get_debug_flags() & DT_DEBUG_IOPORDER)
@@ -222,6 +222,7 @@ void dt_dev_cleanup(dt_develop_t *dev)
   // image_cache does not have to be unref'd, this is done outside develop module.
 
   dt_gui_throttle_cancel(dev);
+  dt_dev_history_drop_pending_commits(dev);
 
   dev->proxy.chroma_adaptation = NULL;
   dev->proxy.wb_coeffs[0] = 0.f;
@@ -793,7 +794,13 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
 
       // Update the running average of process time for GUI controls thresholding
       if(processed)
-        dt_gui_throttle_record_runtime(pipe, process_runtime_us);
+      {
+        // Map the pipe onto the throttle's own two slots; it does not know pipeline types.
+        const dt_throttle_slot_t slot = (pipe->type == DT_DEV_PIXELPIPE_FULL) ? DT_THROTTLE_SLOT_MAIN
+                                        : (pipe->type == DT_DEV_PIXELPIPE_PREVIEW) ? DT_THROTTLE_SLOT_PREVIEW
+                                        : DT_THROTTLE_SLOT_OTHER;
+        dt_gui_throttle_record_runtime(slot, process_runtime_us);
+      }
 
       // If everything went well, yell to GUI listeners that they can use the output buffer.
       if(published_backbuffer)

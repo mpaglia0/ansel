@@ -26,20 +26,20 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
-#include "common/openmp.h"
-#include "common/simd.h"
-#include "common/target_clones.h"
+#include "system/openmp.h"
+#include "system/simd.h"
+#include "system/target_clones.h"
 #include "config.h"
 #endif
 // our includes go first:
-#include "bauhaus/bauhaus.h"
-#include "common/dwt.h"
+#include "widgets/bauhaus.h"
+#include "pixel/dwt.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
-#include "dtgtk/drawingarea.h"
+#include "widgets/drawingarea.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
 

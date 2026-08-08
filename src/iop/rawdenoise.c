@@ -46,21 +46,22 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "control/conf.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
 #include "common/module_versioning.h"
-#include "develop/pixelpipe_cache_alloc.h"
+#include "common/pixelpipe_cache_alloc.h"
 #include "common/imagebuf.h"
-#include "common/dwt.h"
+#include "pixel/dwt.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
-#include "develop/openmp_maths.h"
+#include "math/openmp_maths.h"
 
 #include "gui/draw.h"
 #include "gui/gtk.h"
@@ -626,7 +627,6 @@ void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev
 
 void gui_update(dt_iop_module_t *self)
 {
-  dt_gui_throttle_cancel(self);
   // raw vs non_raw page, from the per-image support flag computed by reload_defaults()
   gtk_stack_set_visible_child_name(GTK_STACK(self->widget), self->hide_enable_button ? "non_raw" : "raw");
   gtk_widget_queue_draw(self->widget);
@@ -851,7 +851,7 @@ static gboolean rawdenoise_motion_notify(GtkWidget *widget, GdkEventMotion *even
       dt_iop_rawdenoise_get_params(p, c->channel, c->mouse_x, c->mouse_y + c->mouse_pick, c->mouse_radius);
     }
     gtk_widget_queue_draw(widget);
-    dt_gui_throttle_queue(self, dt_iop_throttled_history_update, self);
+    dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
   }
   else
   {
@@ -983,7 +983,7 @@ void gui_init(dt_iop_module_t *self)
                                                   "plugins/darkroom/rawdenoise/graphheight", 280, 100),
                      FALSE, FALSE, 0);
 
-  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_gui_get_global()->scroll_mask
+  gtk_widget_add_events(GTK_WIDGET(c->area), GDK_POINTER_MOTION_MASK | dt_widget_scroll_mask()
                                            | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
                                            | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
   g_signal_connect(G_OBJECT(c->area), "draw", G_CALLBACK(rawdenoise_draw), self);
@@ -1012,7 +1012,6 @@ void gui_cleanup(dt_iop_module_t *self)
   dt_iop_rawdenoise_gui_data_t *c = (dt_iop_rawdenoise_gui_data_t *)self->gui_data;
   dt_conf_set_int("plugins/darkroom/rawdenoise/gui_channel", c->channel);
   dt_draw_curve_destroy(c->transition_curve);
-  dt_gui_throttle_cancel(self);
 
   IOP_GUI_FREE;
 }

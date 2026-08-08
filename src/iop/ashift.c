@@ -48,29 +48,29 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #include "common/colorspaces_inline_conversions.h"
-#include "control/conf.h"
+#include "common/conf.h"
 #endif
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/hash.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "common/bilateral.h"
+#include "pixel/bilateral.h"
 #include "common/image.h"
 #include "common/imagebuf.h"
-#include "common/interpolation.h"
-#include "common/math.h"
+#include "pixel/interpolation.h"
+#include "math/math.h"
 #include "common/opencl.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"
-#include "dtgtk/button.h"
+#include "widgets/button.h"
 
 #include "gui/draw.h"
 #include "gui/gtk.h"
@@ -145,7 +145,7 @@
 
 // For parameter optimization we are using the Nelder-Mead simplex method
 // implemented by Michael F. Hutt.
-#include "common/solvers/nelder_mead_simplex.h"
+#include "math/nelder_mead_simplex.h"
 
 
 DT_MODULE_INTROSPECTION(5, dt_iop_ashift_params_t)

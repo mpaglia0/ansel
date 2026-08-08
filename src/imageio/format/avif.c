@@ -36,18 +36,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/mem_alloc.h"
+#include "system/openmp.h"
+#include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include <glib/gstdio.h>
 #include "common/exif.h"
-#include "common/imageio.h"
-#include "common/imageio_module.h"
-#include "control/conf.h"
+#include "imageio/imageio_core.h"
+#include "imageio/imageio_module.h"
+#include "common/conf.h"
 #include "control/control.h"
 #include "imageio/format/imageio_format_api.h"
 

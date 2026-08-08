@@ -34,24 +34,25 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#include "control/conf.h"
+#include "widgets/widget_settings.h"
+#include "common/conf.h"
 #endif
 // our includes go first:
-#include "bauhaus/bauhaus.h"
+#include "widgets/bauhaus.h"
 #include "common/macros.h"
-#include "common/openmp.h"
-#include "common/target_clones.h"
-#include "common/mem_alloc.h"
-#include "common/simd.h"
+#include "system/openmp.h"
+#include "system/target_clones.h"
+#include "system/mem_alloc.h"
+#include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "common/chromatic_adaptation.h"
+#include "pixel/chromatic_adaptation.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/opencl.h"
 #include "develop/blend.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
-#include "develop/openmp_maths.h"
+#include "math/openmp_maths.h"
 #include "develop/imageop_gui.h"
 
 #include "gui/draw.h"
@@ -1978,7 +1979,7 @@ void gui_init(dt_iop_module_t *self)
                      dt_ui_resizable_drawing_area(GTK_WIDGET(g->area),
                                                   "plugins/darkroom/colorbalancergb/graphheight", 200, 100),
                      FALSE, FALSE, 0);
-  gtk_widget_add_events(GTK_WIDGET(g->area), dt_gui_get_global()->scroll_mask | GDK_ENTER_NOTIFY_MASK);
+  gtk_widget_add_events(GTK_WIDGET(g->area), dt_widget_scroll_mask() | GDK_ENTER_NOTIFY_MASK);
   g_signal_connect(G_OBJECT(g->area), "scroll-event", G_CALLBACK(area_scroll_callback), self);
 
   g->shadows_weight = dt_bauhaus_slider_from_params(self, "shadows_weight");

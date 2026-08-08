@@ -26,18 +26,19 @@ Enforcement: `python3 tools/pragma_once_to_guards.py --verify` exits non-zero if
 `#pragma once` reappears. `python3 tools/include_graph.py --summary` must keep reporting
 `cycles 0`.
 
-**`common/darktable.h` has no guard either — it has a TRIPWIRE.** It ends up included by
+**`darktable.h` (at `src/`, not in a module) has no guard either — it has a TRIPWIRE.** It ends up included by
 at most one path per translation unit (an entry point calling `dt_init()`, or a subsystem
 that owns one of the `darktable` members), so a *second* inclusion is never legitimate: it
 means the header arrived through a path nobody intended. A guard would absorb that
 silently; instead the file `#error`s on re-inclusion. If you hit it, do not add a guard —
 find who included it and give that code the specific lib it needs (`common/logging.h`,
-`common/mem_alloc.h`, …) or the accessor for the global it wants (`dt_dev_get_global()`,
+`system/mem_alloc.h`, …) or the accessor for the global it wants (`dt_dev_get_global()`,
 `dt_control_get_global()`, …). **No header may include it**; as of this writing none does.
 
-**When auditing this, grep for `darktable\.h"`, not `common/darktable.h"`.** Includes can be
-written relative to the including file's own directory, so `src/common/*` spells it
-`#include "darktable.h"`. Three files (and one *header*, `common/colorchecker.h`) hid behind
+**When auditing this, grep for `darktable\.h"` and check the spelling.** Includes can be
+written relative to the including file's own directory, which is how several files hid from
+earlier audits while the header still lived in `src/common/`. It now sits at `src/`, so
+`#include "darktable.h"` IS the canonical root-relative spelling. Three files (and one *header*, `common/colorchecker.h`) hid behind
 that spelling through several audits of this series; the compile-time tripwire is what
 finally caught them. `tools/include_graph.py` resolves both spellings and was right when the
 ad-hoc greps were wrong.
@@ -46,9 +47,13 @@ ad-hoc greps were wrong.
 `common/module_api.h`, `views/view_api.h`, `libs/lib_api.h`,
 `imageio/format/imageio_format_api.h`, `imageio/storage/imageio_storage_api.h`. They are
 X-macro headers, re-included several times in the *same* translation unit with different macros
-defined, and expanded *inside struct bodies* to generate members. For the same reason they must
-carry **no `#include` of their own** — an include at the top of one lands inside those structs.
-Symbols they use (`dt_version()`, `dt_print()`, `IS_NULL_PTR`) are the consuming `.c` file's
+defined, and expanded *inside struct bodies* to generate members. For the same reason a
+**top-level `#include` in one lands inside those structs**. The precise rule, as the imageio
+pair actually implement it: real includes must sit inside the `#ifdef FULL_API_H` block —
+that macro is defined only in full-API mode, while the struct-body expansion defines
+`INCLUDE_API_FROM_MODULE_H` instead and skips the block — and only *other* X-macro headers
+(`common/module_api.h`, which has no includes itself) may be included unguarded. Symbols used
+outside that block (`dt_version()`, `dt_print()`, `IS_NULL_PTR`) are the consuming `.c` file's
 responsibility.
 
 ### No SQL in GUI modules
@@ -168,7 +173,7 @@ correctly and a second, correct render finishes and gets cached, nothing guarant
 repaint of it (the thumbnail widget can be left showing the first render under a permanent "busy"
 overlay for several seconds, until an unrelated GUI event forces a redraw). Patching the
 recovery/notification side (adding a missing GUI-thread redraw request on one early-return path
-in `dtgtk/thumbnail.c`'s `_get_image_buffer()`) did not fix this reliably and was reverted — the
+in `gui/dtgtk/thumbnail.c`'s `_get_image_buffer()`) did not fix this reliably and was reverted — the
 actual fix is to not let the race start in the first place.
 
 Fixed by `dt_image_duplicate_no_reload()` (`common/image.c`): same as `dt_image_duplicate()` but
@@ -868,7 +873,7 @@ another dialog still open at that point — GTK already hands focus back to a li
 correctly; this only matters for the final return to the application. Also skip
 `GtkFileChooserDialog`/native choosers, which are a separate, already-correct subsystem. Any
 dialog created without a transient parent at all (e.g. a popup menu action, which cannot
-legitimately use the popup's own toplevel — see `dtgtk/thumbnail.c`'s "Active modules" dialog)
+legitimately use the popup's own toplevel — see `gui/dtgtk/thumbnail.c`'s "Active modules" dialog)
 should instead be parented directly to `dt_ui_main_window(darktable.gui->ui)` at creation time.
 
 ### Worker-thread → GUI-thread deferred callbacks referencing a shared struct need a refcount
@@ -971,7 +976,7 @@ See `doc/sentry.md` for setup details.
 
 Ansel carries the burden of Darktable legacy, which made it a principle to entangle all
 application layers (GUI, pipeline, history, database) and imported the whole software
-into the whole software through `#include "common/darktable.h"`. This voids the modularity
+into the whole software through `#include "darktable.h"`. This voids the modularity
 principle, creates many bugs, data races, and makes any maintenance tedious and prone to 
 edge effects, since the app is heavily asynchronous and parallel.
 
@@ -979,7 +984,7 @@ The Ansel codebase should move toward more enclosed modularity, making data stru
 to each translation unit and exposing only API to the outside (getters/setters/init/cleanup). 
 Direct value changes on data not owned by the current TU are forbidden. The dependency graph 
 should be simplified and only a minimal set of `#include` should be kept per TU. In particular,
-`src/common/darktable.h` should inherit from lower-level modules, but lower-level modules
+`src/darktable.h` should inherit from lower-level modules, but lower-level modules
 should not inherit it, so it should stop being the glue of all common helpers throughout
 the software.
 

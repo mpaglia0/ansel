@@ -40,10 +40,9 @@
 #include "common/collection.h"
 #include "common/selection.h"
 #include "common/macros.h"
-#include "common/mem_alloc.h"
+#include "system/mem_alloc.h"
 #include "common/image.h"
 #include "control/signal.h"
-#include "gui/gtk.h"
 
 static sqlite3_stmt *_selection_database_to_glist_stmt = NULL;
 
