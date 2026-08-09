@@ -31,7 +31,7 @@
 #include "common/pdf.h"
 #include "common/conf.h"
 #include "widgets/bauhaus.h"
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
@@ -45,6 +45,7 @@
 #include <strings.h>
 #include "widgets/accelerators.h"
 #include "widgets/label.h"
+#include "imageio/imageio_profile.h"
 
 DT_MODULE(1)
 

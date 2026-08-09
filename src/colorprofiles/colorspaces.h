@@ -37,8 +37,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef DT_COMMON_COLORSPACES_H
-#define DT_COMMON_COLORSPACES_H
+#ifndef DT_COLORPROFILES_COLORSPACES_H
+#define DT_COLORPROFILES_COLORSPACES_H
 
 #include "math/matrices.h"
 #include "system/simd.h"
@@ -203,6 +203,12 @@ typedef struct dt_colorspaces_t
 
 typedef struct dt_colorspaces_color_profile_t
 {
+  /* TRUE when this container created `profile` and must close it. FALSE when `profile` is
+   * borrowed from the application-wide list, which owns and closes it -- see
+   * dt_image_find_best_color_profile(), several of whose branches hand back a pointer into
+   * that list rather than a fresh profile. Only per-image containers set this; entries in the
+   * application list are freed by dt_colorspaces_cleanup() as they always were. */
+  gboolean owns_profile;
   dt_colorspaces_color_profile_type_t type; // filename is only used for type DT_COLORSPACE_FILE
   char filename[DT_IOP_COLOR_ICC_LEN];      // icc file name
   char name[512];                           // product name, displayed in GUI
@@ -249,10 +255,7 @@ cmsHPROFILE dt_colorspaces_create_vendor_profile(const char *makermodel);
 cmsHPROFILE dt_colorspaces_create_alternate_profile(const char *makermodel);
 
 /** return the work profile as set in colorin */
-const dt_colorspaces_color_profile_t *dt_colorspaces_get_work_profile(const int32_t imgid);
 
-/** return the embedded profile of a particular image **/
-const cmsHPROFILE dt_colorspaces_get_embedded_profile(const int32_t imgid, dt_colorspaces_color_profile_type_t *type, gboolean *new_profile);
 
 /* LCMS transform handles are not safe to rediscover indirectly from mutable owner
  * structs inside OpenMP regions. Alias the cmsHTRANSFORM to a local variable before
@@ -265,10 +268,6 @@ void dt_colorspaces_transform_rgba_float_image(const cmsHTRANSFORM transform, co
 void dt_colorspaces_transform_rgba8_to_bgra8(const cmsHTRANSFORM transform, const uint8_t *image_in, uint8_t *image_out,
                                              const int width, const int height);
 
-/** return the output profile as set in colorout, taking export override into account if passed in. */
-const dt_colorspaces_color_profile_t *dt_colorspaces_get_output_profile(const int32_t imgid,
-                                                                        dt_colorspaces_color_profile_type_t *over_type,
-                                                                        const char *over_filename);
 
 /** return an rgb lcms2 profile from data. if data points to a grayscale profile a new rgb profile is created
  * that has the same TRC, black and white point and rec709 primaries. */
@@ -297,6 +296,23 @@ const char *dt_colorspaces_get_name(dt_colorspaces_color_profile_type_t type, co
 void rgb2hsl(const dt_aligned_pixel_t rgb, float *h, float *s, float *l);
 void hsl2rgb(dt_aligned_pixel_t rgb, float h, float s, float l);
 
+/* Release a profile container owned by an image (dt_image_t.embedded_profile), closing the
+ * LCMS2 handle inside it. Called by the image cache when the image is evicted; nothing else
+ * should need it. Declared here so common/image_cache.c does not need the struct layout. */
+/* Build a container for a profile that belongs to ONE image rather than to the application.
+ * @p owns_profile says whether the container must close the LCMS2 handle: pass FALSE when the
+ * profile is borrowed from the application-wide list, which owns and closes it. Hidden from
+ * every combo box by construction. Freed with dt_colorspaces_free_image_profile(). */
+struct dt_colorspaces_color_profile_t *dt_colorspaces_new_image_profile(
+    dt_colorspaces_color_profile_type_t type, cmsHPROFILE profile, gboolean owns_profile);
+
+void dt_colorspaces_free_image_profile(struct dt_colorspaces_color_profile_t *profile);
+
+/* Notification that the display profile changed. The application relays it on its signal bus;
+ * this module does not know there is one. Unregistered, the notification is dropped. */
+typedef void (*dt_colorspaces_profile_changed_handler_t)(void);
+void dt_colorspaces_set_profile_changed_handler(dt_colorspaces_profile_changed_handler_t handler);
+
 /** trigger updating the display profile from the system settings (x atom, colord, ...) */
 /** Refresh the cached display profile from the monitor showing `widget`.
  *  The caller owns the window: this module never asks the GUI which one to look at. */
@@ -314,8 +330,6 @@ dt_colorspaces_get_profile(dt_colorspaces_color_profile_type_t type, const char 
  *  or just a base name */
 gboolean  dt_colorspaces_is_profile_equal(const char *fullname, const char *filename);
 
-/** try to infer profile type from CICP */
-dt_colorspaces_color_profile_type_t dt_colorspaces_cicp_to_type(const dt_colorspaces_cicp_t *cicp, const char *filename);
 
 /** update the display transforms of srgb and adobergb to the display profile.
  * make sure that dt_colorspaces_get_global()->xprofile_lock is held when calling this! */
@@ -366,39 +380,13 @@ static inline gboolean dt_colorspaces_is_embedded_or_matrix_profile_type(const d
 }
 
 
-/**
- * @brief Best effort to find a suitable (input) color profile for a given image, using embedded ICC or EXIF whenever possible.
- * This will also init the profile in the image cache.
- *
- * @param imgid ID of the picture
- * @param output If not NULL, writes the generated color profile into this pointer.
- * @param new_profile Will be set to true if a new profile was generated (aka embedded profile) and will need to be freed.
- * If false and output profile is returned, the profile returned already exists on the public list of profiles and should not be freed.
- * @return dt_colorspaces_color_profile_type_t type of profile detected. This type is tested internally and guaranteed to work.
- */
-dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t imgid, cmsHPROFILE *output, gboolean *new_profile);
 
-/**
- * @brief Resolve an embedded/matrix input profile for a given image, honoring the requested type when possible.
- * For non-RAW images, falls back to dt_image_find_best_color_profile() to avoid invalid matrix usage.
- *
- * @param imgid ID of the picture
- * @param requested Requested embedded/matrix profile type
- * @param output If not NULL, writes the generated color profile into this pointer.
- * @param new_profile Will be set to true if a new profile was generated (aka embedded profile) and will need to be freed.
- * @return dt_colorspaces_color_profile_type_t resolved type, or DT_COLORSPACE_NONE on error.
- */
-dt_colorspaces_color_profile_type_t dt_colorspaces_get_input_profile_from_image(
-    int32_t imgid,
-    dt_colorspaces_color_profile_type_t requested,
-    cmsHPROFILE *output,
-    gboolean *new_profile);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // DT_COMMON_COLORSPACES_H
+#endif // DT_COLORPROFILES_COLORSPACES_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

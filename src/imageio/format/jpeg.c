@@ -39,7 +39,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
@@ -59,6 +59,7 @@
 #undef HAVE_STDLIB_H
 #undef HAVE_STDDEF_H
 #include <jpeglib.h>
+#include "imageio/imageio_profile.h"
 #undef HAVE_STDLIB_H
 #undef HAVE_STDDEF_H
 

@@ -49,7 +49,7 @@
 #include <zlib.h>
 
 #include "widgets/bauhaus.h"
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
@@ -59,6 +59,7 @@
 #include "imageio/imageio_module.h"
 #include "common/conf.h"
 #include "imageio/format/imageio_format_api.h"
+#include "imageio/imageio_profile.h"
 
 DT_MODULE(3)
 

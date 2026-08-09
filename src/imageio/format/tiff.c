@@ -40,7 +40,7 @@
 */
 #include "widgets/bauhaus.h"
 #include "develop/imageop.h"
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
@@ -58,6 +58,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <tiffio.h>
+#include "imageio/imageio_profile.h"
 
 // it would be nice to save space by storing the masks as single channel float data,
 // but at least GIMP can't open TIFF files where not all layers have the same format.

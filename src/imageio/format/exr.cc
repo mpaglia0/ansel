@@ -42,7 +42,7 @@
 #include "glib.h"
 
 #include "widgets/bauhaus.h"
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "system/macros.h"
 #include "system/openmp.h"
 #include "system/mem_alloc.h"
@@ -61,6 +61,7 @@
 #include <OpenEXR/ImfStandardAttributes.h>
 #include <OpenEXR/ImfThreading.h>
 #include <OpenEXR/ImfOutputFile.h>
+#include "imageio/imageio_profile.h"
 
 #ifdef __cplusplus
 extern "C" {

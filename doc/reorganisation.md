@@ -211,7 +211,7 @@ Layers run low to high. A file may include from its own layer or below, never ab
 | 0 | `win/`, `external/` | — | Windows shims for POSIX; vendored third-party |
 | 1 | `math/` | **no — guaranteed** | pure algorithms: splines, expression evaluation, topological sort |
 | 1 | `common/` | yes | application services: database, caches, config, logging, image metadata, styles, tags |
-| 2 | `colorprofiles/` | not yet | LittleCMS2 profile work (see the module README) |
+| 1 | `colorprofiles/` | yes | ICC profiles: the LittleCMS2 work, the camera matrices, the transform engine, and the application-wide profile list |
 | 2 | `pixel/` | no file holds its own | pixel maths: filters, wavelets, interpolation, colour transforms |
 | 3 | `control/` | yes | jobs, signals, progress, the control loop |
 | 4 | `widgets/` | two named registries only | the GTK widget set — reusable, and **may not include `gui/`** |
@@ -329,6 +329,10 @@ A green build on one configuration proves very little here.
 - **Check the platforms you cannot build.** Anything selected by `_WIN32`, `__APPLE__` or
   `GDK_WINDOWING_*` is invisible on a Linux desktop. `check_windows_syntax.sh` covers the
   preprocessor-branch case for about a second per file.
+- **Run it.** `tools/check_it_runs.sh` exports one small PNG, exactly as CI's "Check if it runs"
+  step does. Every other check here is static and none of them can see a double free or a
+  use-after-free. A change that passed four build configurations and every gate has already
+  aborted all eight CI runners with heap corruption.
 - **Compare symbols, not line counts.** For any change that moves code, diff the set of
   functions `ctags` finds before and after. Line counts and build status both miss silent
   deletion — a view truncated to its include block still compiles, it just stops being a view.
@@ -348,10 +352,6 @@ justify an include it has always carried is how mechanical work starts dragging 
 # What remains {#what-remains}
 
 Roughly in dependency order. Layering violations (217) fall as these land.
-
-**Merge the LittleCMS2 code.** `common/colorspaces.c` (218 LCMS2 calls) and
-`pixel/iop_profile.c` (7) belong in `colorprofiles/` alongside `printprof.c`. The split
-between them today follows where the code was written, not what it does.
 
 **Extract `database`, `caches`, `metadata` from `common/`.** `common/` is 63 translation units
 and remains the largest undifferentiated module. Database access in particular should be behind

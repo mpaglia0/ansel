@@ -57,7 +57,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
@@ -123,6 +123,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include "imageio/imageio_profile.h"
 
 /**
  * @brief Map Exiv2 preview MIME types to decoder format identifiers.

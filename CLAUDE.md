@@ -629,6 +629,48 @@ similar snap anywhere in this path would silently mask a regression here rather 
 
 ## Masks / forms history
 
+### An embedded ICC profile belongs to its image, not to the application
+
+`dt_colorspaces_t.profiles` (`common/colorspaces.h`) is the application-wide profile list. It is
+built once by `dt_colorspaces_init()` and read from ~23 places with no lock, which is only sound
+while it is immutable after init. **It must stay that way.**
+
+It did not used to be. `_build_embedded_profile()`, reached from
+`dt_colorspaces_get_output_profile()`, appended a container for an image's embedded ICC to that
+list at runtime — from export jobs, which run in parallel. Three defects in one function:
+
+- an unsynchronised `g_list_append` against a list ~23 readers walk without a lock
+  (`xprofile_lock` does not cover this; it guards the *display* profile, and the readers of
+  `profiles` never take it);
+- unbounded growth — one entry per exported image, held until shutdown;
+- an outright leak whenever the profile was not newly created, because only the `new_profile`
+  branch ever registered the container it had already allocated.
+
+An embedded profile is a property of one image, so the image owns it:
+`dt_image_t.embedded_profile`, written under the image cache entry's own lock, freed by
+`dt_image_cache_deallocate()`, and reused on the next export of the same image rather than
+rebuilt. The application list is init-only again — verified by checking that every remaining
+`profiles = g_list_append` sits inside `dt_colorspaces_init()`.
+
+**Two traps, both paid for once already:**
+
+*Do not "fix" such a race by locking the append alone.* With ~23 unlocked readers that relocates
+the unsynchronised write rather than removing it. Either lock every reader, or — better, and
+what was done here — stop mutating the shared structure at runtime and give the data to whatever
+actually owns it.
+
+*A `cmsHPROFILE` in a container is not necessarily the container's to close.* Several branches
+of `dt_image_find_best_color_profile()` return a profile **borrowed** from the application-wide
+list (`dt_colorspaces_get_profile(...)->profile`) and leave its `new_profile` out-parameter
+FALSE; only the branches that build one set it TRUE. Giving the container to the image and
+closing its profile on eviction therefore double-freed every borrowed profile — the list closes
+it again at shutdown. `dt_colorspaces_color_profile_t.owns_profile` records which case a
+container is in, and only owning containers close.
+
+That second one aborted all eight CI runners with `corrupted size vs prev_size in fastbins`
+after passing four build configurations and every static gate. Nothing static can see it:
+`tools/check_it_runs.sh` runs the binary once, which does.
+
 ### Brush masks rasterize as radial spokes — wedge holes across the stroke (OPEN)
 
 Reported 2026-08-08 on `_DSC9410.NEF` (sidecar alongside it): a 57-node brush leaves four

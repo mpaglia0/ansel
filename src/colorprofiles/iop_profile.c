@@ -59,9 +59,9 @@
 #include "config.h"
 #endif
 
-#include "common/colorspaces.h"
+#include "colorprofiles/colorspaces.h"
 #include "common/pixelpipe_cache_alloc.h"
-#include "pixel/iop_profile.h"
+#include "colorprofiles/iop_profile.h"
 #include "math/matrices.h"
 
 #include <assert.h>

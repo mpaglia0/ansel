@@ -50,16 +50,13 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/colorspaces.h"
-#include "common/colormatrices.c"
+#include "colorprofiles/colorspaces.h"
+#include "colorprofiles/colormatrices.c"
 #include "common/debug.h"
-#include "common/image_cache.h"
 #include "common/file_location.h"
 #include "math/matrices.h"
 #include "common/utility.h"
 #include "common/conf.h"
-#include "control/control.h"
-#include "develop/imageop.h"
 
 #include <strings.h>
 
@@ -72,20 +69,9 @@
 #include <gdk/gdkwin32.h>
 #endif
 
-#ifdef HAVE_OPENJPEG
-#include "imageio/imageio_j2k.h"
-#endif
-#include "imageio/imageio_jpeg.h"
-#include "imageio/imageio_png.h"
-#include "imageio/imageio_tiff.h"
 #include "system/target_clones.h"
 #include "system/display_profile.h"
-#ifdef HAVE_LIBAVIF
-#include "imageio/imageio_avif.h"
-#endif
-#ifdef HAVE_LIBHEIF
-#include "imageio/imageio_heif.h"
-#endif
+#include <glib/gi18n.h>
 
 #if 0
 #include <ApplicationServices/ApplicationServices.h>
@@ -154,6 +140,21 @@ static const cmsCIExyYTRIPLE ProPhoto_Primaries = {
 };
 
 cmsCIEXYZTRIPLE Rec709_Primaries_Prequantized;
+
+/* Someone to tell when the display profile changes. The application puts it on its signal bus;
+ * this module has no bus and no business knowing there is a control loop. Unregistered, the
+ * notification is dropped -- correct for a headless run, where nothing is watching a monitor. */
+static dt_colorspaces_profile_changed_handler_t _profile_changed_handler = NULL;
+
+void dt_colorspaces_set_profile_changed_handler(dt_colorspaces_profile_changed_handler_t handler)
+{
+  _profile_changed_handler = handler;
+}
+
+static void _notify_profile_changed(void)
+{
+  if(_profile_changed_handler) _profile_changed_handler();
+}
 
 #define generate_mat3inv_body(c_type, A, B)                                                                  \
   int mat3inv_##c_type(c_type *const dst, const c_type *const src)                                           \
@@ -537,7 +538,7 @@ static cmsHPROFILE dt_colorspaces_create_adobergb_profile(void)
 
 cmsHPROFILE dt_colorspaces_create_alternate_profile(const char *makermodel)
 {
-  dt_profiled_colormatrix_t *preset = NULL;
+  const dt_profiled_colormatrix_t *preset = NULL;
   for(int k = 0; k < dt_alternate_colormatrix_cnt; k++)
   {
     if(!strcmp(makermodel, dt_alternate_colormatrices[k].makermodel))
@@ -587,7 +588,7 @@ cmsHPROFILE dt_colorspaces_create_alternate_profile(const char *makermodel)
 
 cmsHPROFILE dt_colorspaces_create_vendor_profile(const char *makermodel)
 {
-  dt_profiled_colormatrix_t *preset = NULL;
+  const dt_profiled_colormatrix_t *preset = NULL;
   for(int k = 0; k < dt_vendor_colormatrix_cnt; k++)
   {
     if(!strcmp(makermodel, dt_vendor_colormatrices[k].makermodel))
@@ -637,7 +638,7 @@ cmsHPROFILE dt_colorspaces_create_vendor_profile(const char *makermodel)
 
 cmsHPROFILE dt_colorspaces_create_darktable_profile(const char *makermodel)
 {
-  dt_profiled_colormatrix_t *preset = NULL;
+  const dt_profiled_colormatrix_t *preset = NULL;
   for(int k = 0; k < dt_profiled_colormatrix_cnt; k++)
   {
     if(!strcasecmp(makermodel, dt_profiled_colormatrices[k].makermodel))
@@ -823,416 +824,29 @@ static cmsHPROFILE dt_colorspaces_create_linear_infrared_profile(void)
   return profile;
 }
 
-const dt_colorspaces_color_profile_t *dt_colorspaces_get_work_profile(const int32_t imgid)
+
+
+
+
+
+
+struct dt_colorspaces_color_profile_t *dt_colorspaces_new_image_profile(
+    dt_colorspaces_color_profile_type_t type, cmsHPROFILE profile, gboolean owns_profile)
 {
-  // find the colorin module -- the pointer stays valid until darktable shuts down
-  static const dt_iop_module_so_t *colorin = NULL;
-  if(IS_NULL_PTR(colorin))
-  {
-    for(const GList *modules = dt_iop_get_modules_so(); modules; modules = g_list_next(modules))
-    {
-      const dt_iop_module_so_t *module = (const dt_iop_module_so_t *)(modules->data);
-      if(!strcmp(module->op, "colorin"))
-      {
-        colorin = module;
-        break;
-      }
-    }
-  }
-
-  const dt_colorspaces_color_profile_t *p = NULL;
-
-  if(colorin && colorin->get_p)
-  {
-    // get the profile assigned from colorin
-    // FIXME: does this work when using JPEG thumbs and the image was never opened?
-    sqlite3_stmt *stmt;
-    // clang-format off
-    DT_DEBUG_SQLITE3_PREPARE_V2(
-      dt_database_get_sqlite3_global(),
-      "SELECT op_params FROM main.history WHERE imgid=?1 AND operation='colorin' ORDER BY num DESC LIMIT 1", -1,
-      &stmt, NULL);
-    // clang-format on
-    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
-    if(sqlite3_step(stmt) == SQLITE_ROW)
-    {
-      // use introspection to get the profile name from the binary params blob
-      const void *params = sqlite3_column_blob(stmt, 0);
-      dt_colorspaces_color_profile_type_t *type = colorin->get_p(params, "type_work");
-      char *filename = colorin->get_p(params, "filename_work");
-
-      if(type && filename) p = dt_colorspaces_get_profile(*type, filename,
-                                                          DT_PROFILE_DIRECTION_WORK);
-    }
-    sqlite3_finalize(stmt);
-  }
-
-  // if all else fails -> fall back to linear Rec2020 RGB
-  if(IS_NULL_PTR(p)) p = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC2020, "", DT_PROFILE_DIRECTION_WORK);
-
-  return p;
+  // -1 everywhere: a profile belonging to one image has no place in any combo box.
+  dt_colorspaces_color_profile_t *container = _create_profile(type, profile, "", -1, -1, -1, -1, -1);
+  if(container) container->owns_profile = owns_profile;
+  return container;
 }
 
-dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t imgid, cmsHPROFILE *output, gboolean *new_profile)
+void dt_colorspaces_free_image_profile(struct dt_colorspaces_color_profile_t *profile)
 {
-  // Note : when the image has already been opened from cache on the current session,
-  // the embedded color profile is already inited and stored in img->profile.
-
-  // Untagged images should be assumed to be sRGB.
-  dt_colorspaces_color_profile_type_t color_profile = DT_COLORSPACE_SRGB;
-  *new_profile = FALSE;
-
-  // Fetch filename for extension retrieval
-  char filename[PATH_MAX] = { 0 };
-  gboolean from_cache = TRUE;
-  dt_image_full_path(imgid,  filename,  sizeof(filename),  &from_cache, __FUNCTION__);
-
-  const gchar *cc = filename + strlen(filename);
-  for(; *cc != '.' && cc > filename; cc--);
-  gchar *ext = g_ascii_strdown(cc + 1, -1);
-
-  // Fetch actual image
-  dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'w');
-  if(IS_NULL_PTR(img)) goto finish;
-
-  // Image codecs doing their own colorspace detection should set this to TRUE
-  gboolean already_set = FALSE;
-
-  dt_print(DT_DEBUG_COLORPROFILE, "Color profile type for %s: \n", filename);
-
-  if(img->profile && img->profile_size > 0
-     && dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size))
-  {
-    // Fast path : we already extracted ICC before. ICC profile is already inside.
-    color_profile = DT_COLORSPACE_EMBEDDED_ICC;
-    if(!IS_NULL_PTR(output))
-    {
-      *output = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
-      *new_profile = TRUE;
-    }
-    dt_print(DT_DEBUG_COLORPROFILE, "Embedded ICC profile (inline)\n");
-  }
-  else if(!isnan(img->d65_color_matrix[0])
-           && dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->d65_color_matrix))
-  {
-    // DNG and others : matrix inside EXIF
-    color_profile = DT_COLORSPACE_EMBEDDED_MATRIX;
-    if(!IS_NULL_PTR(output))
-    {
-      *output = dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->d65_color_matrix);
-      *new_profile = TRUE;
-    }
-    dt_print(DT_DEBUG_COLORPROFILE, "Embedded EXIF matrix\n");
-  }
-  else if(dt_image_is_monochrome(img))
-  {
-    // Monochrome RAW - colorspace doesn't matter
-    color_profile = DT_COLORSPACE_LIN_REC709;
-    if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "", DT_PROFILE_DIRECTION_IN)->profile;
-    dt_print(DT_DEBUG_COLORPROFILE, "Monochrome RAW\n");
-  }
-  else if(dt_image_is_matrix_correction_supported(img))
-  {
-    // Color RAW
-    color_profile = DT_COLORSPACE_STANDARD_MATRIX;
-    if(!IS_NULL_PTR(output))
-    {
-      *output = dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->adobe_XYZ_to_CAM);
-      *new_profile = TRUE;
-    }
-    dt_print(DT_DEBUG_COLORPROFILE, "Typical RAW\n");
-  }
-  else if(img->flags & DT_IMAGE_4BAYER)
-  {
-    // 4Bayer images have been pre-converted to rec2020
-    color_profile = DT_COLORSPACE_LIN_REC2020;
-    if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC2020, "", DT_PROFILE_DIRECTION_IN)->profile;
-    dt_print(DT_DEBUG_COLORPROFILE, "4Bayer RAW\n");
-  }
-  else if(img->colorspace == DT_IMAGE_COLORSPACE_SRGB)
-  {
-    // Images tagged explicitely with sRGB flag
-    color_profile = DT_COLORSPACE_SRGB;
-    dt_print(DT_DEBUG_COLORPROFILE, "Raster image tagged with sRGB\n");
-  }
-  else if(img->colorspace == DT_IMAGE_COLORSPACE_ADOBE_RGB)
-  {
-    // Images tagged explicitely with Adobe RGB flag
-    color_profile = DT_COLORSPACE_ADOBERGB;
-    if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_ADOBERGB, "", DT_PROFILE_DIRECTION_IN)->profile;
-    dt_print(DT_DEBUG_COLORPROFILE, "Raster image tagged with Adobe RGB\n");
-  }
-  else if(!strcmp(ext, "pfm"))
-  {
-    // PFM have no embedded color profile nor ICC tag, we can't know the color space
-    // but we can assume the are linear since it's a floating point format
-    color_profile = DT_COLORSPACE_LIN_REC709;
-    if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "", DT_PROFILE_DIRECTION_IN)->profile;
-    dt_print(DT_DEBUG_COLORPROFILE, "PFM untagged image\n");
-  }
-  else
-  {
-    // Images that need codecs.
-
-    // First, extract embedded profiles from headers.
-    // Done only once : if everything goes well, the next time we access this image from cache,
-    // we will read img->profile directly (first branch here).
-
-    if(!strcmp(ext, "jpg") || !strcmp(ext, "jpeg"))
-    {
-      dt_imageio_jpeg_t jpg;
-      if(!dt_imageio_jpeg_read_header(filename, &jpg))
-        img->profile_size = dt_imageio_jpeg_read_profile(&jpg, &img->profile);
-    }
-#ifdef HAVE_OPENJPEG
-    else if(!strcmp(ext, "jp2") || !strcmp(ext, "j2k") || !strcmp(ext, "j2c") || !strcmp(ext, "jpc"))
-    {
-      img->profile_size = dt_imageio_j2k_read_profile(filename, &img->profile);
-    }
-#endif
-    else if((!strcmp(ext, "tif") || !strcmp(ext, "tiff")))
-    {
-      img->profile_size = dt_imageio_tiff_read_profile(filename, &img->profile);
-    }
-    else if(!strcmp(ext, "png"))
-    {
-      img->profile_size = dt_imageio_png_read_profile(filename, &img->profile);
-    }
-#ifdef HAVE_LIBAVIF
-    else if(!strcmp(ext, "avif"))
-    {
-      dt_colorspaces_cicp_t cicp;
-      img->profile_size = dt_imageio_avif_read_profile(filename, &img->profile, &cicp);
-
-      // try the nclx box before falling back to any ICC profile
-      color_profile = dt_colorspaces_cicp_to_type(&cicp, filename);
-
-      // If we found a basic RGB colorspace from private AVIF metadata,
-      // bypass generic LCMS2 reading below
-      if(color_profile != DT_COLORSPACE_NONE) already_set = TRUE;
-    }
-#endif
-#ifdef HAVE_LIBHEIF
-    else if(!strcmp(ext, "heif") || !strcmp(ext, "heic") || !strcmp(ext, "hif"))
-    {
-      dt_colorspaces_cicp_t cicp;
-      img->profile_size = dt_imageio_heif_read_profile(filename, &img->profile, &cicp);
-
-      // try the nclx box before falling back to any ICC profile
-      color_profile = dt_colorspaces_cicp_to_type(&cicp, filename);
-
-      // If we found a basic RGB colorspace from private AVIF metadata,
-      // bypass generic LCMS2 reading below
-      if(color_profile != DT_COLORSPACE_NONE) already_set = TRUE;
-    }
-#endif
-
-    // Finally, read the prepared embedded profile
-    if(!already_set && img->profile && img->profile_size > 0
-       && dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size))
-    {
-      color_profile = DT_COLORSPACE_EMBEDDED_ICC;
-      if(!IS_NULL_PTR(output))
-      {
-        *output = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
-        *new_profile = TRUE;
-      }
-      dt_print(DT_DEBUG_COLORPROFILE, "Embedded ICC (extracted)\n");
-    }
-    else if(already_set && img->profile && img->profile_size > 0)
-    {
-      // This happens when AVIF/HEIF found a basic color profile into CICP fields
-      if(!IS_NULL_PTR(output))
-        *output = dt_colorspaces_get_profile(color_profile, "", DT_PROFILE_DIRECTION_IN)->profile;
-      dt_print(DT_DEBUG_COLORPROFILE, "Embedded ICC (extracted)\n");
-    }
-  }
-
-  // Handle the fallback to sRGB space
-  if(color_profile == DT_COLORSPACE_NONE) color_profile = DT_COLORSPACE_SRGB;
-  if(color_profile == DT_COLORSPACE_SRGB && !IS_NULL_PTR(output))
-    *output = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, "", DT_PROFILE_DIRECTION_IN)->profile;
-
-finish:
-  dt_image_cache_write_release(dt_image_cache_get_global(), img, DT_IMAGE_CACHE_RELAXED);
-  dt_free(ext);
-  return color_profile;
+  if(IS_NULL_PTR(profile)) return;
+  // Only close what this container created; a borrowed profile belongs to the application list.
+  if(profile->owns_profile) dt_colorspaces_cleanup_profile(profile->profile);
+  dt_free(profile);
 }
 
-dt_colorspaces_color_profile_type_t dt_colorspaces_get_input_profile_from_image(
-    int32_t imgid,
-    dt_colorspaces_color_profile_type_t requested,
-    cmsHPROFILE *output,
-    gboolean *new_profile)
-{
-  if(output) *output = NULL;
-  if(new_profile) *new_profile = FALSE;
-
-  if(requested == DT_COLORSPACE_NONE)
-    return dt_image_find_best_color_profile(imgid, output, new_profile);
-
-  if(requested != DT_COLORSPACE_EMBEDDED_ICC
-     && requested != DT_COLORSPACE_EMBEDDED_MATRIX
-     && requested != DT_COLORSPACE_STANDARD_MATRIX)
-    return DT_COLORSPACE_NONE;
-
-  const dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
-  if(IS_NULL_PTR(img)) return DT_COLORSPACE_NONE;
-
-  if(!dt_image_is_matrix_correction_supported(img))
-  {
-    dt_image_cache_read_release(dt_image_cache_get_global(), img);
-    return dt_image_find_best_color_profile(imgid, output, new_profile);
-  }
-
-  gboolean have_embedded_icc = (img->profile && img->profile_size > 0);
-  dt_image_cache_read_release(dt_image_cache_get_global(), img);
-
-  if(requested == DT_COLORSPACE_EMBEDDED_ICC && !have_embedded_icc)
-  {
-    // Try to extract embedded ICC into cache if needed.
-    gboolean dummy_new_profile = FALSE;
-    dt_image_find_best_color_profile(imgid, NULL, &dummy_new_profile);
-  }
-
-  img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
-  if(IS_NULL_PTR(img)) return DT_COLORSPACE_NONE;
-
-  cmsHPROFILE profile = NULL;
-  dt_colorspaces_color_profile_type_t type = requested;
-
-  if(type == DT_COLORSPACE_EMBEDDED_ICC)
-  {
-    if(img->profile && img->profile_size > 0)
-    {
-      profile = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
-      if(profile)
-      {
-        type = DT_COLORSPACE_EMBEDDED_ICC;
-        goto finish;
-      }
-    }
-    type = DT_COLORSPACE_EMBEDDED_MATRIX;
-  }
-
-  if(type == DT_COLORSPACE_EMBEDDED_MATRIX)
-  {
-    if(!isnan(img->d65_color_matrix[0]))
-    {
-      profile = dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->d65_color_matrix);
-      if(profile)
-      {
-        type = DT_COLORSPACE_EMBEDDED_MATRIX;
-        goto finish;
-      }
-    }
-    type = DT_COLORSPACE_STANDARD_MATRIX;
-  }
-
-  if(type == DT_COLORSPACE_STANDARD_MATRIX)
-  {
-    if(!isnan(img->adobe_XYZ_to_CAM[0][0]))
-    {
-      profile = dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->adobe_XYZ_to_CAM);
-      if(profile)
-      {
-        type = DT_COLORSPACE_STANDARD_MATRIX;
-        goto finish;
-      }
-    }
-  }
-
-  type = DT_COLORSPACE_LIN_REC709;
-
-finish:
-  dt_image_cache_read_release(dt_image_cache_get_global(), img);
-
-  if(profile)
-  {
-    if(output)
-    {
-      *output = profile;
-      if(new_profile) *new_profile = TRUE;
-    }
-    else
-    {
-      dt_colorspaces_cleanup_profile(profile);
-    }
-  }
-
-  return type;
-}
-
-
-const cmsHPROFILE dt_colorspaces_get_embedded_profile(const int32_t imgid, dt_colorspaces_color_profile_type_t *type, gboolean *new_profile)
-{
-  cmsHPROFILE output;
-  *type = dt_image_find_best_color_profile(imgid, &output, new_profile);
-  return output;
-}
-
-
-const dt_colorspaces_color_profile_t *_build_embedded_profile(const int32_t imgid, dt_colorspaces_color_profile_type_t *type)
-{
-  gboolean new_profile;
-  cmsHPROFILE profile = dt_colorspaces_get_embedded_profile(imgid, type, &new_profile);
-
-  // create a dt profile object. -1 in all indices ensures it's hidden from GUI
-  dt_colorspaces_color_profile_t *container = _create_profile(*type, profile, "", -1, -1, -1, -1, -1);
-
-  if(profile && container && new_profile)
-  {
-    // Set the name string for the profile
-    char *lang = getenv("LANG");
-    if(IS_NULL_PTR(lang)) lang = "en_US";
-    dt_colorspaces_get_profile_name(profile, lang, lang + 3, container->name, sizeof(container->name));
-
-    // add it to the stack of dt profiles so it gets freed properly when we don't need it anymore
-    dt_colorspaces_t *color_profiles = dt_colorspaces_get_global();
-    color_profiles->profiles = g_list_append(color_profiles->profiles, container);
-  }
-
-  return (const dt_colorspaces_color_profile_t *)container;
-}
-
-
-const dt_colorspaces_color_profile_t *dt_colorspaces_get_output_profile(const int32_t imgid,
-                                                                        dt_colorspaces_color_profile_type_t *over_type,
-                                                                        const char *over_filename)
-{
-
-  const dt_colorspaces_color_profile_t *p = NULL;
-
-  // Special case if output is undefined or uses private image color spaces : use the embedded profile if any.
-  // We need to read it from the original image and create it on-the-fly.
-  // Note: we don't allow export with deprecated vendor/enhanced/alternate matrices
-  if(*over_type == DT_COLORSPACE_NONE ||
-     *over_type == DT_COLORSPACE_EMBEDDED_ICC ||
-     *over_type == DT_COLORSPACE_STANDARD_MATRIX ||
-     *over_type == DT_COLORSPACE_EMBEDDED_MATRIX)
-  {
-    p = _build_embedded_profile(imgid, over_type);
-  }
-  else
-  {
-    // return a pointer to the profile specified in export.
-    // we have that in here to get rid of the if() check in all places calling this function.
-    p = dt_colorspaces_get_profile(*over_type, over_filename, DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);
-  }
-
-  // if all else fails -> fall back to sRGB
-  if(IS_NULL_PTR(p))
-  {
-    p = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, "", DT_PROFILE_DIRECTION_OUT);
-    *over_type = DT_COLORSPACE_SRGB;
-  }
-
-  return p;
-}
 
 #if 0
 static void dt_colorspaces_create_cmatrix(float cmatrix[4][3], float mat[3][3])
@@ -2067,7 +1681,7 @@ static void dt_colorspaces_get_display_profile_colord_callback(GObject *source, 
 
   pthread_rwlock_unlock(&color_profiles->xprofile_lock);
 
-  if(profile_changed) DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_CONTROL_PROFILE_CHANGED);
+  if(profile_changed) _notify_profile_changed();
 }
 #endif
 
@@ -2082,8 +1696,6 @@ void dt_colorspaces_set_display_profile(const dt_colorspaces_color_profile_type_
                                        GtkWidget *widget)
 {
   if(IS_NULL_PTR(widget)) return;
-
-  if(!dt_control_running()) return;
 
   dt_colorspaces_t *color_profiles = dt_colorspaces_get_global();
 
@@ -2149,7 +1761,7 @@ void dt_colorspaces_set_display_profile(const dt_colorspaces_color_profile_type_
     dt_free(buffer);
   }
   pthread_rwlock_unlock(&color_profiles->xprofile_lock);
-  if(profile_changed) DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_CONTROL_PROFILE_CHANGED);
+  if(profile_changed) _notify_profile_changed();
   dt_free(profile_source);
 }
 
@@ -2185,240 +1797,6 @@ gboolean dt_colorspaces_is_profile_equal(const char *fullname, const char *filen
     : !strcmp(_colorspaces_get_base_name(fullname), _colorspaces_get_base_name(filename));
 }
 
-dt_colorspaces_color_profile_type_t dt_colorspaces_cicp_to_type(const dt_colorspaces_cicp_t *cicp, const char *filename)
-{
-  switch(cicp->color_primaries)
-  {
-    /* Give up immediately if unspecified */
-    case DT_CICP_COLOR_PRIMARIES_UNSPECIFIED:
-      if(cicp->transfer_characteristics == DT_CICP_TRANSFER_CHARACTERISTICS_UNSPECIFIED
-         && cicp->matrix_coefficients == DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED)
-        return DT_COLORSPACE_NONE;
-      break; /* unspecified */
-
-    /* REC709 */
-    case DT_CICP_COLOR_PRIMARIES_REC709:
-
-      switch(cicp->transfer_characteristics)
-      {
-        /* SRGB */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_SRGB:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC709:
-            case DT_CICP_MATRIX_COEFFICIENTS_SYCC:
-            case DT_CICP_MATRIX_COEFFICIENTS_REC601: /* support equivalents just in case of mistagging */
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL: /* support incorrectly tagged files */
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_SRGB;
-            default:
-              break;
-          }
-
-          break; /* SRGB */
-
-        /* REC709 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_REC709:
-        case DT_CICP_TRANSFER_CHARACTERISTICS_REC601:      /* support equivalents just in case of mistagging */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_REC2020_10B: /* support equivalents just in case of mistagging */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_REC2020_12B: /* support equivalents just in case of mistagging */
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC709:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_REC709;
-            default:
-              break;
-          }
-
-          break; /* REC709 */
-
-        /* LINEAR REC709 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_LINEAR:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC709:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_LIN_REC709;
-            default:
-              break;
-          }
-
-          break; /* LINEAR REC709 */
-
-        default:
-          break;
-      }
-
-      break; /* REC709 */
-
-    /* REC2020 */
-    case DT_CICP_COLOR_PRIMARIES_REC2020:
-
-      switch(cicp->transfer_characteristics)
-      {
-        /* LINEAR REC2020 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_LINEAR:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC2020_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_LIN_REC2020;
-            default:
-              break;
-          }
-
-          break; /* LINEAR REC2020 */
-
-        /* PQ REC2020 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_PQ:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC2020_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_PQ_REC2020;
-            default:
-              break;
-          }
-
-          break; /* PQ REC2020 */
-
-        /* HLG REC2020 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_HLG:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC2020_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_HLG_REC2020;
-            default:
-              break;
-          }
-
-          break; /* HLG REC2020 */
-
-        default:
-          break;
-      }
-
-      break; /* REC2020 */
-
-    /* P3 */
-    case DT_CICP_COLOR_PRIMARIES_P3:
-
-      switch(cicp->transfer_characteristics)
-      {
-        /* PQ P3 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_PQ:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC709:
-            case DT_CICP_MATRIX_COEFFICIENTS_SYCC:
-            case DT_CICP_MATRIX_COEFFICIENTS_REC601:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_PQ_P3;
-            default:
-              break;
-          }
-
-          break; /* PQ P3 */
-
-        /* HLG P3 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_HLG:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC709:
-            case DT_CICP_MATRIX_COEFFICIENTS_SYCC:
-            case DT_CICP_MATRIX_COEFFICIENTS_REC601:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_HLG_P3;
-            default:
-              break;
-          }
-
-          break; /* HLG P3 */
-
-        /* Display P3 */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_SRGB:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY: /* support RGB (4:4:4 or lossless) */
-            case DT_CICP_MATRIX_COEFFICIENTS_REC709:
-            case DT_CICP_MATRIX_COEFFICIENTS_SYCC:
-            case DT_CICP_MATRIX_COEFFICIENTS_REC601:
-            case DT_CICP_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_DISPLAY_P3;
-            default:
-              break;
-          }
-
-          break; /* Display P3 */
-
-        default:
-          break;
-      }
-
-      break; /* P3 */
-
-    /* XYZ */
-    case DT_CICP_COLOR_PRIMARIES_XYZ:
-
-      switch(cicp->transfer_characteristics)
-      {
-        /* LINEAR XYZ */
-        case DT_CICP_TRANSFER_CHARACTERISTICS_LINEAR:
-
-          switch(cicp->matrix_coefficients)
-          {
-            case DT_CICP_MATRIX_COEFFICIENTS_IDENTITY:
-            case DT_CICP_MATRIX_COEFFICIENTS_UNSPECIFIED:
-              return DT_COLORSPACE_XYZ;
-            default:
-              break;
-          }
-
-          break; /* LINEAR XYZ */
-
-        default:
-          break;
-      }
-
-      break; /* XYZ */
-
-    default:
-      break;
-  }
-
-  if(!IS_NULL_PTR(filename))
-    dt_print(DT_DEBUG_IMAGEIO, "[colorin] unsupported CICP color profile for `%s': %d/%d/%d\n", filename,
-             cicp->color_primaries, cicp->transfer_characteristics, cicp->matrix_coefficients);
-
-  return DT_COLORSPACE_NONE;
-}
 
 static const dt_colorspaces_color_profile_t *_get_profile(dt_colorspaces_t *self,
                                                           dt_colorspaces_color_profile_type_t type,
