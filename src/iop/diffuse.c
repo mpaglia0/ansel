@@ -36,7 +36,7 @@
 #endif
 #include "widgets/bauhaus.h"
 #include "pixel/bspline.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
@@ -45,7 +45,7 @@
 #include "system/target_clones.h"
 #include "common/pixelpipe_cache_alloc.h"
 #include "pixel/dwt.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/opencl.h"
 #include "develop/develop.h"
 #include "develop/imageop_gui.h"
@@ -53,9 +53,9 @@
 #include "math/openmp_maths.h"
 #include "develop/tiling.h"
 
-#include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
+#include "widgets/label.h"
 
 // Set to one to output intermediate image steps as PFM in /tmp
 #define DEBUG_DUMP_PFM 0

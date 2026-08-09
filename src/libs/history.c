@@ -52,16 +52,18 @@
 
 #include "common/history_actions.h"
 #include "gui/common/history_actions_gui.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/styles.h"
 #include "develop/develop.h"
 #include "develop/masks.h"
 
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 #include <complex.h>
+#include "widgets/label.h"
+#include "widgets/scroll_wrap.h"
 
 DT_MODULE(1)
 

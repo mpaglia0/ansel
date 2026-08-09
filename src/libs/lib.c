@@ -60,7 +60,7 @@
 #include "views/view.h"
 #include "common/database.h"
 #include "common/debug.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module.h"
 #include "common/module_versioning.h" // dt_version(), used by libs/lib_api.h below
 #include "common/conf.h"
@@ -71,7 +71,7 @@
 
 #include "gui/color_picker_proxy.h"
 #include "libs/colorpicker.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "gui/presets.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
@@ -79,6 +79,9 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <sqlite3.h>
+#include "widgets/label.h"
+#include "widgets/popup.h"
+#include "widgets/widget_style.h"
 
 static sqlite3_stmt *_lib_presets_remove_stmt = NULL;
 static sqlite3_stmt *_lib_presets_add_stmt = NULL;

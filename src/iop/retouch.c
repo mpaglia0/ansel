@@ -41,19 +41,19 @@
 
 #ifdef HAVE_CONFIG_H
 #include "common/pixelpipe_cache_alloc.h"
+#include "develop/iop_profile.h"
 #include "widgets/widget_settings.h"
 #include "common/conf.h"
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
 #include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "gui/gtk.h"
 #include "pixel/bilateral.h"
 #include "pixel/bilateralcl.h"
 #include "common/colorspaces_inline_conversions.h"
@@ -72,6 +72,8 @@
 
 #include "gui/color_picker_proxy.h"
 #include <stdlib.h>
+#include "widgets/label.h"
+#include "gui/screen_metrics.h"
 
 // this is the version of the modules parameters,
 // and includes version information about compile-time dt

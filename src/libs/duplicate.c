@@ -40,7 +40,7 @@
 #include "control/jobs/control_jobs.h"
 #include "common/database.h"
 #include "common/debug.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/metadata.h"
 #include "control/control.h"
@@ -48,10 +48,15 @@
 #include "develop/dev_snapshot.h"
 #include "gui/dtgtk/thumbnail.h"
 
-#include "gui/gtk.h"
 #include "libs/lib.h"
 
 #include <sqlite3.h>
+#include "gui/window_manager.h"
+#include "widgets/accelerators.h"
+#include "widgets/container.h"
+#include "widgets/scroll_wrap.h"
+#include "widgets/widget_settings.h"
+#include "widgets/widget_style.h"
 
 DT_MODULE(1)
 

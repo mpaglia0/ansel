@@ -48,7 +48,7 @@
 #include "widgets/gdkkeys.h"
 #include "common/database.h"
 #include "common/debug.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/file_location.h"
 #include "common/image_cache.h"
@@ -71,6 +71,11 @@
 #include <gdk/gdkkeysyms.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
+#include "gui/application.h"
+#include "gui/window_manager.h"
+#include "widgets/accelerators.h"
+#include "widgets/label.h"
+#include "widgets/scroll_wrap.h"
 
 DT_MODULE(1)
 

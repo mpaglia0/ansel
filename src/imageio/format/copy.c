@@ -27,7 +27,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/exif.h"
@@ -35,7 +35,8 @@
 #include "imageio/imageio_module.h"
 #include "common/utility.h"
 #include "imageio/format/imageio_format_api.h"
-#include "gui/gtk.h"
+#include "widgets/label.h"
+#include "widgets/widget_settings.h"
 #include <glib/gstdio.h>
 #include <inttypes.h>
 #include <stdio.h>

@@ -53,10 +53,14 @@
 #include "gui/dtgtk/thumbtable.h"
 
 #include "gui/drag_and_drop.h"
-#include "gui/draw.h"
+#include "widgets/draw.h"
 #include "views/view.h"
 #include "views/view_api.h"
 #include <gdk/gdkkeysyms.h>
+#include "control/signal.h"
+#include "gui/application.h"
+#include "gui/window_manager.h"
+#include "widgets/accelerators.h"
 
 
 DT_MODULE(1)
@@ -319,10 +323,10 @@ static GdkPixbuf *_view_map_images_count(const int nb_images, const gboolean sam
   cairo_surface_t *cst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
   cairo_t *cr = cairo_create(cst);
   /* fill background */
-  dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_MAP_COUNT_BG);
+  dt_widget_set_source_rgb(cr, DT_GUI_COLOR_MAP_COUNT_BG);
   cairo_paint(cr);
 
-  dt_gui_gtk_set_source_rgb(cr, same_loc ? DT_GUI_COLOR_MAP_COUNT_SAME_LOC
+  dt_widget_set_source_rgb(cr, same_loc ? DT_GUI_COLOR_MAP_COUNT_SAME_LOC
                                          : DT_GUI_COLOR_MAP_COUNT_DIFF_LOC);
   cairo_set_font_size(cr, 12 * (1 + (dt_gui_get_global()->dpi_factor - 1) / 2));
   cairo_text_extents_t te;
@@ -452,7 +456,7 @@ static GdkPixbuf *_draw_ellipse(const float dlongitude, const float dlatitude,
   cairo_scale(cr, landscape ? 1 : ratio, landscape ? ratio : 1);
   cairo_translate(cr, -0.5 * w, -0.5 * h);
 
-  dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_MAP_LOC_SHAPE_LOW);
+  dt_widget_set_source_rgb(cr, DT_GUI_COLOR_MAP_LOC_SHAPE_LOW);
   cairo_arc(cr, 0.5 * w, 0.5 * h, 0.5 * h - d - d, 0, 2.0 * M_PI);
 
   cairo_set_matrix(cr, &save_matrix);
@@ -468,7 +472,7 @@ static GdkPixbuf *_draw_ellipse(const float dlongitude, const float dlatitude,
   cairo_scale(cr, landscape ? 1 : ratio, landscape ? ratio : 1);
   cairo_translate(cr, -0.5 * w, -0.5 * h);
 
-  dt_gui_gtk_set_source_rgb(cr, color_hi);
+  dt_widget_set_source_rgb(cr, color_hi);
   cairo_arc(cr, 0.5 * w, 0.5 * h, 0.5 * h - d, 0, 2.0 * M_PI);
 
   cairo_set_matrix(cr, &save_matrix);
@@ -507,7 +511,7 @@ static GdkPixbuf *_draw_rectangle(const float dlongitude, const float dlatitude,
   cairo_t *cr = cairo_create(cst);
 
   cairo_set_line_width(cr,d);
-  dt_gui_gtk_set_source_rgb(cr, DT_GUI_COLOR_MAP_LOC_SHAPE_LOW);
+  dt_widget_set_source_rgb(cr, DT_GUI_COLOR_MAP_LOC_SHAPE_LOW);
   cairo_move_to(cr, d + d, d + d);
   cairo_line_to(cr, w - d - d, d + d);
   cairo_line_to(cr, w - d - d, h - d - d);
@@ -519,7 +523,7 @@ static GdkPixbuf *_draw_rectangle(const float dlongitude, const float dlatitude,
   cairo_line_to(cr, 0.5 * w + cross, 0.5 * h - d);
   cairo_stroke(cr);
 
-  dt_gui_gtk_set_source_rgb(cr, dlon == max_size || dlon == cross_size ||
+  dt_widget_set_source_rgb(cr, dlon == max_size || dlon == cross_size ||
                                 dlat == max_size || dlat == cross_size
                                 ? main ? DT_GUI_COLOR_MAP_LOC_SHAPE_DEF
                                        : DT_GUI_COLOR_MAP_LOC_SHAPE_HIGH

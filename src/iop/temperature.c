@@ -67,7 +67,7 @@
 #include <string.h>
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -81,13 +81,15 @@
 #include "develop/imageop_gui.h"
 #include "develop/imageop_math.h"
 
-#include "gui/gtk.h"
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
 
 // for Kelvin temperature and bogus WB
 #include "common/colorspaces.h"
 #include "external/cie_colorimetric_tables.c"
+#include "widgets/collapsible_section.h"
+#include "widgets/label.h"
+#include "widgets/widget_style.h"
 
 DT_MODULE_INTROSPECTION(3, dt_iop_temperature_params_t)
 

@@ -16,7 +16,7 @@
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/act_on.h"
 #include "common/colorspaces.h"   // dt_colorspaces_get_global(), and lcms2 for cmsHTRANSFORM
 #include "system/openmp.h"
@@ -32,7 +32,7 @@
 #include "control/control.h"
 #include "control/jobs.h"
 #include "control/signal.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "widgets/gtkentry.h"
 #include "libs/lib.h"
 #include "views/view.h"
@@ -42,6 +42,10 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/label.h"
+#include "widgets/popup.h"
+#include "widgets/scroll_wrap.h"
+#include "widgets/widget_settings.h"
 
 #ifdef _OPENMP
 #include <omp.h>

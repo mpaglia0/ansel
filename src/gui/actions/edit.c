@@ -30,11 +30,15 @@
 #include "common/selection.h"
 #include "common/image_cache.h"
 #include "common/history.h"
-#include "common/history_merge.h"
-#include "gui/common/history_merge_gui.h"
+#include "develop/history_merge.h"
+#include "gui/develop/history_merge_gui.h"
 #include "develop/dev_history.h"
 #include "develop/develop.h"
 #include "control/control.h"
+#include <glib.h>
+#include "gui/application.h"
+#include "widgets/accelerators.h"
+#include "common/glib_utils.h"
 
 
 MAKE_ACCEL_WRAPPER(dt_gui_preferences_show)

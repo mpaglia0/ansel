@@ -34,7 +34,7 @@
 #include <gdk/gdkwayland.h>
 #endif
 
-#include "common/dtpthread.h"
+#include "system/dtpthread.h"
 
 G_BEGIN_DECLS
 
@@ -390,6 +390,15 @@ void dt_accels_search(dt_accels_t *accels, GtkWindow *main_window, GtkWidget *an
 /** The accels instance this process uses. Set once by the host at GUI init. */
 void dt_accels_set_global(dt_accels_t *accels);
 dt_accels_t *dt_accels_get_global(void);
+
+/**
+ * @brief Disconnect accels while a text or search entry has the focus, and reconnect them when
+ * it loses it. This is what makes one-key shortcuts safe to have at all. Escape hands focus
+ * back to the host's main area via dt_widget_refocus().
+ *
+ * @param widget the entry to guard.
+ */
+void dt_accels_disconnect_on_text_input(GtkWidget *widget);
 
 /** Vertical offset, in pixels, below which a shortcut window should be placed (the host's
  *  top panel height). Unregistered: 0. */

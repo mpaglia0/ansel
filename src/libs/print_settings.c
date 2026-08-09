@@ -47,11 +47,11 @@
 #include "common/file_location.h"
 #include "common/image_cache.h"
 #include "common/logging.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/metadata.h"
 #include "common/module_versioning.h"
 #include "common/pdf.h"
-#include "common/printprof.h"
+#include "colorprofiles/printprof.h"
 #include "common/printing.h"
 #include "common/styles.h"
 #include "common/tags.h"
@@ -59,12 +59,13 @@
 #include "common/utility.h"
 #include "control/jobs.h"
 
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 #include "views/view.h"
 
 #include <glib/gstdio.h>
+#include "widgets/label.h"
 
 DT_MODULE(4)
 

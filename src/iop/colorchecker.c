@@ -40,7 +40,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
@@ -58,7 +58,6 @@
 #include "math/openmp_maths.h"
 #include "widgets/drawingarea.h"
 
-#include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 #include "math/gaussian_elimination.h"
@@ -70,6 +69,7 @@
 
 #include <gtk/gtk.h>
 #include <inttypes.h>
+#include "gui/screen_metrics.h"
 
 DT_MODULE_INTROSPECTION(2, dt_iop_colorchecker_params_t)
 

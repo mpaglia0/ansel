@@ -59,14 +59,15 @@
 #include "develop/develop.h"
 #include "develop/imageop_gui.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/scroll_wrap.h"
+#include "gui/screen_metrics.h"
 
 DT_MODULE_INTROSPECTION(1, dt_iop_lowlight_params_t)
 

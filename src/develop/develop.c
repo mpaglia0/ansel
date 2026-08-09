@@ -83,9 +83,12 @@
 #include "develop/lightroom.h"
 #include "develop/masks.h"
 #include "develop/pixelpipe_cache.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "develop/gui_throttle.h"
 #include "libs/colorpicker.h"
+#include "widgets/label.h"
+#include "widgets/widget_style.h"
+#include "gui/screen_metrics.h"
 
 #define DT_IOP_ORDER_INFO (dt_get_debug_flags() & DT_DEBUG_IOPORDER)
 
@@ -1945,14 +1948,14 @@ void dt_dev_update_mouse_effect_radius(dt_develop_t *dev)
 
   // Keep mouse hit-tests usable across zoom levels by bounding the selection
   // radius once it is expressed in image-space pixels.
-  dt_gui_get_global()->mouse.effect_radius_clamped = CLAMP(dt_gui_get_global()->mouse.effect_radius, 
-                                                    DT_PIXEL_APPLY_DPI(4.0f) / zoom_level,
-                                                    DT_PIXEL_APPLY_DPI(15.0f) / zoom_level);
+  const float radius = dt_widget_mouse_radius();
+  const float clamped = CLAMP(radius, DT_PIXEL_APPLY_DPI(4.0f) / zoom_level,
+                              DT_PIXEL_APPLY_DPI(15.0f) / zoom_level);
+  dt_widget_set_mouse_radius(radius, clamped);
 
   dt_print(DT_DEBUG_MASKS,
            "[mouse] effect_radius=%0.3f effect_radius_clamped=%0.3f zoom_level=%0.4f ppd=%0.4f\n",
-           dt_gui_get_global()->mouse.effect_radius, dt_gui_get_global()->mouse.effect_radius_clamped,
-           zoom_level, dt_gui_get_global()->ppd);
+           radius, clamped, zoom_level, dt_screen_ppd());
 }
 
 void dt_dev_set_backbuf(dt_backbuf_t *backbuf, const int width, const int height, const size_t bpp, 

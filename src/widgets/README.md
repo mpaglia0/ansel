@@ -14,11 +14,11 @@ A file belongs here only if it carries **no application state**:
 * no `dt_*_get_global()` accessor of any kind,
 * no `dt_conf_*` — a widget is configured by its caller, not by reading preferences,
 * no `#include` from `common/`, `develop/`, `control/`, `views/`, `libs/` or `imageio/`
-  *except* pure macro headers that carry no state (`common/macros.h` for `IS_NULL_PTR`),
+  *except* pure macro headers that carry no state (`system/macros.h` for `IS_NULL_PTR`),
   which sit at a lower layer and are legitimate to depend on.
 
 **Every file here satisfies the first three — verified, zero violations.** Configuration
-arrives through setters (`dtgtk_side_panel_set_min_width()`), shared toolkit state lives in
+arrives through setters (`dt_widget_set_min_panel_width()`), shared toolkit state lives in
 `widget_settings.h`, and behaviour that needs the application is announced as a signal for
 the caller to act on (`resetlabel` emits `"reset"`; `develop/imageop_gui.c` attaches the
 IOP meaning).
@@ -32,12 +32,12 @@ No file here includes anything from `gui/`. What each of them needed came out wi
 | `dt_gui_add_class` / `remove_class` (gui/gtk.c) | `widget_style.{c,h}` |
 | widget-freeze depth + `dt_gui_widgets_suppressed` | `widget_settings` — the counter left `dt_gui_gtk_t` |
 | `dt_gui_get_scroll_unit_delta(s)` | `widget_settings` |
-| `dt_draw_star`, `dt_draw_line`, `set_color` | `cairo_shapes.h` |
+| `dt_draw_star`, `dt_draw_line`, `set_color` | `draw.h` |
 | bauhaus colour-label palette | `dt_widget_colorlabel()` + `DT_WIDGET_COLORLABEL_*` |
 | `gui/gdkkeys.h` (pure keysym mapping) | `widgets/gdkkeys.h` |
 | pipeline-tracked allocator in `focus_peaking` | plain `dt_alloc_align` |
 
-`gui/gtk.h` includes `widget_settings.h` and `widget_style.h`, so the 45 files that used those
+`gui/application.h` includes `widget_settings.h` and `widget_style.h`, so the 45 files that used those
 names keep compiling unchanged.
 
 **What the application registers at startup**, in `dt_gui_gtk_init()` unless noted:
@@ -71,7 +71,7 @@ of one.
 
 ### What is still depended on, and legitimately
 
-Downward includes only: `system/` (allocation, SIMD), `math/`, `common/macros.h` for
+Downward includes only: `system/` (allocation, SIMD), `math/`, `system/macros.h` for
 `IS_NULL_PTR`, and — in `focus_peaking.c` alone — `pixel/eigf.h` for the guided filter. All
 sit below layer 4. That last one means `focus_peaking.c` is not portable to another
 application as-is, unlike the rest.
@@ -95,7 +95,7 @@ application as-is, unlike the rest.
 | `gdkkeys.h` | keysym mapping (numpad/main-pad equivalence) |
 | `widget_settings.{c,h}` | toolkit state: scroll, DPI/em metrics, freeze depth, palette |
 | `widget_style.{c,h}` | CSS class helpers, label capitalisation |
-| `cairo_shapes.h` | `dt_draw_star`, `dt_draw_line`, `set_color` |
+| `draw.h` | `dt_draw_star`, `dt_draw_line`, `set_color` |
 
 ## What stayed behind in `gui/dtgtk/`, and why
 

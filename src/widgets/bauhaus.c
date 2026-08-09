@@ -58,13 +58,13 @@
 */
 
 #include "widgets/gdkkeys.h"
+#include "widgets/draw.h"
 #include "widgets/widget_settings.h"
 #include "widgets/paint.h"
 #include "widgets/bauhaus.h"
-#include "common/calculator.h"
+#include "math/calculator.h"
 #include "math/math.h"
-#include "common/logging.h"
-#include "common/macros.h"
+#include "system/macros.h"
 
 
 #include "widgets/accelerators.h"
@@ -78,6 +78,7 @@
 #include <math.h>
 
 #include <pango/pangocairo.h>
+#include "system/surface_scaling.h"
 #ifdef GDK_WINDOWING_WAYLAND
 #include <gdk/gdkwayland.h>
 #endif
@@ -482,8 +483,7 @@ static gboolean ensure_focus_idle(gpointer data)
     GtkWidget *toplevel = gtk_widget_get_toplevel(target);
     GtkWidget *gtk_focus = (toplevel && gtk_widget_is_toplevel(toplevel))
                            ? gtk_window_get_focus(GTK_WINDOW(toplevel)) : NULL;
-    dt_print(DT_DEBUG_SHORTCUTS,
-             "[bauhaus] ensure_focus_idle success target=%s(%p) gtk_focus=%s(%p) scroll_focus=%s(%p)\n",
+    dt_widget_log("[bauhaus] ensure_focus_idle success target=%s(%p) gtk_focus=%s(%p) scroll_focus=%s(%p)\n",
              gtk_widget_get_name(target), (void *)target,
              !IS_NULL_PTR(gtk_focus) ? gtk_widget_get_name(gtk_focus) : "<null>", (void *)gtk_focus,
              !IS_NULL_PTR(dt_widget_scroll_focus()) ? gtk_widget_get_name(dt_widget_scroll_focus()) : "<null>",
@@ -496,8 +496,7 @@ static gboolean ensure_focus_idle(gpointer data)
   const int tries = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY)) + 1;
   if(tries >= DT_BAUHAUS_FOCUS_IDLE_MAX_TRIES)
   {
-    dt_print(DT_DEBUG_SHORTCUTS,
-             "[bauhaus] ensure_focus_idle abort target=%s(%p) tries=%d drawable=%d\n",
+    dt_widget_log("[bauhaus] ensure_focus_idle abort target=%s(%p) tries=%d drawable=%d\n",
              gtk_widget_get_name(target), (void *)target, tries, gtk_widget_is_drawable(target));
     g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_SOURCE_KEY, NULL);
     g_object_set_data(G_OBJECT(target), DT_BAUHAUS_FOCUS_IDLE_TRIES_KEY, NULL);
@@ -2475,7 +2474,7 @@ static gboolean dt_bauhaus_popup_draw(GtkWidget *widget, cairo_t *crf, gpointer 
   // get area properties
   GtkAllocation allocation;
   gtk_widget_get_allocation(widget, &allocation);
-  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, allocation.width, allocation.height);
+  cairo_surface_t *cst = dt_cairo_surface_create_at_scale(CAIRO_FORMAT_ARGB32, allocation.width, allocation.height, dt_widget_ppd());
   cairo_t *cr = cairo_create(cst);
   GtkStyleContext *context = gtk_widget_get_style_context(widget);
 
@@ -2696,7 +2695,7 @@ static float _get_combobox_max_width(GtkWidget *widget)
   GtkStyleContext *context = gtk_widget_get_style_context(widget);
   const GtkStateFlags state = gtk_widget_get_state_flags(widget);
 
-  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 999, 999);
+  cairo_surface_t *cst = dt_cairo_surface_create_at_scale(CAIRO_FORMAT_ARGB32, 999, 999, dt_widget_ppd());
   cairo_t *cr = cairo_create(cst);
 
   float width = 0.f;
@@ -2770,7 +2769,7 @@ static gboolean _widget_draw(GtkWidget *widget, cairo_t *crf)
   // Force allocate to our requirements. Yes, it's ugly.
   gtk_widget_size_allocate(widget, &allocation);
 
-  cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, allocation.width, allocation.height);
+  cairo_surface_t *cst = dt_cairo_surface_create_at_scale(CAIRO_FORMAT_ARGB32, allocation.width, allocation.height, dt_widget_ppd());
   cairo_t *cr = cairo_create(cst);
 
   GdkRGBA *text_color = default_color_assign();

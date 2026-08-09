@@ -42,9 +42,9 @@
 #define DT_WIDGETS_BAUHAUS_H
 
 #include "common/colorlabels.h"
-#include "widgets/cairo_shapes.h"   // set_color
 #include "common/gui_module_api.h"
 #include "common/introspection.h"
+#include "widgets/widget_settings.h"   // DT_GUI_BOX_SPACING, for INTERNAL_PADDING
 
 #include <assert.h>
 #include <gdk/gdkkeysyms.h>

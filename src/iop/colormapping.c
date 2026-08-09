@@ -41,7 +41,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -59,7 +59,6 @@
 #include "develop/tiling.h"
 #include "widgets/drawingarea.h"
 
-#include "gui/gtk.h"
 #include "iop/iop_api.h"
 
 #include <gtk/gtk.h>
@@ -67,6 +66,8 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/label.h"
+#include "gui/screen_metrics.h"
 
 /**
  * color transfer somewhat based on the glorious paper `color transfer between images'

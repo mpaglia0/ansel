@@ -16,19 +16,21 @@
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "common/logging.h"
-#include "common/iop_profile.h"
+#include "common/colorspaces.h"   // dt_colorspaces_get_global, and lcms2
+#include "common/colorspaces_inline_conversions.h"   // dt_Lab_to_XYZ
 #include "common/conf.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "system/simd.h"
 #include "common/times.h"
 #include "control/signal.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "control/control.h"
 #include "common/image_cache.h"
 #include "views/view.h"
 
 #include <gtk/gtk.h>
+#include "widgets/widget_settings.h"
 
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"

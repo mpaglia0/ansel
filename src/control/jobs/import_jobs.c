@@ -20,20 +20,21 @@
 #include "common/collection.h"
 #include "common/datetime.h"
 #include "common/exif.h"
-#include "common/history_merge.h"
+#include "develop/history_merge.h"
 #include "common/metadata.h"
 #include "common/styles.h"
 #include "control/control.h"
 #include "common/film.h"
 #include "common/image.h"
 #include "control/jobs/control_jobs.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 
 #ifndef _WIN32
 #endif
 #include <string.h>
 #include <glib/gstdio.h>
 #include "common/utility.h"
+#include "widgets/widget_style.h"
 #ifdef __APPLE__
 #include "osx/osx.h"
 #endif

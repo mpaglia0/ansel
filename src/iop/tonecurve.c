@@ -66,12 +66,13 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "widgets/gdkkeys.h"
+#include "develop/iop_profile.h"
 #include "widgets/widget_settings.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "config.h"
 #endif
 #include <assert.h>
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -89,13 +90,15 @@
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "gui/presets.h"
 #include "gui/color_picker_proxy.h"
 
 #include "iop/iop_api.h"
 #include "libs/colorpicker.h"
+#include "widgets/notebook.h"
+#include "widgets/scroll_wrap.h"
+#include "gui/screen_metrics.h"
 
 #define DT_GUI_CURVE_EDITOR_INSET DT_PIXEL_APPLY_DPI(1)
 #define DT_GUI_CURVE_INFL .3f

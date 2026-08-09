@@ -23,14 +23,14 @@
 
 #include "widgets/bauhaus.h"
 #include "pixel/chromatic_adaptation.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
 #include "system/simd.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "pixel/illuminants.h"
 #include "math/matrices.h"
 #include "common/opencl.h"
@@ -39,7 +39,6 @@
 #include "develop/imageop.h"
 #include "math/openmp_maths.h"
 #include "gui/color_picker_proxy.h"
-#include "gui/gtk.h"
 #include "iop/channelmixerrgb_shared.h"
 #include "iop/iop_api.h"
 
@@ -51,6 +50,9 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "gui/screen_metrics.h"
 
 DT_MODULE_INTROSPECTION(1, dt_iop_splittoning_rgb_params_t)
 

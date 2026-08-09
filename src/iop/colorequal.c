@@ -18,6 +18,7 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/iop_profile.h"
 #endif
 
 #include <math.h>
@@ -26,7 +27,7 @@
 
 #include "widgets/bauhaus.h"
 #include "pixel/colorequal_shared.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -35,7 +36,7 @@
 #include "common/times.h"
 #include "common/module_versioning.h"
 #include "common/imagebuf.h"
-#include "common/lut3d.h"
+#include "pixel/lut3d.h"
 #include "gui/lut_viewer.h"
 #include "common/opencl.h"
 #include "common/conf.h"
@@ -47,10 +48,13 @@
 #include "develop/imageop_gui.h"
 #include "develop/pixelpipe_cache.h"
 #include "gui/color_picker_proxy.h"
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
+#include "gui/application.h"
 #include "develop/gui_throttle.h"
 #include "iop/iop_api.h"
+#include "widgets/scroll_wrap.h"
+#include "widgets/widget_style.h"
+#include "gui/screen_metrics.h"
 
 #ifdef _OPENMP
 #include <omp.h>

@@ -46,7 +46,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "system/simd.h"
 #include "control/signal.h"
@@ -54,9 +54,9 @@
 #include "develop/blend.h"
 #include "widgets/bauhaus.h"
 #include "gui/bauhaus_conf.h"
-#include "common/dtpthread.h"
+#include "system/dtpthread.h"
 #include "math/math.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/conf.h"
 #include "control/control.h"
 #include "develop/develop.h"
@@ -67,12 +67,19 @@
 #include "widgets/gradientslider.h"
 
 #include "gui/actions/menu.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "libs/colorpicker.h"
 
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/collapsible_section.h"
+#include "widgets/container.h"
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "widgets/popup.h"
+#include "widgets/scroll_wrap.h"
+#include "widgets/widget_style.h"
 
 #define NEUTRAL_GRAY 0.5
 #define BLEND_MASKMODE_CONF_KEY "plugins/darkroom/blending/mask_mode_tab"

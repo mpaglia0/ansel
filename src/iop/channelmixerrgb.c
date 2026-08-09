@@ -47,7 +47,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -62,14 +62,13 @@
 #include "common/file_location.h"
 #include "pixel/illuminants.h"
 #include "common/imagebuf.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/opencl.h"
 #include "control/control.h"
 #include "develop/imageop_gui.h"
 #include "math/openmp_maths.h"
 #include "math/gaussian_elimination.h"
 #include "gui/color_picker_proxy.h"
-#include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/channelmixerrgb_shared.h"
 #include "iop/iop_api.h"
@@ -87,6 +86,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "gui/screen_metrics.h"
 
 DT_MODULE_INTROSPECTION(3, dt_iop_channelmixer_rgb_params_t)
 

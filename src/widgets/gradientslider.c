@@ -39,7 +39,7 @@
 #include <assert.h>
 #include <string.h>
 
-#include "common/macros.h"
+#include "system/macros.h"
 #include <math.h>
 #include "widgets/widget_settings.h"
 #include "system/mem_alloc.h"
@@ -47,6 +47,7 @@
 #include "gradientslider.h"
 #include "widgets/widget_style.h"
 #include "widgets/widget_settings.h"
+#include "widgets/paint.h"
 
 #define DTGTK_GRADIENT_SLIDER_VALUE_CHANGED_DELAY_MAX 50
 #define DTGTK_GRADIENT_SLIDER_VALUE_CHANGED_DELAY_MIN 10

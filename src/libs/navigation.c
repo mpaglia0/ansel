@@ -44,16 +44,19 @@
 */
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/times.h"
 #include "control/control.h"
 #include "develop/dev_pixelpipe.h"
 #include "develop/develop.h"
 
-#include "gui/gtk.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
+#include "gui/window_manager.h"
+#include "widgets/popup.h"
+#include "widgets/scroll_wrap.h"
+#include "gui/screen_metrics.h"
 
 DT_MODULE(1)
 

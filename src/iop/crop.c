@@ -32,7 +32,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/mem_alloc.h"
 #include "common/logging.h"
@@ -48,8 +48,7 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "gui/guides.h"
 #include "iop/iop_api.h"
 
@@ -59,6 +58,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/collapsible_section.h"
 
 DT_MODULE_INTROSPECTION(1, dt_iop_crop_params_t)
 

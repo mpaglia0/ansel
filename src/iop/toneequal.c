@@ -108,7 +108,7 @@
 #include <time.h>
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -131,13 +131,18 @@
 #include "develop/pixelpipe_cache.h"
 
 #include "gui/color_picker_proxy.h"
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
+#include "gui/application.h"
 #include "gui/presets.h"
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
 #include "math/choleski.h"
 #include "libs/colorpicker.h"
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "widgets/scroll_wrap.h"
+#include "widgets/widget_style.h"
+#include "gui/screen_metrics.h"
 
 #ifdef _OPENMP
 #include <omp.h>

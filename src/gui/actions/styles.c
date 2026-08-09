@@ -21,11 +21,11 @@
 #include "osx/osx.h"   // dt_osx_disallow_fullscreen(), used under GDK_WINDOWING_QUARTZ below
 #endif
 #include "common/history_actions.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "gui/styles.h"
 #include "common/act_on.h"
-#include "common/history_merge.h"
-#include "gui/common/history_merge_gui.h"
+#include "develop/history_merge.h"
+#include "gui/develop/history_merge_gui.h"
 #include "common/styles.h"
 #include "common/usermanual_url.h"
 #include "develop/dev_history.h"
@@ -35,6 +35,7 @@
 #include "libs/lib.h"
 
 #include <glib.h>
+#include "widgets/label.h"
 
 static GtkWidget **_styles_menus = NULL;
 static GList **_styles_lists = NULL;

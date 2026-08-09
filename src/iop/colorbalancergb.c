@@ -34,12 +34,13 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/iop_profile.h"
 #include "widgets/widget_settings.h"
 #include "common/conf.h"
 #endif
 // our includes go first:
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -54,14 +55,18 @@
 #include "math/openmp_maths.h"
 #include "develop/imageop_gui.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
+#include "gui/application.h"
 #include "gui/presets.h"
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
 
 //#include <gtk/gtk.h>
 #include <stdlib.h>
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "widgets/scroll_wrap.h"
+#include "gui/screen_metrics.h"
 #define LUT_ELEM 360     // gamut LUT number of elements: resolution of 1°
 #define STEPS 92         // so we test 92x92x92 combinations of RGB in [0; 1] to build the gamut LUT
 

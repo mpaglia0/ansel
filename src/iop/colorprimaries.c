@@ -18,6 +18,7 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/iop_profile.h"
 #endif
 
 #include <math.h>
@@ -26,7 +27,7 @@
 
 #include "widgets/bauhaus.h"
 #include "pixel/colorequal_shared.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -40,8 +41,10 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "gui/color_picker_proxy.h"
-#include "gui/gtk.h"
 #include "iop/iop_api.h"
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "widgets/widget_style.h"
 
 DT_MODULE_INTROSPECTION(1, dt_iop_colorprimaries_params_t)
 

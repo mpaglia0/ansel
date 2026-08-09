@@ -42,7 +42,7 @@
 #endif
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
@@ -51,14 +51,14 @@
 #include "common/imagebuf.h"
 #include "common/colorspaces.h"
 #include "common/file_location.h"
-#include "common/iop_profile.h"
-#include "common/lut3d.h"
+#include "develop/iop_profile.h"
+#include "pixel/lut3d.h"
 #include "control/control.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/develop.h"
 #include "widgets/button.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 
 #include "iop/iop_api.h"
 
@@ -68,6 +68,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <dirent.h>
+#include "widgets/widget_style.h"
 #if defined (_WIN32)
 #include "win/getdelim.h"
 #endif // defined (_WIN32)

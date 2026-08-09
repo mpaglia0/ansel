@@ -52,7 +52,7 @@
 #include "widgets/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "pixel/chromatic_adaptation.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -62,7 +62,7 @@
 #include "common/pixelpipe_cache_alloc.h"
 #include "pixel/bspline.h"
 #include "common/image.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/opencl.h"
 #include "develop/develop.h"
 #include "develop/imageop_gui.h"
@@ -73,19 +73,24 @@
 #include "widgets/paint.h"
 
 #include "gui/color_picker_proxy.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "math/gaussian_elimination.h"
 #include "iop/iop_api.h"
 
 
 #include "develop/imageop.h"
-#include "gui/draw.h"
+#include "widgets/draw.h"
 
 #include <assert.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "widgets/scroll_wrap.h"
+#include "widgets/widget_style.h"
+#include "gui/screen_metrics.h"
 
 #define INVERSE_SQRT_3 0.5773502691896258f
 #define SAFETY_MARGIN 0.01f

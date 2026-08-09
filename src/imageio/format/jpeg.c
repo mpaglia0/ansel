@@ -40,7 +40,7 @@
 #endif
 #include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include <glib/gstdio.h>
@@ -50,7 +50,6 @@
 #include "imageio/imageio_module.h"
 #include "common/conf.h"
 #include "imageio/format/imageio_format_api.h"
-#include "gui/gtk.h"
 
 #include <inttypes.h>
 #include <setjmp.h>

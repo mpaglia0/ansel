@@ -82,8 +82,6 @@
 #include "control/jobs.h"
 #include "gui/dtgtk/thumbtable.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
 #include "views/view.h"
 #include "views/view_api.h"
 
@@ -100,6 +98,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "gui/application.h"
+#include "control/signal.h"
+#include "gui/window_manager.h"
+#include "widgets/accelerators.h"
 
 DT_MODULE(1)
 

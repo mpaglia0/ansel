@@ -67,7 +67,7 @@
 */
 #include "common/global_mutexes.h"
 #include "common/utility.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
 #include "system/mem_alloc.h"
@@ -89,7 +89,6 @@
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"
 
-#include "gui/gtk.h"
 #include "iop/iop_api.h"
 #include <assert.h>
 #include <ctype.h>
@@ -100,6 +99,8 @@
 #include <string.h>
 
 #include <lensfun.h>
+#include "widgets/popup.h"
+#include "widgets/widget_style.h"
 
 extern "C" {
 

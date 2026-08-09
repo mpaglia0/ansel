@@ -62,7 +62,7 @@
 #include "control/jobs/control_jobs.h"
 #include "common/collection.h"
 #include "common/colorspaces.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
@@ -74,13 +74,15 @@
 #include "control/control.h"
 #include "control/signal.h"
 
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
 #include <gdk/gdkkeysyms.h>
+#include "widgets/container.h"
+#include "widgets/label.h"
 
 static sqlite3_stmt *_export_presets_stmt = NULL;
 #include <gtk/gtk.h>

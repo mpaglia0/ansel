@@ -21,12 +21,13 @@
 #include "control/jobs/control_jobs.h"
 #include "common/database.h"
 #include "common/image.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/grouping.h"
 #include "common/colorlabels.h"
 #include "common/ratings.h"
 #include "control/control.h"
 #include "common/collection.h"
+#include "common/debug.h"
 
 static gboolean rotate_counterclockwise_callback(GtkAccelGroup *group, GObject *acceleratable, guint keyval, GdkModifierType mods, gpointer user_data)
 {

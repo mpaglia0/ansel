@@ -40,17 +40,18 @@
 */
 #include "develop/masks.h"
 #include "common/logging.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "control/control.h"
 #include "develop/blend.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
+#include "gui/application.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 #include "views/view.h"
+#include "widgets/scroll_wrap.h"
 
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"

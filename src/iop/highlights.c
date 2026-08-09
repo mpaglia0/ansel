@@ -51,7 +51,7 @@
  */
 #ifdef HAVE_CONFIG_H
 #include "common/logging.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "system/openmp.h"
@@ -72,7 +72,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "gui/gtk.h"
 #include "iop/iop_api.h"
 // Highlights internals: harmonic mode is a set of compiled per-stage TUs; include only the
 // shared types (params + per-module OpenCL global data) and the high-level harmonic driver.
@@ -85,6 +84,7 @@
 
 #include <gtk/gtk.h>
 #include <inttypes.h>
+#include "widgets/label.h"
 
 // Downsampling factor for guided-laplacian
 

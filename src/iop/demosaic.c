@@ -58,7 +58,7 @@
 #include "config.h"
 #endif
 
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -89,7 +89,6 @@
 #include "common/colorspaces_inline_conversions.h"
 #include "pixel/bspline.h"
 
-#include "gui/gtk.h"
 #include "iop/iop_api.h"
 
 #include <memory.h>
@@ -98,6 +97,7 @@
 #include <time.h>
 #include <complex.h>
 #include <glib.h>
+#include "widgets/label.h"
 
 #ifdef __GNUC__
   #define INLINE __inline

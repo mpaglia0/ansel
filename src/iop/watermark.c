@@ -57,7 +57,7 @@
 */
 
 #include "common/global_mutexes.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "system/mem_alloc.h"
 #include "system/openmp.h"
@@ -74,7 +74,6 @@
 #include "widgets/togglebutton.h"
 
 #include "gui/color_picker_proxy.h"
-#include "gui/gtk.h"
 #include "iop/iop_api.h"
 #include <assert.h>
 #include <gtk/gtk.h>
@@ -91,6 +90,9 @@
 
 #include "common/file_location.h"
 #include "common/utility.h"
+#include "widgets/accelerators.h"
+#include "widgets/container.h"
+#include "widgets/label.h"
 
 DT_MODULE_INTROSPECTION(5, dt_iop_watermark_params_t)
 

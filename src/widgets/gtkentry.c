@@ -39,7 +39,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "widgets/gtkentry.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 
 #include <glib/gi18n.h>
@@ -199,7 +199,7 @@ void dt_gtkentry_setup_completion(GtkEntry *entry, const dt_gtkentry_completion_
  */
 const dt_gtkentry_completion_spec *dt_gtkentry_get_default_path_compl_list()
 {
-  static dt_gtkentry_completion_spec default_path_compl_list[]
+  static const dt_gtkentry_completion_spec default_path_compl_list[]
       = { { "FOLDER.NAME", N_("$(FOLDER.NAME) - name of the folder containing the input image") },
           { "FILE.FOLDER", N_("$(FILE.FOLDER) - directory structure containing the input image") },
           { "FILE.NAME", N_("$(FILE.NAME) - basename of the input image") },
@@ -314,6 +314,32 @@ gchar *dt_gtkentry_build_completion_tooltip_text(const gchar *header,
   return ret;
 }
 
+
+gboolean dt_gui_search_start(GtkWidget *widget, GdkEventKey *event, GtkSearchEntry *entry)
+{
+  if(gtk_search_entry_handle_event(entry, (GdkEvent *)event))
+  {
+    gtk_entry_grab_focus_without_selecting(GTK_ENTRY(entry));
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+void dt_gui_search_stop(GtkSearchEntry *entry, GtkWidget *widget)
+{
+  gtk_widget_grab_focus(widget);
+
+  gtk_entry_set_text(GTK_ENTRY(entry), "");
+
+  if(GTK_IS_TREE_VIEW(widget))
+  {
+    GtkTreePath *path = NULL;
+    gtk_tree_view_get_cursor(GTK_TREE_VIEW(widget), &path, NULL);
+    gtk_tree_selection_select_path(gtk_tree_view_get_selection(GTK_TREE_VIEW(widget)), path);
+    gtk_tree_path_free(path);
+  }
+}
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

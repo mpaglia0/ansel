@@ -73,7 +73,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -88,8 +88,7 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "gui/guides.h"
 #include "iop/iop_api.h"
 
@@ -100,6 +99,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include "widgets/notebook.h"
 
 DT_MODULE_INTROSPECTION(5, dt_iop_clipping_params_t)
 

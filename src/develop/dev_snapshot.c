@@ -18,7 +18,7 @@
 
 #include "develop/dev_snapshot.h"
 
-#include "common/iop_order.h"
+#include "develop/iop_order.h"
 #include "common/mipmap_cache.h"
 #include "control/control.h"
 #include "control/jobs.h"
@@ -28,6 +28,7 @@
 #include "views/dev_backbuf.h"
 
 #include <math.h>
+#include "gui/application.h"
 
 // Real state behind a dt_dev_snapshot_t handle. Heap-allocated and refcounted so that copying a
 // dt_dev_snapshot_t (e.g. libs/snapshots.c shuffling its fixed-size slot array) only ever copies a

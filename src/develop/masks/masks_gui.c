@@ -16,7 +16,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "develop/masks.h"
 #include "widgets/bauhaus.h"
@@ -25,8 +25,8 @@
 #include "develop/imageop_gui.h"
 #include "widgets/paint.h"
 #include "gui/actions/menu.h"
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
+#include "gui/application.h"
 
 #include <math.h>
 #include <stdlib.h>

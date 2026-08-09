@@ -45,7 +45,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
@@ -59,7 +59,7 @@
 #include <cairo.h>
 
 #include "common/opencl.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"

@@ -45,16 +45,16 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/iop_profile.h"
 #include "common/pixelpipe_cache_alloc.h"
 #endif
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
-#include "gui/gtk.h"
 #include "control/control.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "math/math.h"

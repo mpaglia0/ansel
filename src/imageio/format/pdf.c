@@ -32,7 +32,7 @@
 #include "common/conf.h"
 #include "widgets/bauhaus.h"
 #include "common/colorspaces.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include <glib/gstdio.h>
@@ -43,6 +43,8 @@
 #include "imageio/format/imageio_format_api.h"
 
 #include <strings.h>
+#include "widgets/accelerators.h"
+#include "widgets/label.h"
 
 DT_MODULE(1)
 

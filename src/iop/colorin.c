@@ -58,7 +58,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "common/macros.h"
+#include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/logging.h"
 #include "system/mem_alloc.h"
@@ -69,7 +69,7 @@
 #endif
 #include "widgets/bauhaus.h"
 #include "common/imagebuf.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/colormatrices.c"
 #include "common/colorspaces.h"
 #include "common/colorspaces_inline_conversions.h"

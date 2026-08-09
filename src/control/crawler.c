@@ -39,14 +39,16 @@
 
 #include "common/logging.h"
 #include "common/history_actions.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/database.h"
 #include "common/debug.h"
 #include "common/image.h"
 #include "common/utility.h"
 #include "crawler.h"
-#include "gui/gtk.h"
+#include "gui/application.h"
+#include "widgets/widget_settings.h"
+#include "widgets/widget_style.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif

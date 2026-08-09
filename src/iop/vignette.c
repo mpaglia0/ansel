@@ -51,7 +51,7 @@
 #include "config.h"
 #endif
 #include <assert.h>
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -71,12 +71,12 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 
-#include "gui/gtk.h"
 #include "gui/presets.h"
-#include "gui/draw.h"
+#include "widgets/draw.h"
 #include "iop/iop_api.h"
 #include <gtk/gtk.h>
 #include <inttypes.h>
+#include "widgets/label.h"
 
 DT_MODULE_INTROSPECTION(4, dt_iop_vignette_params_t)
 

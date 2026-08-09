@@ -61,7 +61,7 @@
 #include "common/datetime.h"
 #include "common/file_location.h"
 #include "common/global_mutexes.h"
-#include "common/iop_order.h"
+#include "develop/iop_order.h"
 #include "common/styles.h"
 #include "common/history.h"
 #ifdef HAVE_ICU
@@ -78,6 +78,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "common/utility.h"
+#include "widgets/dialog.h"
 
 // whenever _create_*_schema() gets changed you HAVE to bump this version and add an update path to
 // _upgrade_*_schema_step()!

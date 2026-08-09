@@ -57,7 +57,7 @@
 #include "config.h"
 #include "system/simd.h"
 #endif
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -66,7 +66,7 @@
 #include "common/colorspaces.h"
 #include "math/matrices.h"
 #include "common/imagebuf.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/opencl.h"
 #include "common/conf.h"
 #include "control/control.h"

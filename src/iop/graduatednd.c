@@ -55,7 +55,7 @@
 #include "config.h"
 #endif
 #include <assert.h>
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -78,8 +78,7 @@
 #include "develop/imageop_gui.h"
 
 #include "gui/color_picker_proxy.h"
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 

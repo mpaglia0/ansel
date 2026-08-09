@@ -50,7 +50,7 @@
 #include "common/conf.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -61,14 +61,19 @@
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
+#include "develop/dev_history.h"  // dt_dev_add_history_item, previously reached through gui/draw.h
+#include "develop/develop.h"
 #include "math/openmp_maths.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "iop/iop_api.h"
 
 #include <gtk/gtk.h>
 #include <stdlib.h>
+#include "widgets/label.h"
+#include "widgets/notebook.h"
+#include "widgets/scroll_wrap.h"
+#include "gui/screen_metrics.h"
 
 DT_MODULE_INTROSPECTION(2, dt_iop_rawdenoise_params_t)
 

@@ -51,7 +51,7 @@
 #include "common/conf.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -71,8 +71,7 @@
 #include "develop/imageop_gui.h"
 #include "widgets/button.h"
 
-#include "gui/draw.h"
-#include "gui/gtk.h"
+#include "widgets/draw.h"
 #include "iop/iop_api.h"
 
 #include "gui/guides.h"
@@ -145,6 +144,8 @@
 // For parameter optimization we are using the Nelder-Mead simplex method
 // implemented by Michael F. Hutt.
 #include "math/nelder_mead_simplex.h"
+#include "widgets/collapsible_section.h"
+#include "widgets/label.h"
 
 
 DT_MODULE_INTROSPECTION(5, dt_iop_ashift_params_t)

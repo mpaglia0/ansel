@@ -65,7 +65,7 @@
 #endif
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -73,7 +73,7 @@
 #include "common/logging.h"
 #include "common/module_versioning.h"
 #include "common/database.h"
-#include "common/iop_profile.h"
+#include "develop/iop_profile.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/imagebuf.h"
 #include "math/math.h"
@@ -82,10 +82,12 @@
 #include "develop/imageop_gui.h"
 
 #include "gui/color_picker_proxy.h"
-#include "gui/gtk.h"
-#include "gui/draw.h"
+#include "widgets/draw.h"
 #include "gui/presets.h"
 #include "libs/colorpicker.h"
+#include "widgets/notebook.h"
+#include "widgets/scroll_wrap.h"
+#include "gui/screen_metrics.h"
 
 DT_MODULE_INTROSPECTION(5, dt_iop_colorzones_params_t)
 

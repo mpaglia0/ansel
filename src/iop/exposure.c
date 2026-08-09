@@ -55,6 +55,7 @@
 */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "develop/iop_profile.h"
 #include "common/conf.h"
 #endif
 
@@ -65,7 +66,7 @@
 #include <string.h>
 
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -83,10 +84,11 @@
 #include "develop/imageop_gui.h"
 #include "develop/pixelpipe.h"
 
-#include "gui/gtk.h"
 #include "gui/presets.h"
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
+#include "widgets/label.h"
+#include "gui/screen_metrics.h"
 
 #define exposure2white(x) exp2f(-(x))
 #define white2exposure(x) -dt_log2f(fmaxf(1e-20f, x))

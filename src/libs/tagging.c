@@ -50,7 +50,7 @@
 #include "common/act_on.h"
 #include "widgets/togglebutton.h"
 #include "common/selection.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
 #include "control/signal.h"
@@ -63,7 +63,7 @@
 #include "widgets/button.h"
 #include "widgets/icon_cell_renderer.h"
 
-#include "gui/gtk.h"
+#include "gui/application.h"
 #include "gui/drag_and_drop.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
@@ -71,6 +71,9 @@
 #include "osx/osx.h"
 #endif
 #include <gdk/gdkkeysyms.h>
+#include "widgets/dialog.h"
+#include "widgets/label.h"
+#include "widgets/scroll_wrap.h"
 
 #define FLOATING_ENTRY_WIDTH DT_PIXEL_APPLY_DPI(150)
 

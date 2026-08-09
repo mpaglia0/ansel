@@ -38,7 +38,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
-#include "common/macros.h"
+#include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
@@ -53,7 +53,6 @@
 #include "develop/imageop_gui.h"
 #include "common/image_cache.h"
 
-#include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 #include "common/dng_opcode.h"
@@ -61,6 +60,7 @@
 #include <gtk/gtk.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "widgets/label.h"
 
 DT_MODULE_INTROSPECTION(2, dt_iop_rawprepare_params_t)
 
