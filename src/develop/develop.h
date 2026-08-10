@@ -318,8 +318,6 @@ typedef struct dt_develop_t
   } transient_params;
   dt_pthread_mutex_t transient_params_mutex;
 
-  // profiles info
-  GList *allprofile_info;
 
   // histogram for display.
   uint32_t *histogram_pre_tonecurve, *histogram_pre_levels;

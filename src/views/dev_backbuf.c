@@ -41,7 +41,7 @@ static void _colormanage_ui_color(const float L, const float a, const float b, d
   dt_aligned_pixel_t Lab = { L, a, b, 1.f };
   dt_aligned_pixel_t XYZ = { 0.f, 0.f, 0.f, 1.f };
   dt_Lab_to_XYZ(Lab, XYZ);
-  cmsDoTransform(dt_colorspaces_get_global()->transform_xyz_to_display, XYZ, RGB, 1);
+  dt_colorprofiles_xyz_to_display(XYZ, RGB);
 }
 
 void dt_dev_get_background_color(const dt_develop_t *dev, dt_aligned_pixel_t bg_color)
@@ -63,9 +63,13 @@ void dt_dev_draw_iso12646_border(cairo_t *cr, double width, double height, int b
 
 void dt_dev_draw_profile_mode_label(cairo_t *cri, int height)
 {
-  if(dt_colorspaces_get_global()->mode == DT_PROFILE_NORMAL) return;
+  /* One snapshot: reading mode twice could print a label for a mode that has already
+   * changed between the guard and the text. */
+  dt_colorprofiles_settings_t settings;
+  dt_colorprofiles_get_settings(&settings);
+  if(settings.mode == DT_PROFILE_NORMAL) return;
 
-  gchar *label = dt_colorspaces_get_global()->mode == DT_PROFILE_GAMUTCHECK ? _("gamut check") : _("soft proof");
+  gchar *label = settings.mode == DT_PROFILE_GAMUTCHECK ? _("gamut check") : _("soft proof");
   cairo_set_source_rgba(cri, 0.5, 0.5, 0.5, 0.5);
   PangoLayout *layout;
   PangoRectangle ink;

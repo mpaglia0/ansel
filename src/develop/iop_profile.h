@@ -34,8 +34,8 @@
  * export should use, and transforming an image with it. Everything declared here takes a
  * develop/ type, which is exactly why it is here and not in colorprofiles/iop_profile.h. */
 
+#include "colorprofiles/profile_types.h"
 #include "colorprofiles/iop_profile.h"
-#include "colorprofiles/colorspaces.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,18 +49,10 @@ struct dt_dev_pixelpipe_iop_t;
 /** returns the profile info from dev profiles info list that matches (profile_type, profile_filename)
  * NULL if not found
  */
-dt_iop_order_iccprofile_info_t *
-dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev, dt_colorspaces_color_profile_type_t profile_type,
-                                    const char *profile_filename);
 
 /** adds the profile info from (profile_type, profile_filename) to the dev profiles info list if not already exists
  * returns the generated profile or the existing one
  */
-dt_iop_order_iccprofile_info_t *
-dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
-                                  const dt_colorspaces_color_profile_type_t profile_type,
-                                  const char *profile_filename,
-                                  const int intent);
 
 /** returns a reference to the work profile info as set on colorin iop
  * only if module is between colorin and colorout, otherwise returns NULL
@@ -129,19 +121,11 @@ void dt_ioppr_get_export_profile_type(struct dt_develop_t *dev,
                                       const char **profile_filename);
 
 /** transforms image from cst_from to cst_to colorspace using profile_info */
-void dt_ioppr_transform_image_colorspace(struct dt_iop_module_t *self, const float *const image_in,
-                                         float *const image_out, const int width, const int height,
-                                         const int cst_from, const int cst_to, int *converted_cst,
-                                         const dt_iop_order_iccprofile_info_t *const profile_info);
 
 #ifdef HAVE_OPENCL
 
 
 /** same as the C version */
-int dt_ioppr_transform_image_colorspace_cl(struct dt_iop_module_t *self, const int devid, cl_mem dev_img_in,
-                                           cl_mem dev_img_out, const int width, const int height,
-                                           const int cst_from, const int cst_to, int *converted_cst,
-                                           const dt_iop_order_iccprofile_info_t *const profile_info);
 #endif // HAVE_OPENCL
 
 #ifdef __cplusplus

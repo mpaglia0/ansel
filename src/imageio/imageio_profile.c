@@ -93,6 +93,12 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
   dt_colorspaces_color_profile_type_t color_profile = DT_COLORSPACE_SRGB;
   *new_profile = FALSE;
 
+  /* The `goto finish` below (invalid imgid -> no cache entry) skips every assignment to
+   * *output, including the sRGB fallback at the end, so the caller was left returning an
+   * indeterminate pointer that reached cmsCreateTransform. Establish the contract here:
+   * *output is always written. */
+  if(!IS_NULL_PTR(output)) *output = NULL;
+
   // Fetch filename for extension retrieval
   char filename[PATH_MAX] = { 0 };
   gboolean from_cache = TRUE;
@@ -111,26 +117,38 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
 
   dt_print(DT_DEBUG_COLORPROFILE, "Color profile type for %s: \n", filename);
 
-  if(img->profile && img->profile_size > 0
-     && dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size))
+  /* Both of these CREATE a profile. Calling them once in the condition and again in the
+   * body -- which is what this cascade did -- leaked the first one every time the branch
+   * was taken. Create once, here, and hand the same object out below. The second is built
+   * only if the first failed, which is what the else-if short-circuit used to express. */
+  cmsHPROFILE embedded_icc = NULL;
+  if(img->profile && img->profile_size > 0)
+    embedded_icc = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
+
+  cmsHPROFILE exif_matrix = NULL;
+  if(IS_NULL_PTR(embedded_icc) && !isnan(img->d65_color_matrix[0]))
+    exif_matrix = dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->d65_color_matrix);
+
+  if(!IS_NULL_PTR(embedded_icc))
   {
     // Fast path : we already extracted ICC before. ICC profile is already inside.
     color_profile = DT_COLORSPACE_EMBEDDED_ICC;
     if(!IS_NULL_PTR(output))
     {
-      *output = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
+      *output = embedded_icc;
+      embedded_icc = NULL;   // handed over
       *new_profile = TRUE;
     }
     dt_print(DT_DEBUG_COLORPROFILE, "Embedded ICC profile (inline)\n");
   }
-  else if(!isnan(img->d65_color_matrix[0])
-           && dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->d65_color_matrix))
+  else if(!IS_NULL_PTR(exif_matrix))
   {
     // DNG and others : matrix inside EXIF
     color_profile = DT_COLORSPACE_EMBEDDED_MATRIX;
     if(!IS_NULL_PTR(output))
     {
-      *output = dt_colorspaces_create_xyzimatrix_profile((float(*)[3])img->d65_color_matrix);
+      *output = exif_matrix;
+      exif_matrix = NULL;    // handed over
       *new_profile = TRUE;
     }
     dt_print(DT_DEBUG_COLORPROFILE, "Embedded EXIF matrix\n");
@@ -140,7 +158,7 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
     // Monochrome RAW - colorspace doesn't matter
     color_profile = DT_COLORSPACE_LIN_REC709;
     if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "", DT_PROFILE_DIRECTION_IN)->profile;
+      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "", DT_PROFILE_ROLE_INPUT)->profile;
     dt_print(DT_DEBUG_COLORPROFILE, "Monochrome RAW\n");
   }
   else if(dt_image_is_matrix_correction_supported(img))
@@ -159,7 +177,7 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
     // 4Bayer images have been pre-converted to rec2020
     color_profile = DT_COLORSPACE_LIN_REC2020;
     if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC2020, "", DT_PROFILE_DIRECTION_IN)->profile;
+      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC2020, "", DT_PROFILE_ROLE_INPUT)->profile;
     dt_print(DT_DEBUG_COLORPROFILE, "4Bayer RAW\n");
   }
   else if(img->colorspace == DT_IMAGE_COLORSPACE_SRGB)
@@ -173,7 +191,7 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
     // Images tagged explicitely with Adobe RGB flag
     color_profile = DT_COLORSPACE_ADOBERGB;
     if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_ADOBERGB, "", DT_PROFILE_DIRECTION_IN)->profile;
+      *output = dt_colorspaces_get_profile(DT_COLORSPACE_ADOBERGB, "", DT_PROFILE_ROLE_INPUT)->profile;
     dt_print(DT_DEBUG_COLORPROFILE, "Raster image tagged with Adobe RGB\n");
   }
   else if(!strcmp(ext, "pfm"))
@@ -182,7 +200,7 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
     // but we can assume the are linear since it's a floating point format
     color_profile = DT_COLORSPACE_LIN_REC709;
     if(!IS_NULL_PTR(output))
-      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "", DT_PROFILE_DIRECTION_IN)->profile;
+      *output = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC709, "", DT_PROFILE_ROLE_INPUT)->profile;
     dt_print(DT_DEBUG_COLORPROFILE, "PFM untagged image\n");
   }
   else
@@ -243,13 +261,18 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
 #endif
 
     // Finally, read the prepared embedded profile
-    if(!already_set && img->profile && img->profile_size > 0
-       && dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size))
+    /* Same double-create as above: build it once. */
+    cmsHPROFILE extracted_icc = NULL;
+    if(!already_set && img->profile && img->profile_size > 0)
+      extracted_icc = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
+
+    if(!IS_NULL_PTR(extracted_icc))
     {
       color_profile = DT_COLORSPACE_EMBEDDED_ICC;
       if(!IS_NULL_PTR(output))
       {
-        *output = dt_colorspaces_get_rgb_profile_from_mem(img->profile, img->profile_size);
+        *output = extracted_icc;
+        extracted_icc = NULL;   // handed over
         *new_profile = TRUE;
       }
       dt_print(DT_DEBUG_COLORPROFILE, "Embedded ICC (extracted)\n");
@@ -258,15 +281,24 @@ dt_colorspaces_color_profile_type_t dt_image_find_best_color_profile(int32_t img
     {
       // This happens when AVIF/HEIF found a basic color profile into CICP fields
       if(!IS_NULL_PTR(output))
-        *output = dt_colorspaces_get_profile(color_profile, "", DT_PROFILE_DIRECTION_IN)->profile;
+        *output = dt_colorspaces_get_profile(color_profile, "", DT_PROFILE_ROLE_INPUT)->profile;
       dt_print(DT_DEBUG_COLORPROFILE, "Embedded ICC (extracted)\n");
     }
+
+    if(!IS_NULL_PTR(extracted_icc)) dt_colorspaces_cleanup_profile(extracted_icc);
   }
 
   // Handle the fallback to sRGB space
   if(color_profile == DT_COLORSPACE_NONE) color_profile = DT_COLORSPACE_SRGB;
   if(color_profile == DT_COLORSPACE_SRGB && !IS_NULL_PTR(output))
-    *output = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, "", DT_PROFILE_DIRECTION_IN)->profile;
+    *output = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, "", DT_PROFILE_ROLE_INPUT)->profile;
+
+  /* Anything built above but not handed to the caller is ours to close. This is the
+   * `output == NULL` case -- a caller that wants only the resolved type -- and the branches
+   * where a later one in the cascade won. Deliberately before the label: the `goto finish`
+   * path runs before either is created. */
+  if(!IS_NULL_PTR(embedded_icc)) dt_colorspaces_cleanup_profile(embedded_icc);
+  if(!IS_NULL_PTR(exif_matrix)) dt_colorspaces_cleanup_profile(exif_matrix);
 
 finish:
   dt_image_cache_write_release(dt_image_cache_get_global(), img, DT_IMAGE_CACHE_RELAXED);
@@ -378,7 +410,7 @@ finish:
 }
 const cmsHPROFILE dt_colorspaces_get_embedded_profile(const int32_t imgid, dt_colorspaces_color_profile_type_t *type, gboolean *new_profile)
 {
-  cmsHPROFILE output;
+  cmsHPROFILE output = NULL;
   *type = dt_image_find_best_color_profile(imgid, &output, new_profile);
   return output;
 }
@@ -447,6 +479,79 @@ static const dt_colorspaces_color_profile_t *_build_embedded_profile(const int32
 
   return result;
 }
+struct dt_colorspaces_color_profile_t *dt_image_get_input_profile(
+    const int32_t imgid,
+    const dt_colorspaces_color_profile_type_t requested,
+    const char *camera_makermodel,
+    dt_colorspaces_color_profile_type_t *resolved)
+{
+  if(resolved) *resolved = DT_COLORSPACE_NONE;
+
+  dt_colorspaces_color_profile_type_t type = requested;
+  cmsHPROFILE profile = NULL;
+  gboolean owns = FALSE;
+
+  /* The three built-from-the-camera types. Each falls over to the embedded-ICC branch when
+   * this camera is not in the corresponding table -- which is what "matrix not found" means
+   * to a user, and why the fallthrough below is a chain rather than a switch. */
+  if(type == DT_COLORSPACE_ENHANCED_MATRIX)
+  {
+    profile = camera_makermodel ? dt_colorspaces_create_darktable_profile(camera_makermodel) : NULL;
+    if(IS_NULL_PTR(profile)) type = DT_COLORSPACE_EMBEDDED_ICC;
+    else owns = TRUE;
+  }
+  if(type == DT_COLORSPACE_VENDOR_MATRIX)
+  {
+    profile = camera_makermodel ? dt_colorspaces_create_vendor_profile(camera_makermodel) : NULL;
+    if(IS_NULL_PTR(profile)) type = DT_COLORSPACE_EMBEDDED_ICC;
+    else owns = TRUE;
+  }
+  if(type == DT_COLORSPACE_ALTERNATE_MATRIX)
+  {
+    profile = camera_makermodel ? dt_colorspaces_create_alternate_profile(camera_makermodel) : NULL;
+    if(IS_NULL_PTR(profile)) type = DT_COLORSPACE_EMBEDDED_ICC;
+    else owns = TRUE;
+  }
+
+  if(IS_NULL_PTR(profile)
+     && (type == DT_COLORSPACE_EMBEDDED_ICC || type == DT_COLORSPACE_EMBEDDED_MATRIX
+         || type == DT_COLORSPACE_STANDARD_MATRIX))
+  {
+    gboolean new_profile = FALSE;
+    type = dt_colorspaces_get_input_profile_from_image(imgid, type, &profile, &new_profile);
+    owns = new_profile;
+  }
+
+  if(IS_NULL_PTR(profile)) return NULL;
+
+  struct dt_colorspaces_color_profile_t *container = dt_colorspaces_new_image_profile(type, profile, owns);
+  if(IS_NULL_PTR(container))
+  {
+    /* Do not leak the handle just because the container allocation failed: only WE know at
+     * this point whether it was created here or borrowed from the application list. */
+    if(owns) dt_colorspaces_cleanup_profile(profile);
+    return NULL;
+  }
+
+  if(resolved) *resolved = type;
+  return container;
+}
+
+struct dt_colorspaces_color_profile_t *dt_image_get_embedded_output_profile(
+    const int32_t imgid, dt_colorspaces_color_profile_type_t *type)
+{
+  if(IS_NULL_PTR(type)) return NULL;
+
+  gboolean new_profile = FALSE;
+  cmsHPROFILE profile = dt_colorspaces_get_embedded_profile(imgid, type, &new_profile);
+  if(IS_NULL_PTR(profile)) return NULL;
+
+  struct dt_colorspaces_color_profile_t *container
+      = dt_colorspaces_new_image_profile(*type, profile, new_profile);
+  if(IS_NULL_PTR(container) && new_profile) dt_colorspaces_cleanup_profile(profile);
+  return container;
+}
+
 const dt_colorspaces_color_profile_t *dt_colorspaces_get_output_profile(const int32_t imgid,
                                                                         dt_colorspaces_color_profile_type_t *over_type,
                                                                         const char *over_filename)
@@ -468,13 +573,13 @@ const dt_colorspaces_color_profile_t *dt_colorspaces_get_output_profile(const in
   {
     // return a pointer to the profile specified in export.
     // we have that in here to get rid of the if() check in all places calling this function.
-    p = dt_colorspaces_get_profile(*over_type, over_filename, DT_PROFILE_DIRECTION_OUT | DT_PROFILE_DIRECTION_DISPLAY);
+    p = dt_colorspaces_get_profile(*over_type, over_filename, DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR);
   }
 
   // if all else fails -> fall back to sRGB
   if(IS_NULL_PTR(p))
   {
-    p = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, "", DT_PROFILE_DIRECTION_OUT);
+    p = dt_colorspaces_get_profile(DT_COLORSPACE_SRGB, "", DT_PROFILE_ROLE_OUTPUT);
     *over_type = DT_COLORSPACE_SRGB;
   }
 

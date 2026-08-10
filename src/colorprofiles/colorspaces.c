@@ -51,7 +51,20 @@
 */
 
 #include "colorprofiles/colorspaces.h"
+#include "colorprofiles/iop_profile.h"   // dt_colorspaces_invalidate_display_profile_memo()
+
+#include <stddef.h>   // offsetof(), for the startup self-test
+
+/* dt_iop_color_intent_t is spelled with literal values in profile_types.h so that header
+ * needs no <lcms2.h>. The values are fixed by the ICC specification and are serialised into
+ * iop params, so they cannot change on either side -- but this is the one place that sees
+ * both definitions, so it is the place to say so out loud. */
+_Static_assert(DT_INTENT_PERCEPTUAL == INTENT_PERCEPTUAL, "ICC intent renumbered by lcms2");
+_Static_assert(DT_INTENT_RELATIVE_COLORIMETRIC == INTENT_RELATIVE_COLORIMETRIC, "ICC intent renumbered by lcms2");
+_Static_assert(DT_INTENT_SATURATION == INTENT_SATURATION, "ICC intent renumbered by lcms2");
+_Static_assert(DT_INTENT_ABSOLUTE_COLORIMETRIC == INTENT_ABSOLUTE_COLORIMETRIC, "ICC intent renumbered by lcms2");
 #include "colorprofiles/colormatrices.c"
+#include "common/colorspaces_inline_conversions.h"
 #include "common/debug.h"
 #include "common/file_location.h"
 #include "math/matrices.h"
@@ -79,10 +92,12 @@
 #include <CoreServices/CoreServices.h>
 #endif
 
+/* The module's single instance. Private: nothing outside src/colorprofiles/ names it. */
+static dt_colorspaces_t *dt_colorspaces_get_global(void);
+
 static dt_colorspaces_color_profile_t *_create_profile(dt_colorspaces_color_profile_type_t type,
-                                                       cmsHPROFILE profile, const char *name, int in_pos,
-                                                       int out_pos, int display_pos, int category_pos,
-                                                       int work_pos);
+                                                       cmsHPROFILE profile, const char *name,
+                                                       dt_colorspaces_profile_role_t roles);
 
 static const cmsCIEXYZ d65 = {0.95045471, 1.00000000, 1.08905029};
 
@@ -153,6 +168,12 @@ void dt_colorspaces_set_profile_changed_handler(dt_colorspaces_profile_changed_h
 
 static void _notify_profile_changed(void)
 {
+  /* The monitor profile just changed, so anything derived from the old one is stale.
+   * Nothing dropped the memoised DISPLAY entry before this, so a session kept the previous
+   * monitor's matrices and tone curves indefinitely -- silently, since every hash and ROI
+   * in the chain stayed consistent. */
+  dt_colorspaces_invalidate_display_profile_memo();
+
   if(_profile_changed_handler) _profile_changed_handler();
 }
 
@@ -202,7 +223,7 @@ generate_mat3inv_body(double, A, B)
 static const dt_colorspaces_color_profile_t *_get_profile(dt_colorspaces_t *self,
                                                           dt_colorspaces_color_profile_type_t type,
                                                           const char *filename,
-                                                          dt_colorspaces_profile_direction_t direction);
+                                                          dt_colorspaces_profile_role_t role);
 
 __DT_CLONE_TARGETS__
 static int dt_colorspaces_get_matrix_from_profile(cmsHPROFILE prof, dt_colormatrix_t matrix, float *lutr, float *lutg,
@@ -833,8 +854,9 @@ static cmsHPROFILE dt_colorspaces_create_linear_infrared_profile(void)
 struct dt_colorspaces_color_profile_t *dt_colorspaces_new_image_profile(
     dt_colorspaces_color_profile_type_t type, cmsHPROFILE profile, gboolean owns_profile)
 {
-  // -1 everywhere: a profile belonging to one image has no place in any combo box.
-  dt_colorspaces_color_profile_t *container = _create_profile(type, profile, "", -1, -1, -1, -1, -1);
+  // No role: a profile belonging to one image has no place in any combo box, so no
+  // enumeration and no lookup can ever reach it.
+  dt_colorspaces_color_profile_t *container = _create_profile(type, profile, "", 0);
   if(container) container->owns_profile = owns_profile;
   return container;
 }
@@ -1083,24 +1105,31 @@ void hsl2rgb(dt_aligned_pixel_t rgb, float h, float s, float l)
 }
 
 static dt_colorspaces_color_profile_t *_create_profile(dt_colorspaces_color_profile_type_t type,
-                                                       cmsHPROFILE profile, const char *name, int in_pos,
-                                                       int out_pos, int display_pos, int category_pos,
-                                                       int work_pos)
+                                                       cmsHPROFILE profile, const char *name,
+                                                       dt_colorspaces_profile_role_t roles)
 {
   dt_colorspaces_color_profile_t *prof;
   prof = (dt_colorspaces_color_profile_t *)calloc(1, sizeof(dt_colorspaces_color_profile_t));
+  pthread_rwlock_init(&prof->lock, NULL);
   prof->type = type;
   g_strlcpy(prof->name, name, sizeof(prof->name));
   prof->profile = profile;
-  prof->in_pos = in_pos;
-  prof->out_pos = out_pos;
-  prof->display_pos = display_pos;
-  prof->category_pos = category_pos;
-  prof->work_pos = work_pos;
+  prof->roles = roles;
   return prof;
 }
 
 // this function is basically thread safe, at least when not called on the global color profiles
+/* cmsFLAGS_NOCACHE on every transform built here, and it is not an optimisation choice.
+ *
+ * lcms2 gives each transform a 1-pixel memoisation cache, ENABLED when flags are 0. That
+ * cache is mutable state inside the transform, and lcms2 only sanctions sharing a
+ * transform between threads when it is inhibited. These four are built once and then
+ * driven by several threads at a time from the __OMP_PARALLEL_FOR__ loops below, so with
+ * the cache left on they are a data race on lcms2's internals.
+ *
+ * iop/colorout.c already sets the flag on its proofing transform for the same reason. The
+ * cache only pays on runs of identical adjacent pixels, which photographic data does not
+ * have, so nothing is lost. */
 static void _update_display_transforms(dt_colorspaces_t *self)
 {
   if(self->transform_srgb_to_display) cmsDeleteTransform(self->transform_srgb_to_display);
@@ -1117,49 +1146,269 @@ static void _update_display_transforms(dt_colorspaces_t *self)
 
   const dt_colorspaces_color_profile_t *display_dt_profile = _get_profile(self, self->display_type,
                                                                           self->display_filename,
-                                                                          DT_PROFILE_DIRECTION_DISPLAY);
+                                                                          DT_PROFILE_ROLE_MONITOR);
   if(IS_NULL_PTR(display_dt_profile)) return;
   cmsHPROFILE display_profile = display_dt_profile->profile;
   if(IS_NULL_PTR(display_profile)) return;
 
   self->transform_srgb_to_display = cmsCreateTransform(_get_profile(self, DT_COLORSPACE_SRGB, "",
-                                                                    DT_PROFILE_DIRECTION_DISPLAY)->profile,
+                                                                    DT_PROFILE_ROLE_MONITOR)->profile,
                                                        TYPE_RGBA_8,
                                                        display_profile,
                                                        TYPE_BGRA_8,
                                                        self->display_intent,
-                                                       0);
+                                                       cmsFLAGS_NOCACHE);
 
   self->transform_xyz_to_display = cmsCreateTransform(_get_profile(self, DT_COLORSPACE_XYZ, "",
-                                                                    DT_PROFILE_DIRECTION_IN)->profile,
+                                                                    DT_PROFILE_ROLE_INPUT)->profile,
                                                        TYPE_XYZA_FLT,
                                                        display_profile,
                                                        TYPE_RGBA_FLT,
                                                        self->display_intent,
-                                                       0);
+                                                       cmsFLAGS_NOCACHE);
 
   self->transform_adobe_rgb_to_display = cmsCreateTransform(_get_profile(self, DT_COLORSPACE_ADOBERGB, "",
-                                                                         DT_PROFILE_DIRECTION_DISPLAY)->profile,
+                                                                         DT_PROFILE_ROLE_MONITOR)->profile,
                                                             TYPE_RGBA_8,
                                                             display_profile,
                                                             TYPE_BGRA_8,
                                                             self->display_intent,
-                                                            0);
+                                                            cmsFLAGS_NOCACHE);
 
   self->transform_display_to_adobe_rgb = cmsCreateTransform(display_profile,
                                                             TYPE_BGRA_8,
                                                             _get_profile(self, DT_COLORSPACE_ADOBERGB, "",
-                                                                         DT_PROFILE_DIRECTION_DISPLAY)->profile,
+                                                                         DT_PROFILE_ROLE_MONITOR)->profile,
                                                             TYPE_RGBA_8,
                                                             self->display_intent,
-                                                            0);
+                                                            cmsFLAGS_NOCACHE);
 }
 
 // update cached transforms for color management of thumbnails
-// make sure that dt_colorspaces_get_global()->xprofile_lock is held when calling this!
+// caller holds _transforms_lock for writing
 void dt_colorspaces_update_display_transforms()
 {
   _update_display_transforms(dt_colorspaces_get_global());
+}
+
+/* ---------------------------------------------------------------------------
+ * Display and soft-proofing settings.
+ *
+ * Seven fields the GUI writes and the pipeline reads: the display profile identity
+ * and intent, the soft-proof identity and intent, and the proofing mode. They were
+ * read and written through the global struct with no lock of any kind, one field at
+ * a time — so a reader could see a new display_type paired with the previous
+ * display_filename, and a 512-byte filename being g_strlcpy'd concurrently is a torn
+ * string rather than a merely stale one.
+ *
+ * They cross the boundary only as a whole struct now, copied under one lock, so a
+ * group can never be observed half-updated. `generation` advances on every accepted
+ * change: a pipeline module can fold that single number into its hash instead of the
+ * individual fields.
+ *
+ * LOCK ORDER, where both are involved: _transforms_lock OUTER, _settings_lock INNER.
+ * The display setters need both, because changing the display profile also rebuilds
+ * the four prepared transforms. Nothing takes them the other way round.
+ * ------------------------------------------------------------------------- */
+
+/* The module's single instance. It used to hang off darktable_t, which meant the whole
+ * application could reach in and read, write and lock what is this module's private
+ * business. It is file-static now: dt_colorprofiles_init() builds it, dt_colorprofiles_
+ * cleanup() destroys it, and nothing outside this file has a way to name it.
+ *
+ * dt_colorspaces_get_global() survives ONLY as an internal shorthand while the remaining
+ * consumers are migrated to the query API; it is no longer declared in the public header
+ * and will disappear with the last of them. */
+static dt_colorspaces_t *_colorprofiles = NULL;
+
+/* The four prepared display transforms, and the byte cache the monitor refresh compares
+ * against, are module-wide: they belong to no single profile, so they cannot be covered by
+ * a per-entry lock. This is that lock.
+ *
+ * Separate from the per-entry locks on purpose. A thumbnail conversion holds this for the
+ * duration of a whole image; a caller deriving from an unrelated profile must not queue
+ * behind it, and a monitor-profile change must contend only with users of the display
+ * entry and of these transforms -- not with everything that touches colour.
+ *
+ * LOCK ORDER where a writer needs both: the profile ENTRY lock first, then this one.
+ * Readers take exactly one. */
+static pthread_rwlock_t _transforms_lock = PTHREAD_RWLOCK_INITIALIZER;
+
+static dt_colorspaces_t *_colorspaces_build(void);
+static void _colorspaces_destroy(dt_colorspaces_t *self);
+
+void dt_colorprofiles_init(void)
+{
+  if(!IS_NULL_PTR(_colorprofiles)) return;
+  _colorprofiles = _colorspaces_build();
+}
+
+void dt_colorprofiles_cleanup(void)
+{
+  if(IS_NULL_PTR(_colorprofiles)) return;
+
+  // the derived matrix/LUT memo is built from these profiles; it goes first
+  dt_colorspaces_flush_profile_memo();
+
+  _colorspaces_destroy(_colorprofiles);
+  _colorprofiles = NULL;
+}
+
+/* Module-internal shorthand. It is static now: nothing outside this directory names the
+ * module's state, which is the whole point of the exercise. */
+static dt_colorspaces_t *dt_colorspaces_get_global(void)
+{
+  return _colorprofiles;
+}
+
+static pthread_rwlock_t _settings_lock = PTHREAD_RWLOCK_INITIALIZER;
+static uint64_t _settings_generation = 0;
+
+void dt_colorprofiles_get_settings(dt_colorprofiles_settings_t *const out)
+{
+  if(IS_NULL_PTR(out)) return;
+
+  const dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_rdlock(&_settings_lock);
+  out->mode = self->mode;
+  out->display_type = self->display_type;
+  g_strlcpy(out->display_filename, self->display_filename, sizeof(out->display_filename));
+  out->display_intent = self->display_intent;
+  out->softproof_type = self->softproof_type;
+  g_strlcpy(out->softproof_filename, self->softproof_filename, sizeof(out->softproof_filename));
+  out->softproof_intent = self->softproof_intent;
+  out->generation = _settings_generation;
+  pthread_rwlock_unlock(&_settings_lock);
+}
+
+/* Did (type, filename) differ from what is stored at (cur_type, cur_filename)?
+ * Caller holds _settings_lock. filename is only meaningful for DT_COLORSPACE_FILE. */
+static gboolean _profile_choice_differs(const dt_colorspaces_color_profile_type_t cur_type,
+                                        const char *const cur_filename,
+                                        const dt_colorspaces_color_profile_type_t type,
+                                        const char *const filename)
+{
+  if(cur_type != type) return TRUE;
+  if(type != DT_COLORSPACE_FILE) return FALSE;
+  return strcmp(cur_filename, IS_NULL_PTR(filename) ? "" : filename) != 0;
+}
+
+gboolean dt_colorprofiles_set_display_profile_choice(const dt_colorspaces_color_profile_type_t type,
+                                                     const char *const filename)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_wrlock(&_transforms_lock);
+  pthread_rwlock_wrlock(&_settings_lock);
+
+  const gboolean changed = _profile_choice_differs(self->display_type, self->display_filename, type, filename);
+  if(changed)
+  {
+    self->display_type = type;
+    g_strlcpy(self->display_filename, IS_NULL_PTR(filename) ? "" : filename, sizeof(self->display_filename));
+    _settings_generation++;
+  }
+  pthread_rwlock_unlock(&_settings_lock);
+
+  // Still under the transforms lock: the new identity and the transforms built from it land together.
+  if(changed) _update_display_transforms(self);
+  pthread_rwlock_unlock(&_transforms_lock);
+
+  return changed;
+}
+
+gboolean dt_colorprofiles_set_display_intent(const dt_iop_color_intent_t intent)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_wrlock(&_transforms_lock);
+  pthread_rwlock_wrlock(&_settings_lock);
+
+  const gboolean changed = (self->display_intent != intent);
+  if(changed)
+  {
+    self->display_intent = intent;
+    _settings_generation++;
+  }
+  pthread_rwlock_unlock(&_settings_lock);
+
+  if(changed) _update_display_transforms(self);
+  pthread_rwlock_unlock(&_transforms_lock);
+
+  return changed;
+}
+
+/* The soft-proof settings feed transforms that iop/colorout.c builds per commit_params;
+ * nothing cached in this module derives from them, so no rebuild here. */
+gboolean dt_colorprofiles_set_softproof_profile_choice(const dt_colorspaces_color_profile_type_t type,
+                                                       const char *const filename)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_wrlock(&_settings_lock);
+  const gboolean changed = _profile_choice_differs(self->softproof_type, self->softproof_filename, type, filename);
+  if(changed)
+  {
+    self->softproof_type = type;
+    g_strlcpy(self->softproof_filename, IS_NULL_PTR(filename) ? "" : filename, sizeof(self->softproof_filename));
+    _settings_generation++;
+  }
+  pthread_rwlock_unlock(&_settings_lock);
+
+  return changed;
+}
+
+gboolean dt_colorprofiles_set_softproof_intent(const dt_iop_color_intent_t intent)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_wrlock(&_settings_lock);
+  const gboolean changed = (self->softproof_intent != intent);
+  if(changed)
+  {
+    self->softproof_intent = intent;
+    _settings_generation++;
+  }
+  pthread_rwlock_unlock(&_settings_lock);
+
+  return changed;
+}
+
+gboolean dt_colorprofiles_set_mode(const dt_colorspaces_color_mode_t mode)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_wrlock(&_settings_lock);
+  const gboolean changed = (self->mode != mode);
+  if(changed)
+  {
+    self->mode = mode;
+    _settings_generation++;
+  }
+  pthread_rwlock_unlock(&_settings_lock);
+
+  return changed;
+}
+
+dt_colorspaces_color_mode_t dt_colorprofiles_toggle_mode(const dt_colorspaces_color_mode_t mode)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  /* One locked read-modify-write. The two toggle buttons each open-coded
+   * "read mode, compare, write the opposite", which is not atomic: two accelerator
+   * presses in flight could both read DT_PROFILE_NORMAL and leave soft-proof and
+   * gamut-check disagreeing about which of them is on. */
+  pthread_rwlock_wrlock(&_settings_lock);
+  const dt_colorspaces_color_mode_t now = (self->mode == mode) ? DT_PROFILE_NORMAL : mode;
+  if(self->mode != now)
+  {
+    self->mode = now;
+    _settings_generation++;
+  }
+  pthread_rwlock_unlock(&_settings_lock);
+
+  return now;
 }
 
 void dt_colorspaces_transform_rgba_float_row(const cmsHTRANSFORM transform, const float *in, float *out,
@@ -1185,8 +1434,10 @@ void dt_colorspaces_transform_rgba_float_image(const cmsHTRANSFORM transform, co
   }
 }
 
-void dt_colorspaces_transform_rgba8_to_bgra8(const cmsHTRANSFORM transform, const uint8_t *image_in, uint8_t *image_out,
-                                             const int width, const int height)
+/* Byte swap + optional colour conversion over a whole 8-bit plane. Private: the only
+ * callers are the prepared-transform entry points below, which own the locking. */
+static void _transform_rgba8_to_bgra8(const cmsHTRANSFORM transform, const uint8_t *image_in, uint8_t *image_out,
+                                      const int width, const int height)
 {
   if(IS_NULL_PTR(image_in) || IS_NULL_PTR(image_out) || width <= 0 || height <= 0) return;
 
@@ -1195,11 +1446,15 @@ void dt_colorspaces_transform_rgba8_to_bgra8(const cmsHTRANSFORM transform, cons
   __OMP_PARALLEL_FOR__()
   for(int y = 0; y < height; y++)
   {
-    const uint8_t *const restrict in = image_in + (size_t)y * width * 4u;
-    uint8_t *const restrict out = image_out + (size_t)y * width * 4u;
+    /* NOT restrict: callers pass the same buffer for both (common/mipmap_cache.c converts
+     * a thumbnail in place), so promising the compiler these do not overlap is a lie it is
+     * entitled to vectorise on. */
+    const uint8_t *const in = image_in + (size_t)y * width * 4u;
+    uint8_t *const out = image_out + (size_t)y * width * 4u;
 
     if(transform)
     {
+      // lcms2 permits in == out when the two formats have the same pixel size; both are 4 bytes.
       cmsDoTransform(transform, in, out, width);
       for(int x = 0; x < width; x++) out[4 * x + 3] = UINT8_MAX;
     }
@@ -1207,16 +1462,222 @@ void dt_colorspaces_transform_rgba8_to_bgra8(const cmsHTRANSFORM transform, cons
     {
       for(int x = 0; x < width; x++)
       {
-        out[4 * x + 0] = in[4 * x + 2];
-        out[4 * x + 1] = in[4 * x + 1];
-        out[4 * x + 2] = in[4 * x + 0];
+        /* Read the whole pixel before writing any of it. Storing straight through --
+         * out[0] = in[2]; out[1] = in[1]; out[2] = in[0]; -- loses the red channel when
+         * in == out, because the first store overwrites in[0] before the third reads it,
+         * leaving R and B both holding the original blue. */
+        const uint8_t r = in[4 * x + 0];
+        const uint8_t g = in[4 * x + 1];
+        const uint8_t b = in[4 * x + 2];
+
+        out[4 * x + 0] = b;
+        out[4 * x + 1] = g;
+        out[4 * x + 2] = r;
         out[4 * x + 3] = UINT8_MAX;
       }
     }
   }
 }
 
-// make sure that dt_colorspaces_get_global()->xprofile_lock is held when calling this!
+/* ---------------------------------------------------------------------------
+ * Prepared display transforms.
+ *
+ * The four cached cmsHTRANSFORMs are rebuilt whenever the monitor profile or the
+ * display intent changes, so a handle handed to a caller can be freed under it. The
+ * functions below are therefore the only way to use them: each takes the read lock,
+ * aliases the handle to a local, runs, and releases. No cmsHTRANSFORM crosses the
+ * module boundary.
+ *
+ * Holding the read lock across the pixel work is deliberate and is what the previous
+ * caller-side code already did — it is what keeps the handle alive for the duration
+ * of the conversion.
+ * ------------------------------------------------------------------------- */
+
+void dt_colorprofiles_xyz_to_display(const dt_aligned_pixel_t XYZ, dt_aligned_pixel_t RGB)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_rdlock(&_transforms_lock);
+  const cmsHTRANSFORM transform = self->transform_xyz_to_display;
+  if(transform)
+    cmsDoTransform(transform, XYZ, RGB, 1);
+  pthread_rwlock_unlock(&_transforms_lock);
+
+  /* No display profile resolved yet (startup, or a monitor whose profile could not be
+   * read): fall back to sRGB rather than dereferencing NULL, which is what the two
+   * open-coded copies of this function did. */
+  if(IS_NULL_PTR(transform)) dt_XYZ_to_sRGB(XYZ, RGB);
+}
+
+gboolean dt_colorprofiles_rgba8_to_display_bgra8(const uint8_t *const in, uint8_t *const out,
+                                                 const int width, const int height,
+                                                 const dt_colorspaces_color_profile_type_t src_space)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+  cmsHTRANSFORM transform = NULL;
+  gboolean owned = FALSE;
+  gboolean managed = TRUE;
+
+  pthread_rwlock_rdlock(&_transforms_lock);
+
+  if(src_space == DT_COLORSPACE_SRGB)
+  {
+    transform = self->transform_srgb_to_display;
+  }
+  else if(src_space == DT_COLORSPACE_ADOBERGB)
+  {
+    transform = self->transform_adobe_rgb_to_display;
+  }
+  else if(src_space == DT_COLORSPACE_DISPLAY)
+  {
+    // already in display space: pass through, swapping R <-> B (transform stays NULL)
+  }
+  else
+  {
+    const dt_colorspaces_color_profile_t *const from
+        = _get_profile(self, src_space, "", DT_PROFILE_ROLE_MONITOR);
+    const dt_colorspaces_color_profile_t *const to
+        = _get_profile(self, DT_COLORSPACE_DISPLAY, "", DT_PROFILE_ROLE_MONITOR);
+
+    /* Not every colorspace has a profile registered for the MONITOR role (a thumbnail
+     * cached with an exotic tag). Fall back to the same passthrough as DT_COLORSPACE_DISPLAY
+     * instead of dereferencing NULL in cmsCreateTransform(). */
+    if(!IS_NULL_PTR(from) && !IS_NULL_PTR(to))
+    {
+      transform = cmsCreateTransform(from->profile, TYPE_RGBA_8, to->profile, TYPE_BGRA_8,
+                                     INTENT_PERCEPTUAL, cmsFLAGS_NOCACHE);
+      owned = TRUE;
+    }
+  }
+
+  /* DT_COLORSPACE_DISPLAY needs no transform and is not a failure; every other space
+   * reaching the swap-only path means we could not colour-manage it. */
+  if(IS_NULL_PTR(transform) && src_space != DT_COLORSPACE_DISPLAY) managed = FALSE;
+
+  _transform_rgba8_to_bgra8(transform, in, out, width, height);
+
+  if(owned && transform) cmsDeleteTransform(transform);
+  pthread_rwlock_unlock(&_transforms_lock);
+
+  return managed;
+}
+
+gboolean dt_colorprofiles_bgra8_to_adobergb_rgba8(const uint8_t *const in, uint8_t *const out,
+                                                  const int width, const int height,
+                                                  const dt_colorspaces_color_profile_type_t src_space)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+  cmsHTRANSFORM transform = NULL;
+  gboolean owned = FALSE;
+
+  pthread_rwlock_rdlock(&_transforms_lock);
+
+  if(src_space == DT_COLORSPACE_DISPLAY)
+  {
+    transform = self->transform_display_to_adobe_rgb;
+  }
+  else
+  {
+    const dt_colorspaces_color_profile_t *const from
+        = _get_profile(self, src_space, "", DT_PROFILE_ROLE_MONITOR);
+    const dt_colorspaces_color_profile_t *const to
+        = _get_profile(self, DT_COLORSPACE_ADOBERGB, "", DT_PROFILE_ROLE_MONITOR);
+    if(!IS_NULL_PTR(from) && !IS_NULL_PTR(to))
+    {
+      transform = cmsCreateTransform(from->profile, TYPE_BGRA_8, to->profile, TYPE_RGBA_8,
+                                     INTENT_PERCEPTUAL, cmsFLAGS_NOCACHE);
+      owned = TRUE;
+    }
+  }
+
+  const gboolean managed = !IS_NULL_PTR(transform);
+
+  /* With no transform this only swaps R <-> B, which is what turns the BGRA input back
+   * into RGBA. The helper name says bgra8, but it is the same byte swap either way. */
+  _transform_rgba8_to_bgra8(transform, in, out, width, height);
+
+  if(owned && transform) cmsDeleteTransform(transform);
+  pthread_rwlock_unlock(&_transforms_lock);
+
+  return managed;
+}
+
+/* One row of a strided, packed-RGB(A) buffer: widen to RGBA8, convert, write back
+ * narrowed and R <-> B swapped. `row_in`/`row_out` are width*4 scratch. */
+static void _srgb_to_display_row(const cmsHTRANSFORM transform, uint8_t *const src, const int width,
+                                 const int n_channels, const gboolean has_alpha,
+                                 uint8_t *const row_in, uint8_t *const row_out)
+{
+  for(int x = 0; x < width; x++)
+  {
+    const int s = x * n_channels;
+    const int d = x * 4;
+    row_in[d + 0] = src[s + 0];
+    row_in[d + 1] = src[s + 1];
+    row_in[d + 2] = src[s + 2];
+    row_in[d + 3] = has_alpha ? src[s + 3] : UINT8_MAX;
+  }
+
+  cmsDoTransform(transform, row_in, row_out, width);
+
+  for(int x = 0; x < width; x++)
+  {
+    const int s = x * 4;
+    const int d = x * n_channels;
+    src[d + 0] = row_out[s + 2];
+    src[d + 1] = row_out[s + 1];
+    src[d + 2] = row_out[s + 0];
+    if(has_alpha) src[d + 3] = row_out[s + 3];
+  }
+}
+
+gboolean dt_colorprofiles_srgb_to_display_strided(uint8_t *const pixels, const int width, const int height,
+                                                  const int rowstride, const int n_channels,
+                                                  const gboolean has_alpha)
+{
+  if(IS_NULL_PTR(pixels) || width <= 0 || height <= 0 || n_channels < 3) return FALSE;
+
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+
+  pthread_rwlock_rdlock(&_transforms_lock);
+  const cmsHTRANSFORM transform = self->transform_srgb_to_display;
+  if(IS_NULL_PTR(transform))
+  {
+    pthread_rwlock_unlock(&_transforms_lock);
+    return FALSE;
+  }
+
+  /* Two width*4 scratch rows per thread, in ONE allocation made before the parallel
+   * region: a per-thread allocation that could fail would put the worksharing loop
+   * behind a condition some threads take and others do not, which hangs. */
+  const size_t row_bytes = (size_t)width * 4u;
+  const int nthreads = MAX(dt_get_num_openmp_threads(), 1);
+  uint8_t *const scratch = g_try_malloc((size_t)nthreads * 2u * row_bytes);
+
+  if(IS_NULL_PTR(scratch))
+  {
+    pthread_rwlock_unlock(&_transforms_lock);
+    return FALSE;
+  }
+
+  __OMP_PARALLEL__()
+  {
+    uint8_t *const row_in = scratch + (size_t)2 * dt_get_thread_num() * row_bytes;
+    uint8_t *const row_out = row_in + row_bytes;
+
+    __OMP_FOR__()
+    for(int y = 0; y < height; y++)
+      _srgb_to_display_row(transform, pixels + (size_t)y * rowstride, width, n_channels, has_alpha,
+                           row_in, row_out);
+  }
+
+  g_free(scratch);
+  pthread_rwlock_unlock(&_transforms_lock);
+
+  return TRUE;
+}
+
+// caller holds _transforms_lock for writing
 static void _update_display_profile(guchar *tmp_data, gsize size, char *name, size_t name_size)
 {
   dt_colorspaces_t *color_profiles = dt_colorspaces_get_global();
@@ -1233,8 +1694,20 @@ static void _update_display_profile(guchar *tmp_data, gsize size, char *name, si
       dt_colorspaces_color_profile_t *p = (dt_colorspaces_color_profile_t *)iter->data;
       if(p->type == DT_COLORSPACE_DISPLAY)
       {
+        /* This is the ONE handle in the list that is replaced at runtime, and the reason
+         * every entry carries a lock. Take this entry's WRITE lock across the swap, so a
+         * caller that resolved this profile and is deriving from it under the read lock
+         * cannot have the handle closed underneath it.
+         *
+         * The caller already holds _transforms_lock for writing; entry lock inside it,
+         * per the lock-order note there. */
+        pthread_rwlock_wrlock(&p->lock);
+
         if(p->profile) dt_colorspaces_cleanup_profile(p->profile);
         p->profile = profile;
+
+        pthread_rwlock_unlock(&p->lock);
+
         if(name)
           dt_colorspaces_get_profile_name(profile, "en", "US", name, name_size);
 
@@ -1246,6 +1719,7 @@ static void _update_display_profile(guchar *tmp_data, gsize size, char *name, si
     }
   }
 }
+
 
 static void cms_error_handler(cmsContext ContextID, cmsUInt32Number ErrorCode, const char *text)
 {
@@ -1312,12 +1786,8 @@ static GList *load_profile_from_dir(const char *subdir)
           g_strlcpy(prof->filename, filename, sizeof(prof->filename));
           prof->type = DT_COLORSPACE_FILE;
           prof->profile = tmpprof;
-          // these will be set after sorting!
-          prof->in_pos = -1;
-          prof->out_pos = -1;
-          prof->display_pos = -1;
-          prof->category_pos = -1;
-          prof->work_pos = -1;
+          // roles are assigned by the caller, after sorting, from the directory it came from
+          prof->roles = 0;
           temp_profiles = g_list_prepend(temp_profiles, prof);
         }
 
@@ -1333,7 +1803,7 @@ icc_loading_done:
   return temp_profiles;
 }
 
-dt_colorspaces_t *dt_colorspaces_init()
+static dt_colorspaces_t *_colorspaces_build(void)
 {
   cmsSetLogErrorHandler(cms_error_handler);
 
@@ -1341,112 +1811,89 @@ dt_colorspaces_t *dt_colorspaces_init()
 
   _compute_prequantized_primaries(&D65xyY, &Rec709_Primaries, &Rec709_Primaries_Prequantized);
 
-  pthread_rwlock_init(&res->xprofile_lock, NULL);
-
-  int in_pos = -1,
-      out_pos = -1,
-      display_pos = -1,
-      category_pos = -1,
-      work_pos = -1;
 
   // init the category profile with NULL profile, the actual profile must be retrieved dynamically by the caller
-  res->profiles = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_WORK, NULL, _("work profile"), -1, -1,
-                                                               -1, ++category_pos, -1));
+  res->profiles = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_WORK, NULL, _("work profile"), 0));
 
-  res->profiles = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_EXPORT, NULL, _("export profile"), -1,
-                                                               -1, -1, ++category_pos, -1));
+  res->profiles = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_EXPORT, NULL, _("export profile"), 0));
 
   res->profiles
-      = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_SOFTPROOF, NULL, _("softproof profile"), -1, -1,
-                                                     -1, ++category_pos, -1));
+      = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_SOFTPROOF, NULL, _("softproof profile"), 0));
 
   // init the display profile with srgb so some stupid code that runs before the real profile could be fetched has something to work with
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_DISPLAY, dt_colorspaces_create_srgb_profile(),
-                                     _("System display profile (recommended)"), -1, -1, ++display_pos, ++category_pos, -1));
+                                     _("System display profile (recommended)"), DT_PROFILE_ROLE_MONITOR));
 
   // we want a v4 with parametric curve for input and a v2 with point trc for output
   // see http://ninedegreesbelow.com/photography/lcms-make-icc-profiles.html#profile-variants-and-versions
   // TODO: what about display?
   res->profiles
       = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_SRGB, dt_colorspaces_create_srgb_profile_v4(),
-                                                     _("sRGB (e.g. JPG)"), ++in_pos, -1, -1, -1, -1));
+                                                     _("sRGB (e.g. JPG)"), DT_PROFILE_ROLE_INPUT));
 
   res->profiles
       = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_SRGB, dt_colorspaces_create_srgb_profile(),
-                                                     _("sRGB"), -1, ++out_pos, ++display_pos,
-                                                     ++category_pos, ++work_pos));
+                                                     _("sRGB"), DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(res->profiles,
                                 _create_profile(DT_COLORSPACE_ADOBERGB, dt_colorspaces_create_adobergb_profile(),
-                                                _("Adobe RGB (compatible)"), ++in_pos, ++out_pos, ++display_pos,
-                                                ++category_pos, ++work_pos));
+                                                _("Adobe RGB (compatible)"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_LIN_REC709, dt_colorspaces_create_linear_rec709_rgb_profile(),
-                                     _("linear Rec709 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("linear Rec709 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_REC709, dt_colorspaces_create_gamma_rec709_rgb_profile(),
-                                     _("gamma Rec709 RGB"), ++in_pos, ++out_pos, -1, -1,
-                                     ++work_pos));
+                                     _("gamma Rec709 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_ITUR_BT1886, dt_colorspaces_create_itur_bt1886_rgb_profile(),
-                                     _("ITU-R BT.1886 (gamma 2.4 Rec709)"), ++in_pos, ++out_pos, -1, -1,
-                                     ++work_pos));
+                                     _("ITU-R BT.1886 (gamma 2.4 Rec709)"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_LIN_REC2020, dt_colorspaces_create_linear_rec2020_rgb_profile(),
-                                     _("linear Rec2020 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("linear Rec2020 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_PQ_REC2020, dt_colorspaces_create_pq_rec2020_rgb_profile(),
-                                     _("PQ Rec2020 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("PQ Rec2020 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_HLG_REC2020, dt_colorspaces_create_hlg_rec2020_rgb_profile(),
-                                     _("HLG Rec2020 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("HLG Rec2020 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_PQ_P3, dt_colorspaces_create_pq_p3_rgb_profile(),
-                                     _("PQ P3 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("PQ P3 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_HLG_P3, dt_colorspaces_create_hlg_p3_rgb_profile(),
-                                     _("HLG P3 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("HLG P3 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_DISPLAY_P3, dt_colorspaces_create_display_p3_rgb_profile(),
-                                     _("Display P3 RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                     ++work_pos));
+                                     _("Display P3 RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
      res->profiles, _create_profile(DT_COLORSPACE_PROPHOTO_RGB, dt_colorspaces_create_linear_prophoto_rgb_profile(),
-                                    _("linear ProPhoto RGB"), ++in_pos, ++out_pos, ++display_pos, ++category_pos,
-                                    ++work_pos));
+                                    _("linear ProPhoto RGB"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR | DT_PROFILE_ROLE_WORKING));
 
   res->profiles = g_list_append(
       res->profiles,
-      _create_profile(DT_COLORSPACE_XYZ, dt_colorspaces_create_xyz_profile(), _("linear XYZ"), ++in_pos,
-                      dt_conf_get_bool("allow_lab_output") ? ++out_pos : -1, -1, -1, -1));
+      _create_profile(DT_COLORSPACE_XYZ, dt_colorspaces_create_xyz_profile(), _("linear XYZ"),
+                      DT_PROFILE_ROLE_INPUT | (dt_conf_get_bool("allow_lab_output") ? DT_PROFILE_ROLE_OUTPUT : 0)));
 
   res->profiles = g_list_append(
-      res->profiles, _create_profile(DT_COLORSPACE_LAB, dt_colorspaces_create_lab_profile(), _("Lab"), ++in_pos,
-                                     dt_conf_get_bool("allow_lab_output") ? ++out_pos : -1, -1, -1, -1));
+      res->profiles, _create_profile(DT_COLORSPACE_LAB, dt_colorspaces_create_lab_profile(), _("Lab"),
+                                     DT_PROFILE_ROLE_INPUT | (dt_conf_get_bool("allow_lab_output") ? DT_PROFILE_ROLE_OUTPUT : 0)));
 
   res->profiles = g_list_append(
       res->profiles, _create_profile(DT_COLORSPACE_INFRARED, dt_colorspaces_create_linear_infrared_profile(),
-                                     _("linear infrared BGR"), ++in_pos, -1, -1, -1, -1));
+                                     _("linear infrared BGR"), DT_PROFILE_ROLE_INPUT));
 
   res->profiles
       = g_list_append(res->profiles, _create_profile(DT_COLORSPACE_BRG, dt_colorspaces_create_brg_profile(),
-                                                     _("BRG (for testing)"), ++in_pos, ++out_pos, ++display_pos,
-                                                     -1, -1));
+                                                     _("BRG (for testing)"), DT_PROFILE_ROLE_INPUT | DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR));
 
   // init display profile and softproof/gama checking from conf
   res->display_type = dt_conf_get_int("ui_last/color/display_type");
@@ -1479,7 +1926,7 @@ dt_colorspaces_t *dt_colorspaces_init()
   for(GList *iter = temp_profiles; iter; iter = g_list_next(iter))
   {
     dt_colorspaces_color_profile_t *prof = (dt_colorspaces_color_profile_t *)iter->data;
-    prof->in_pos = ++in_pos;
+    prof->roles = DT_PROFILE_ROLE_INPUT;
   }
   res->profiles = g_list_concat(res->profiles, temp_profiles);
 
@@ -1499,12 +1946,10 @@ dt_colorspaces_t *dt_colorspaces_init()
     const gboolean is_valid_matrix_profile
         = dt_colorspaces_get_matrix_from_output_profile(prof->profile, NULL, NULL, NULL, NULL, 0) == 0
           && dt_colorspaces_get_matrix_from_input_profile(prof->profile, NULL, NULL, NULL, NULL, 0) == 0;
-    prof->out_pos = ++out_pos;
-    prof->display_pos = ++display_pos;
+    prof->roles = DT_PROFILE_ROLE_OUTPUT | DT_PROFILE_ROLE_MONITOR;
     if(is_valid_matrix_profile)
     {
-      prof->category_pos = ++category_pos;
-      prof->work_pos = ++work_pos;
+      prof->roles |= DT_PROFILE_ROLE_WORKING;
     }
     else
     {
@@ -1524,7 +1969,7 @@ dt_colorspaces_t *dt_colorspaces_init()
   return res;
 }
 
-void dt_colorspaces_cleanup(dt_colorspaces_t *self)
+static void _colorspaces_destroy(dt_colorspaces_t *self)
 {
   // remember display profile and softproof/gama checking from conf
   dt_conf_set_int("ui_last/color/display_type", self->display_type);
@@ -1550,12 +1995,15 @@ void dt_colorspaces_cleanup(dt_colorspaces_t *self)
   for(GList *iter = self->profiles; iter; iter = g_list_next(iter))
   {
     dt_colorspaces_color_profile_t *p = (dt_colorspaces_color_profile_t *)iter->data;
-    if(p) dt_colorspaces_cleanup_profile(p->profile);
+    if(p)
+    {
+      dt_colorspaces_cleanup_profile(p->profile);
+      pthread_rwlock_destroy(&p->lock);
+    }
   }
   g_list_free_full(self->profiles, dt_free_gpointer);
   self->profiles = NULL;
 
-  pthread_rwlock_destroy(&self->xprofile_lock);
   dt_free(self->colord_profile_file);
   dt_free(self->xprofile_data);
 
@@ -1637,7 +2085,10 @@ static void dt_colorspaces_get_display_profile_colord_callback(GObject *source, 
 {
   dt_colorspaces_t *color_profiles = dt_colorspaces_get_global();
 
-  pthread_rwlock_wrlock(&color_profiles->xprofile_lock);
+  /* Writer: takes the DISPLAY entry's own lock (its cmsHPROFILE is replaced) and then the
+   * transforms lock (all four are rebuilt from it). Entry before transforms -- see the
+   * lock-order note on _transforms_lock. */
+  pthread_rwlock_wrlock(&_transforms_lock);
 
   int profile_changed = 0;
   CdWindow *window = CD_WINDOW(source);
@@ -1679,7 +2130,7 @@ static void dt_colorspaces_get_display_profile_colord_callback(GObject *source, 
   if(profile) g_object_unref(profile);
   g_object_unref(window);
 
-  pthread_rwlock_unlock(&color_profiles->xprofile_lock);
+  pthread_rwlock_unlock(&_transforms_lock);
 
   if(profile_changed) _notify_profile_changed();
 }
@@ -1702,7 +2153,11 @@ void dt_colorspaces_set_display_profile(const dt_colorspaces_color_profile_type_
   // make sure that no one gets a broken profile
   // FIXME: benchmark if the try is really needed when moving/resizing the window. Maybe we can just lock it
   // and block
-  if(pthread_rwlock_trywrlock(&color_profiles->xprofile_lock))
+  /* trywrlock, not wrlock, and this is load-bearing: this runs from a configure-event
+   * handler, i.e. on every tick of a window drag. Blocking the GUI thread behind a
+   * thumbnail conversion would stutter the drag, so a refresh that cannot get the lock is
+   * dropped and the next event retries. */
+  if(pthread_rwlock_trywrlock(&_transforms_lock))
     return; // we are already updating the profile. Or someone is reading right now. Too bad we can't
             // distinguish that. Whatever ...
 
@@ -1760,7 +2215,7 @@ void dt_colorspaces_set_display_profile(const dt_colorspaces_color_profile_type_
   {
     dt_free(buffer);
   }
-  pthread_rwlock_unlock(&color_profiles->xprofile_lock);
+  pthread_rwlock_unlock(&_transforms_lock);
   if(profile_changed) _notify_profile_changed();
   dt_free(profile_source);
 }
@@ -1801,15 +2256,12 @@ gboolean dt_colorspaces_is_profile_equal(const char *fullname, const char *filen
 static const dt_colorspaces_color_profile_t *_get_profile(dt_colorspaces_t *self,
                                                           dt_colorspaces_color_profile_type_t type,
                                                           const char *filename,
-                                                          dt_colorspaces_profile_direction_t direction)
+                                                          dt_colorspaces_profile_role_t role)
 {
   for(GList *iter = self->profiles; iter; iter = g_list_next(iter))
   {
     dt_colorspaces_color_profile_t *p = (dt_colorspaces_color_profile_t *)iter->data;
-    if(((direction & DT_PROFILE_DIRECTION_IN && p->in_pos > -1)
-        || (direction & DT_PROFILE_DIRECTION_OUT && p->out_pos > -1)
-        || (direction & DT_PROFILE_DIRECTION_WORK && p->work_pos > -1)
-        || (direction & DT_PROFILE_DIRECTION_DISPLAY && p->display_pos > -1))
+    if((p->roles & role)
        && (p->type == type
            && (type != DT_COLORSPACE_FILE || dt_colorspaces_is_profile_equal(p->filename, filename))))
     {
@@ -1822,9 +2274,180 @@ static const dt_colorspaces_color_profile_t *_get_profile(dt_colorspaces_t *self
 
 const dt_colorspaces_color_profile_t *dt_colorspaces_get_profile(dt_colorspaces_color_profile_type_t type,
                                                                  const char *filename,
-                                                                 dt_colorspaces_profile_direction_t direction)
+                                                                 dt_colorspaces_profile_role_t role)
 {
-  return _get_profile(dt_colorspaces_get_global(), type, filename, direction);
+  return _get_profile(dt_colorspaces_get_global(), type, filename, role);
+}
+
+
+/* ---------------------------------------------------------------------------
+ * CRUDE: the metadata half of the module interface.
+ *
+ * Everything here answers a question ABOUT a profile -- which ones exist for a use,
+ * what is this one called, where does it sit in a combo box -- and answers it with
+ * plain values. No cmsHPROFILE crosses this boundary and no caller iterates the list.
+ *
+ * These deliberately take no lock. The list is built once by init and never appended
+ * to again; the ONE datum that mutates at runtime is the DT_COLORSPACE_DISPLAY entry's
+ * cmsHPROFILE, which _update_display_profile() replaces in place and which nothing
+ * here reads. Adding a lock around these would put one on 39 call sites that are
+ * lock-free today, to protect fields nobody writes.
+ *
+ * THE ROLE PREDICATE. `role` is mandatory and is not a nicety:
+ * DT_COLORSPACE_SRGB is registered twice -- a v4 parametric-curve profile valid only
+ * as input, and a v2 point-TRC profile valid for out/display/category/work -- and the
+ * two are distinguished by nothing else. A multi-bit mask resolves to the first match
+ * in registration order, which for sRGB is the v4 input entry. The index-valued calls
+ * therefore REQUIRE a single bit: an index means nothing outside the enumeration that
+ * produced it, and an index taken from INPUT|OUTPUT equals neither menu's row number.
+ * ------------------------------------------------------------------------- */
+
+/* Exactly the predicate _get_profile() applies, so enumeration and lookup can never disagree
+ * about what a role contains. An entry with an empty mask -- the three category entries, and
+ * every per-image container -- is unreachable by either. */
+static gboolean _entry_serves(const dt_colorspaces_color_profile_t *const p,
+                              const dt_colorspaces_profile_role_t role)
+{
+  return (p->roles & role) != 0;
+}
+
+static gboolean _is_single_role(const dt_colorspaces_profile_role_t role)
+{
+  return role != 0 && (role & (role - 1)) == 0;
+}
+
+static void _fill_desc(const dt_colorspaces_color_profile_t *const p, dt_colorprofile_desc_t *const out)
+{
+  out->type = p->type;
+  g_strlcpy(out->filename, p->filename, sizeof(out->filename));
+  g_strlcpy(out->name, p->name, sizeof(out->name));
+}
+
+/* --- LOCK: pin ONE profile's handle for the span of a derivation -----------
+ *
+ * Per profile, not per module. Only the DT_COLORSPACE_DISPLAY entry's cmsHPROFILE is
+ * actually replaced at runtime -- _update_display_profile() closes and swaps it on every
+ * window move or resize that lands on a different monitor -- but the lock lives on every
+ * entry rather than on that one, so the next entry that becomes mutable does not
+ * reintroduce the hazard by default.
+ *
+ * Why not one module-wide lock: several pipelines and the GUI derive from profiles
+ * concurrently. A module-wide reader held across a whole thumbnail conversion queues a
+ * monitor-profile change behind work that has nothing to do with the display profile, and
+ * a queued writer in turn blocks every unrelated reader. Per entry, a monitor change
+ * contends only with users of the display entry.
+ *
+ * The entry POINTER is stable for the process: entries are allocated at init and never
+ * freed or moved, only their ->profile is swapped. So resolving a profile and then locking
+ * it is sound -- but read ->profile only AFTER taking the lock. */
+void dt_colorspaces_lock_profile(const dt_colorspaces_color_profile_t *const profile)
+{
+  if(IS_NULL_PTR(profile)) return;
+  pthread_rwlock_rdlock((pthread_rwlock_t *)&profile->lock);
+}
+
+void dt_colorspaces_unlock_profile(const dt_colorspaces_color_profile_t *const profile)
+{
+  if(IS_NULL_PTR(profile)) return;
+  pthread_rwlock_unlock((pthread_rwlock_t *)&profile->lock);
+}
+
+size_t dt_colorspaces_enumerate_profiles(const dt_colorspaces_profile_role_t role,
+                                         dt_colorprofile_desc_t **out)
+{
+  if(IS_NULL_PTR(out)) return 0;
+  *out = NULL;
+
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+  if(IS_NULL_PTR(self)) return 0;
+
+  size_t count = 0;
+  for(const GList *l = self->profiles; l; l = g_list_next(l))
+    if(_entry_serves((const dt_colorspaces_color_profile_t *)l->data, role)) count++;
+
+  if(count == 0) return 0;
+
+  dt_colorprofile_desc_t *list = dt_alloc_align(count * sizeof(dt_colorprofile_desc_t));
+  if(IS_NULL_PTR(list)) return 0;
+
+  size_t k = 0;
+  for(const GList *l = self->profiles; l; l = g_list_next(l))
+  {
+    const dt_colorspaces_color_profile_t *const p = (const dt_colorspaces_color_profile_t *)l->data;
+    if(_entry_serves(p, role)) _fill_desc(p, &list[k++]);
+  }
+
+  *out = list;
+  return count;
+}
+
+int dt_colorspaces_profile_index(const dt_colorspaces_profile_role_t role,
+                                 const dt_colorspaces_color_profile_type_t type,
+                                 const char *const filename)
+{
+  if(!_is_single_role(role)) return -1;
+
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+  if(IS_NULL_PTR(self)) return -1;
+
+  int index = 0;
+  for(const GList *l = self->profiles; l; l = g_list_next(l))
+  {
+    const dt_colorspaces_color_profile_t *const p = (const dt_colorspaces_color_profile_t *)l->data;
+    if(!_entry_serves(p, role)) continue;
+
+    if(p->type == type
+       && (type != DT_COLORSPACE_FILE || dt_colorspaces_is_profile_equal(p->filename, filename)))
+      return index;
+
+    index++;
+  }
+
+  return -1;
+}
+
+gboolean dt_colorspaces_profile_at(const dt_colorspaces_profile_role_t role,
+                                   const int index,
+                                   dt_colorprofile_desc_t *const out)
+{
+  if(!_is_single_role(role) || index < 0 || IS_NULL_PTR(out)) return FALSE;
+
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+  if(IS_NULL_PTR(self)) return FALSE;
+
+  int k = 0;
+  for(const GList *l = self->profiles; l; l = g_list_next(l))
+  {
+    const dt_colorspaces_color_profile_t *const p = (const dt_colorspaces_color_profile_t *)l->data;
+    if(!_entry_serves(p, role)) continue;
+    if(k == index)
+    {
+      _fill_desc(p, out);
+      return TRUE;
+    }
+    k++;
+  }
+
+  return FALSE;
+}
+
+gboolean dt_colorspaces_profile_exists(const dt_colorspaces_profile_role_t role,
+                                       const dt_colorspaces_color_profile_type_t type,
+                                       const char *const filename)
+{
+  dt_colorspaces_t *const self = dt_colorspaces_get_global();
+  if(IS_NULL_PTR(self)) return FALSE;
+
+  for(const GList *l = self->profiles; l; l = g_list_next(l))
+  {
+    const dt_colorspaces_color_profile_t *const p = (const dt_colorspaces_color_profile_t *)l->data;
+    if(!_entry_serves(p, role)) continue;
+    if(p->type == type
+       && (type != DT_COLORSPACE_FILE || dt_colorspaces_is_profile_equal(p->filename, filename)))
+      return TRUE;
+  }
+
+  return FALSE;
 }
 
 // Copied from dcraw's pseudoinverse()

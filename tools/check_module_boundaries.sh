@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Two module boundaries this tree relies on, made checkable rather than remembered.
+# Three module boundaries this tree relies on, made checkable rather than remembered.
+# The third is a ratchet on a migration in progress rather than a settled rule.
 #
 #   1. src/system must include nothing that could bring state with it.
 #
@@ -83,7 +84,40 @@ while IFS= read -r line; do
   findings=$((findings + 1))
 done < <(grep -Hn '^[ \t]*#[ \t]*include[ \t]*"gui/' src/widgets/*.c src/widgets/*.h 2>/dev/null)
 
+# ---------------------------------------------------------------------------------------
+# 3. src/colorprofiles is closed: nothing outside it names the module's state.
+#
+# This started as a ratchet on a migration -- 59 places read dt_colorspaces_t's members
+# through dt_colorspaces_get_global(), and 4 took its rwlock by hand. Both are zero now,
+# so it is a real boundary and the check is that it stays one. A new caller of either is
+# a caller that should be asking the module a question instead.
+#
+# xprofile_lock is counted separately because it is the sharper of the two: a caller that
+# holds the module's lock is a caller that can deadlock it or use a handle it frees.
+accessor_baseline=0
+lock_baseline=0
+
+accessor_now=$(grep -rn 'dt_colorspaces_get_global()' src/ --include='*.c' --include='*.h' --include='*.cc' \
+               2>/dev/null | grep -cv '^src/colorprofiles/')
+# Acquisitions, not mentions: one number per caller-held region, so it reads as
+# "4 places outside the module still take its lock" rather than counting unlocks twice.
+lock_now=$(grep -rnE 'pthread_rwlock_(rd|wr|tryrd|trywr)lock[^;]*xprofile_lock' \
+           src/ --include='*.c' --include='*.h' --include='*.cc' \
+           2>/dev/null | grep -cv '^src/colorprofiles/')
+
+echo "colorprofiles: ${accessor_now} external dt_colorspaces_get_global() (baseline ${accessor_baseline}),"
+echo "               ${lock_now} external xprofile_lock (baseline ${lock_baseline})."
+
+if [ "${accessor_now}" -gt "${accessor_baseline}" ] || [ "${lock_now}" -gt "${lock_baseline}" ]; then
+  echo "colorprofiles: a count ROSE. New code must go through the module API, not its globals."
+  findings=$((findings + 1))
+elif [ "${accessor_now}" -lt "${accessor_baseline}" ] || [ "${lock_now}" -lt "${lock_baseline}" ]; then
+  echo "colorprofiles: a count fell -- lower the baseline in this script, in the same commit."
+  findings=$((findings + 1))
+fi
+
 echo
+system_widgets_failed=0
 if [ "${findings}" -gt 0 ]; then
   cat <<'MSG'
 A module boundary was crossed.
@@ -102,8 +136,48 @@ through widgets/widget_settings.h -- that is what those handler slots are for.
 Adding an exception to this script should be the last resort, and needs the reason written
 next to it.
 MSG
+  system_widgets_failed=1
+fi
+
+
+# 4. src/common/opencl is closed: nothing outside it names the module's state.
+#
+# `darktable.opencl` used to be a member of the application struct, so dt_opencl_t's device
+# array, its per-device locks and nine other subsystems' kernel bundles were one dereference
+# away from any file that included darktable.h. The struct is a file-static in
+# common/opencl.c now and is not even declared in the header, so both counts are structurally
+# zero -- this check is what keeps someone from re-exporting it "just for one caller".
+#
+# The kernel-bundle count is separate because it is the shape that comes back: a subsystem
+# that hands its own state to opencl.c to hold is re-creating the round trip that was removed.
+opencl_state_baseline=0
+opencl_parked_baseline=0
+
+opencl_state_now=$(grep -rn 'darktable\.opencl\|dt_opencl_get_global' src/ --include='*.c' --include='*.h' --include='*.cc' \
+                   2>/dev/null | grep -v '^src/common/opencl' | grep -cv '^\s*[0-9]*:\s*[/ ]\*')
+# A member of dt_opencl_t that is really another module's: `struct dt_<x>_cl_global_t *` on it.
+# The struct lives in the .c now -- that is the point of the check -- so look for it there,
+# and in the header too, so that re-exporting it does not make the count silently zero.
+opencl_parked_now=$(cat src/common/opencl.c src/common/opencl.h 2>/dev/null \
+                    | sed -n '/^typedef struct dt_opencl_t$/,/^} dt_opencl_t;/p' \
+                    | grep -c '_cl_global_t \*')
+
+echo "opencl:        ${opencl_state_now} external references to the module's state (baseline ${opencl_state_baseline}),"
+echo "               ${opencl_parked_now} foreign kernel bundles parked on dt_opencl_t (baseline ${opencl_parked_baseline})."
+
+if [ "${opencl_state_now}" -gt "${opencl_state_baseline}" ] || [ "${opencl_parked_now}" -gt "${opencl_parked_baseline}" ]; then
+  echo "opencl: a count ROSE. Ask the module a question (dt_opencl_get_num_devices(),"
+  echo "        dt_opencl_get_device_name(), dt_opencl_reserve_device_*()) instead of reaching"
+  echo "        into its state, and keep your own kernels in your own file."
+  findings=$((findings + 1))
+elif [ "${opencl_state_now}" -lt "${opencl_state_baseline}" ] || [ "${opencl_parked_now}" -lt "${opencl_parked_baseline}" ]; then
+  echo "opencl: a count fell -- lower the baseline in this script, in the same commit."
+  findings=$((findings + 1))
+fi
+
+if [ "${findings}" -gt 0 ]; then
   exit 1
 fi
 
-echo "OK: src/system is closed, and src/widgets does not reach into gui/."
+echo "OK: src/system is closed, src/widgets does not reach into gui/, colorprofiles and opencl held."
 exit 0

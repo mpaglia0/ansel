@@ -51,7 +51,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "colorprofiles/colorspaces.h"
+#include "colorprofiles/profile_types.h"
 #include "system/capabilities.h"
 #include "system/sys_resources.h"
 #include "common/global_mutexes.h"
@@ -544,6 +544,11 @@ void dt_dev_pixelpipe_cleanup(dt_dev_pixelpipe_t *pipe)
   dt_pthread_mutex_destroy(&(pipe->busy_mutex));
   pipe->icc_type = DT_COLORSPACE_NONE;
   dt_free(pipe->icc_filename);
+
+  /* Image-derived input profile, if this pipe built one. input_profile_info may point at
+   * it or at a shared memo entry, so free through the owning pointer only. */
+  dt_ioppr_cleanup_profile_info(&pipe->owned_input_profile_info);
+  pipe->input_profile_info = NULL;
 
   pipe->output_imgid = UNKNOWN_IMAGE;
 
@@ -1276,7 +1281,7 @@ void dt_dev_pixelpipe_disable_before(dt_dev_pixelpipe_t *pipe, const char *op)
   {                                                                                                               \
     if(pipe->devid >= 0)                                                                                          \
     {                                                                                                             \
-      dt_opencl_unlock_device(pipe->devid);                                                                       \
+      dt_opencl_release_device(pipe->devid);                                                                       \
       pipe->devid = -1;                                                                                           \
     }                                                                                                             \
     if(pipe->forms)                                                                                               \
@@ -1575,7 +1580,7 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
   }
 
   pipe->opencl_enabled = dt_opencl_update_settings(); // update enabled flag and profile from preferences
-  pipe->devid = (pipe->opencl_enabled) ? dt_opencl_lock_device(pipe->type)
+  pipe->devid = (pipe->opencl_enabled) ? dt_opencl_reserve_device_for_pipe(pipe->type)
                                        : -1; // try to get/lock opencl resource
 
   if(pipe->devid > -1)
@@ -1629,23 +1634,15 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
     keep_running = (oclerr || (err && pipe->opencl_error));
     if(keep_running)
     {
-      // Log the error
-      dt_opencl_get_global()->error_count++; // increase error count
-      opencl_error = 1; // = any OpenCL error, next run goes to CPU
+      // Report it and be told what it means: 1 = retry this run on CPU, 2 = OpenCL is off
+      // for the rest of the session. The count and the threshold are the OpenCL module's.
+      opencl_error = dt_opencl_report_pipe_error();
 
       // Disable OpenCL for this pipe
-      dt_opencl_unlock_device(pipe->devid);
+      dt_opencl_release_device(pipe->devid);
       pipe->opencl_enabled = 0;
       pipe->opencl_error = 0;
       pipe->devid = -1;
-
-      if(dt_opencl_get_global()->error_count >= DT_OPENCL_MAX_ERRORS)
-      {
-        // Too many errors : dispable OpenCL for this session
-        dt_opencl_get_global()->stopped = 1;
-        dt_capabilities_remove("opencl");
-        opencl_error = 2; // = too many OpenCL errors, all runs go to CPU
-      }
 
       _print_opencl_errors(opencl_error, pipe);
     }
@@ -1690,7 +1687,7 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
   }
   if(pipe->devid >= 0)
   {
-    dt_opencl_unlock_device(pipe->devid);
+    dt_opencl_release_device(pipe->devid);
     pipe->devid = -1;
   }
 

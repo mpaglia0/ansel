@@ -3223,7 +3223,7 @@ static int _retouch_blur(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, 
       const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_work_profile_info(pipe);
 
       if(!IS_NULL_PTR(work_profile))
-        dt_ioppr_transform_image_colorspace(self, img_dest, img_dest, roi_mask_scaled->width,
+        dt_colorspaces_apply_profile(self->op, self->multi_name, img_dest, img_dest, roi_mask_scaled->width,
                                             roi_mask_scaled->height, IOP_CS_RGB, IOP_CS_LAB, &converted_cst,
                                             work_profile);
       else
@@ -3235,7 +3235,7 @@ static int _retouch_blur(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, 
       dt_bilateral_free(b);
 
       if(!IS_NULL_PTR(work_profile))
-        dt_ioppr_transform_image_colorspace(self, img_dest, img_dest, roi_mask_scaled->width,
+        dt_colorspaces_apply_profile(self->op, self->multi_name, img_dest, img_dest, roi_mask_scaled->width,
                                             roi_mask_scaled->height, IOP_CS_LAB, IOP_CS_RGB, &converted_cst,
                                             work_profile);
       else
@@ -3320,8 +3320,12 @@ static int rt_process_forms(float *layer, dwt_params_t *const wt_p, const int sc
 
   if(usr_d->suppress_mask) return 0;
 
-  // iterate through all forms
-  const dt_masks_form_t *grp = dt_masks_get_from_id(self->dev, bp->mask_id);
+  // Iterate through all forms. Look them up in pipe->forms -- the refcounted snapshot taken
+  // once for this pipeline run (dt_dev_pixelpipe_process(), pixelpipe_hb.c) -- not self->dev->forms,
+  // which is the live, GUI-owned list: this callback runs on the pipeline/worker thread, and
+  // self->dev->forms is neither locked nor guaranteed to still hold this module's group by the
+  // time a detached dev (export, snapshot) gets here.
+  const dt_masks_form_t *grp = dt_masks_get_from_id_ext(pipe->forms, bp->mask_id);
   if(IS_NULL_PTR(grp) || !(grp->type & DT_MASKS_GROUP)) return 0;
 
   for(const GList *forms = grp->points; forms; forms = g_list_next(forms))
@@ -3354,7 +3358,7 @@ static int rt_process_forms(float *layer, dwt_params_t *const wt_p, const int sc
     }
 
     // get the spot
-    dt_masks_form_t *form = dt_masks_get_from_id(self->dev, formid);
+    dt_masks_form_t *form = dt_masks_get_from_id_ext(pipe->forms, formid);
     if(IS_NULL_PTR(form))
     {
       fprintf(stderr, "rt_process_forms: missing form=%i from masks\n", formid);
@@ -4143,10 +4147,11 @@ static cl_int rt_process_forms_cl(cl_mem dev_layer, dwt_params_cl_t *const wt_p,
     scale = p->num_scales + 1;
   }
 
-  // iterate through all forms
+  // Iterate through all forms. Look them up in pipe->forms, the same frozen snapshot the CPU
+  // rt_process_forms() uses -- see the comment there for why self->dev->forms is unsafe here.
   if(!usr_d->suppress_mask)
   {
-    dt_masks_form_t *grp = dt_masks_get_from_id(self->dev, bp->mask_id);
+    dt_masks_form_t *grp = dt_masks_get_from_id_ext(pipe->forms, bp->mask_id);
     if(IS_NULL_PTR(grp) || !(grp->type & DT_MASKS_GROUP)) return err;
 
     for(const GList *forms = grp->points; forms && err == CL_SUCCESS; forms = g_list_next(forms))
@@ -4179,7 +4184,7 @@ static cl_int rt_process_forms_cl(cl_mem dev_layer, dwt_params_cl_t *const wt_p,
       }
 
       // get the spot
-      dt_masks_form_t *form = dt_masks_get_from_id(self->dev, formid);
+      dt_masks_form_t *form = dt_masks_get_from_id_ext(pipe->forms, formid);
       if(IS_NULL_PTR(form))
       {
         fprintf(stderr, "rt_process_forms: missing form=%i from masks\n", formid);

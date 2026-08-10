@@ -163,7 +163,6 @@ struct dt_points_t;
 struct dt_imageio_t;
 struct dt_bauhaus_t;
 struct dt_undo_t;
-struct dt_colorspaces_t;
 struct dt_l10n_t;
 
 
@@ -196,10 +195,8 @@ typedef struct darktable_t
   struct dt_selection_t *selection;
   struct dt_points_t *points;
   struct dt_imageio_t *imageio;
-  struct dt_opencl_t *opencl;
   struct dt_dbus_t *dbus;
   struct dt_undo_t *undo;
-  struct dt_colorspaces_t *color_profiles;
   struct dt_l10n_t *l10n;
   struct dt_dev_pixelpipe_cache_t *pixelpipe_cache;
 
