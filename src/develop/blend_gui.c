@@ -1512,27 +1512,6 @@ static dt_masks_form_t *_blendop_masks_group_create(dt_iop_module_t *module)
   return group_form;
 }
 
-static dt_masks_form_group_t *_blendop_masks_find_group_entry(dt_masks_form_t *group_form, const int formid, int *index)
-{
-  if(!IS_NULL_PTR(index)) *index = -1;
-  if(IS_NULL_PTR(group_form)) return NULL;
-  if(!(group_form->type & DT_MASKS_GROUP)) return NULL;
-
-  int group_index = 0;
-  for(GList *group_node = group_form->points; group_node; group_node = g_list_next(group_node))
-  {
-    dt_masks_form_group_t *group_entry = (dt_masks_form_group_t *)group_node->data;
-    if(group_entry->formid == formid)
-    {
-      if(index) *index = group_index;
-      return group_entry;
-    }
-    group_index++;
-  }
-
-  return NULL;
-}
-
 static void _blendop_masks_init_icons(dt_iop_gui_blend_data_t *bd)
 {
   if(IS_NULL_PTR(bd)) return;
@@ -1760,7 +1739,7 @@ static void _blendop_masks_refresh_lists(dt_iop_module_t *module)
     // Skip groups containing only a single group
     if(_blendop_masks_is_single_group_wrapper(module->dev, mask_form)) continue;
 
-    const gboolean active = _blendop_masks_find_group_entry(group_form, mask_form->formid, NULL) != NULL;
+    const gboolean active = dt_masks_form_group_find_entry(group_form, mask_form->formid, NULL) != NULL;
     GtkTreeIter iter;
     gtk_list_store_append(GTK_LIST_STORE(all_model), &iter);
     gchar *display_markup = g_markup_printf_escaped("%s", mask_form->name);
@@ -1782,7 +1761,7 @@ static void _blendop_masks_refresh_lists(dt_iop_module_t *module)
     if(!IS_NULL_PTR(group_form) && mask_form->formid == group_form->formid) continue;
     if(_blendop_masks_is_group_with_shapes(module->dev, mask_form)) continue;
 
-    const gboolean active = _blendop_masks_find_group_entry(group_form, mask_form->formid, NULL) != NULL;
+    const gboolean active = dt_masks_form_group_find_entry(group_form, mask_form->formid, NULL) != NULL;
     gboolean sensitive = TRUE;
     const gchar *locked_group_name = NULL;
     
@@ -1792,8 +1771,8 @@ static void _blendop_masks_refresh_lists(dt_iop_module_t *module)
       dt_masks_form_t *parent_form = (dt_masks_form_t *)parent_node->data;
       if(IS_NULL_PTR(parent_form) || !_blendop_masks_is_group_with_shapes(module->dev, parent_form)) continue;
       
-      const gboolean parent_active = _blendop_masks_find_group_entry(group_form, parent_form->formid, NULL) != NULL;
-      if(parent_active && _blendop_masks_find_group_entry(parent_form, mask_form->formid, NULL))
+      const gboolean parent_active = dt_masks_form_group_find_entry(group_form, parent_form->formid, NULL) != NULL;
+      if(parent_active && dt_masks_form_group_find_entry(parent_form, mask_form->formid, NULL))
       {
         sensitive = FALSE;
         locked_group_name = parent_form->name;
@@ -1983,7 +1962,7 @@ static void _blendop_masks_all_toggled(GtkCellRendererToggle *cell, gchar *path_
       group_form = _blendop_masks_group_create(module);
     if(IS_NULL_PTR(group_form)) return;
 
-    if(!_blendop_masks_find_group_entry(group_form, mask_form->formid, NULL))
+    if(!dt_masks_form_group_find_entry(group_form, mask_form->formid, NULL))
     {
       group_form = dt_masks_cow_touch(module->dev, group_form);
       dt_masks_group_add_form(module->dev, group_form, mask_form);
@@ -2004,7 +1983,7 @@ static void _blendop_masks_all_toggled(GtkCellRendererToggle *cell, gchar *path_
       gtk_tree_model_get(model, &search_iter, BLENDOP_MASKS_ALL_COL_FORMID, &child_formid, -1);
       
       // Check if this child belongs to the toggled group
-      if(_blendop_masks_find_group_entry(mask_form, child_formid, NULL))
+      if(dt_masks_form_group_find_entry(mask_form, child_formid, NULL))
       {
         // Lock (gray out) if group is being activated, unlock if deactivated
         gtk_list_store_set(GTK_LIST_STORE(model), &search_iter, 
@@ -2023,8 +2002,8 @@ static void _blendop_masks_all_toggled(GtkCellRendererToggle *cell, gchar *path_
                                 active ? DT_MASKS_EVENT_REMOVE : DT_MASKS_EVENT_ADD);
 }
 
-// Permanently delete a shape from the "all shapes" list: shared by the row's trash icon and
-// the right-click "Delete" context menu entry, both gated by dt_masks_gui_confirm_permanent_delete().
+// Permanently delete a shape from the "all shapes" list: the row's trash icon is the only
+// entry point, gated by dt_masks_gui_confirm_permanent_delete().
 static void _blendop_masks_all_delete(dt_iop_module_t *module, const int formid)
 {
   if(IS_NULL_PTR(module)) return;
@@ -2038,14 +2017,6 @@ static void _blendop_masks_all_delete(dt_iop_module_t *module, const int formid)
   dt_masks_form_delete(module->dev, module, NULL, mask_form);
   _blendop_masks_apply_and_commit(module);
   DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_MASK_CHANGED, formid, 0, DT_MASKS_EVENT_DELETE);
-}
-
-static void _blendop_masks_all_delete_callback(GtkWidget *menu_item, dt_iop_module_t *module)
-{
-  if(IS_NULL_PTR(module)) return;
-
-  const int formid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-formid"));
-  _blendop_masks_all_delete(module, formid);
 }
 
 static void _blendop_masks_all_duplicate_callback(GtkWidget *menu_item, dt_iop_module_t *module)
@@ -2170,12 +2141,7 @@ static gboolean _blendop_masks_all_button_pressed(GtkWidget *treeview, GdkEventB
   if(formid <= 0) return TRUE;
 
   GtkWidget *menu = gtk_menu_new();
-  GtkWidget *item = gtk_menu_item_new_with_label(_("Delete"));
-  g_object_set_data(G_OBJECT(item), "blend-formid", GINT_TO_POINTER(formid));
-  g_signal_connect(item, "activate", G_CALLBACK(_blendop_masks_all_delete_callback), module);
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
-
-  item = gtk_menu_item_new_with_label(_("Duplicate"));
+  GtkWidget *item = gtk_menu_item_new_with_label(_("Duplicate"));
   g_object_set_data(G_OBJECT(item), "blend-formid", GINT_TO_POINTER(formid));
   g_signal_connect(item, "activate", G_CALLBACK(_blendop_masks_all_duplicate_callback), module);
   gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
@@ -2329,6 +2295,24 @@ static void _blendop_masks_group_move_callback(GtkWidget *menu_item, dt_iop_modu
   DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_MASK_CHANGED, 0, parentid, DT_MASKS_EVENT_UPDATE);
 }
 
+static void _blendop_masks_group_duplicate_callback(GtkWidget *menu_item, dt_iop_module_t *module)
+{
+  if(IS_NULL_PTR(module)) return;
+
+  const int formid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-formid"));
+  const int parentid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-parentid"));
+
+  // dt_masks_form_duplicate_in_group also attaches the duplicate to the group right away,
+  // inheriting the source entry's state/opacity -- same helper used by the mask manager's
+  // own "Duplicate shape" action (libs/masks.c).
+  const int nid = dt_masks_form_duplicate_in_group(module->dev, parentid, formid);
+  if(nid <= 0) return;
+
+  _blendop_masks_apply_and_commit(module);
+  _blendop_masks_refresh_lists(module);
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_MASK_CHANGED, nid, parentid, DT_MASKS_EVENT_ADD);
+}
+
 static void _blendop_masks_edit_list_toggle(GtkToggleButton *togglebutton, dt_iop_module_t *module)
 {
   dt_iop_gui_blend_data_t *bd = (dt_iop_gui_blend_data_t *)module->blend_data;
@@ -2397,7 +2381,7 @@ static GtkWidget *_blendop_masks_group_ctx_menu(dt_iop_gui_blend_data_t *bd, dt_
   if(!IS_NULL_PTR(parent_group) && (parent_group->type & DT_MASKS_GROUP))
     parent_group = dt_masks_cow_touch(module->dev, parent_group);
   dt_masks_form_group_t *op_form = (!IS_NULL_PTR(parent_group) && (parent_group->type & DT_MASKS_GROUP))
-                                       ? _blendop_masks_find_group_entry(parent_group, formid, NULL)
+                                       ? dt_masks_form_group_find_entry(parent_group, formid, NULL)
                                        : NULL;
   dt_masks_form_t *form = dt_masks_get_from_id(module->dev, formid);
 
@@ -2471,6 +2455,14 @@ static GtkWidget *_blendop_masks_group_ctx_menu(dt_iop_gui_blend_data_t *bd, dt_
   g_object_set_data(G_OBJECT(item), "blend-index", GINT_TO_POINTER(index));
   g_object_set_data(G_OBJECT(item), "blend-move-up", GINT_TO_POINTER(FALSE));
   g_signal_connect(item, "activate", G_CALLBACK(_blendop_masks_group_move_callback), module);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+
+  item = gtk_menu_item_new_with_label(_("Duplicate shape"));
+  g_object_set_data(G_OBJECT(item), "blend-formid", GINT_TO_POINTER(formid));
+  g_object_set_data(G_OBJECT(item), "blend-parentid", GINT_TO_POINTER(parentid));
+  g_signal_connect(item, "activate", G_CALLBACK(_blendop_masks_group_duplicate_callback), module);
   gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
 
   return menu;
@@ -2672,7 +2664,7 @@ static void _blendop_masks_group_update_row(dt_iop_module_t *module, const int f
   dt_masks_form_t *form = dt_masks_get_from_id(module->dev, formid);
   dt_masks_form_t *parent_group = dt_masks_get_from_id(module->dev, parentid);
   int index = -1;
-  dt_masks_form_group_t *entry = _blendop_masks_find_group_entry(parent_group, formid, &index);
+  dt_masks_form_group_t *entry = dt_masks_form_group_find_entry(parent_group, formid, &index);
   if(IS_NULL_PTR(form) || IS_NULL_PTR(entry)) return;
 
   char display_name[256] = "";

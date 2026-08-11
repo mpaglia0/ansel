@@ -133,13 +133,13 @@
 #include "gui/common/folder_survey_gui.h"
 #include "common/grealpath.h"
 #include "common/image.h"
-#include "common/image_cache.h"
+#include "caches/image_cache.h"
 #include "common/image_extensions.h"
 #include "imageio/imageio_module.h"
 #include "develop/iop_order.h"
 #include "common/l10n.h"
 #include "common/metadata.h"
-#include "common/mipmap_cache.h"
+#include "caches/mipmap_cache.h"
 #include "common/noiseprofiles.h"
 #include "common/opencl.h"
 #include "common/points.h"
@@ -419,9 +419,9 @@ int dt_load_from_string(const gchar *input, gboolean open_image_in_dr, gboolean 
       dt_film_open(filmid);
       // make sure buffers are loaded (load full for testing)
       dt_mipmap_buffer_t buf;
-      dt_mipmap_cache_get(darktable.mipmap_cache, &buf, id, DT_MIPMAP_FULL, DT_MIPMAP_BLOCKING, 'r');
+      dt_mipmap_cache_get(&buf, id, DT_MIPMAP_FULL, DT_MIPMAP_BLOCKING, 'r');
       gboolean loaded = (!IS_NULL_PTR(buf.buf));
-      dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
+      dt_mipmap_cache_release(&buf);
       if(!loaded)
       {
         id = 0;
@@ -502,13 +502,9 @@ void *dt_alloc_align(size_t size)
 }
 
 /* Singleton accessors: the orchestrator BINDS the application-wide instances to the
- * lower-level libs that declare these symbols (develop/pixelpipe_cache.h and
+ * lower-level libs that declare these symbols (caches/pixelpipe_cache.h and
  * common/openmp.h). This keeps those libs free of darktable.h — they link
  * against two functions instead of importing the whole application struct. */
-struct dt_dev_pixelpipe_cache_t *dt_pixelpipe_cache_get_global(void)
-{
-  return darktable.pixelpipe_cache;
-}
 
 int dt_get_num_openmp_threads(void)
 {
@@ -602,15 +598,7 @@ dt_pthread_rwlock_t *dt_database_threadsafe_lock(void)
   return &darktable.database_threadsafe;
 }
 
-struct dt_image_cache_t *dt_image_cache_get_global(void)
-{
-  return darktable.image_cache;
-}
 
-struct dt_mipmap_cache_t *dt_mipmap_cache_get_global(void)
-{
-  return darktable.mipmap_cache;
-}
 
 struct dt_selection_t *dt_selection_get_global(void)
 {
@@ -685,6 +673,65 @@ struct dt_bauhaus_t *dt_bauhaus_get_global(void)
 struct dt_control_t *dt_control_get_global(void)
 {
   return darktable.control;
+}
+
+
+/* --- pixelpipe cache handlers ------------------------------------------------
+ * See dt_dev_pixelpipe_cache_set_handlers(). These are the application's answers to the
+ * cache's three announcements; the cache itself names none of these subsystems. */
+static void _pixelpipe_cache_warn(const char *message)
+{
+  dt_control_log("%s", message);
+}
+
+static void _pixelpipe_cache_ready(uint64_t hash, uint64_t producer_node_key)
+{
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_CACHELINE_READY, hash,
+                                producer_node_key);
+}
+
+static const dt_pixelpipe_cache_observer_t _pixelpipe_cache_observer = {
+  .active = dt_supervisor_active,
+  .cacheline_read = dt_supervisor_cacheline_read,
+  .cacheline_delete = dt_supervisor_cacheline_delete,
+  .rekey = dt_supervisor_rekey,
+};
+
+
+/* The mipmap cache's user-facing settings live in conf; the cache does not read conf. The
+ * application owns that translation, here and in the preference-change handler below, which is
+ * what makes the lifecycle of these four visible: read at startup, re-read when the user
+ * changes one, never anywhere else. */
+static dt_mipmap_cache_settings_t _mipmap_settings_from_conf(void)
+{
+  dt_mipmap_cache_settings_t s = { 0 };
+  s.max_memory = darktable.dtresources.mipmap_memory;
+  s.disk_backend = dt_conf_get_bool("cache_disk_backend");
+  s.embedded_jpg = dt_conf_get_int("lighttable/embedded_jpg");
+  s.cache_quality = dt_conf_get_int("database_cache_quality");
+  return s;
+}
+
+/* The two parameters are the GTK signal signature, not ours; neither carries anything we
+ * need, since the settings are read from conf either way. */
+static void _preferences_changed(gpointer instance, gpointer user_data)
+{
+  (void)instance;
+  (void)user_data;
+
+  const dt_mipmap_cache_settings_t s = _mipmap_settings_from_conf();
+  dt_mipmap_cache_set_settings(&s);
+}
+
+/* Same "read at startup, re-read on change, never anywhere else" lifecycle as the mipmap cache
+ * settings above, for the "write_sidecar_files" preference: dt_image_get_xmp_mode() is on the
+ * per-image hot path and reads a cache instead of conf directly. */
+static void _xmp_mode_preferences_changed(gpointer instance, gpointer user_data)
+{
+  (void)instance;
+  (void)user_data;
+
+  dt_image_xmp_mode_refresh_from_conf();
 }
 
 int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load_data)
@@ -1427,18 +1474,30 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
   // size. Rather than aborting outright, retry smaller: a shrunken cache degrades
   // performance, an abort loses the session.
   size_t pipecache_size = darktable.dtresources.pixelpipe_memory;
-  darktable.pixelpipe_cache = dt_dev_pixelpipe_cache_init(pipecache_size);
-  while(IS_NULL_PTR(darktable.pixelpipe_cache) && pipecache_size / 2 >= (size_t)512 * 1024 * 1024)
+  dt_dev_pixelpipe_cache_init(pipecache_size,
+                              (dt_get_debug_flags() & DT_DEBUG_PIPECACHE) != 0,
+                              (dt_get_debug_flags() & DT_DEBUG_VERBOSE) != 0);
+  while(!dt_dev_pixelpipe_cache_is_ready() && pipecache_size / 2 >= (size_t)512 * 1024 * 1024)
   {
     pipecache_size /= 2;
     fprintf(stderr,
             "WARNING: can't reserve %" G_GSIZE_FORMAT " MiB of virtual memory for the pixelpipe cache, "
             "retrying with %" G_GSIZE_FORMAT " MiB. Check your memory settings.\n",
             2 * pipecache_size / (1024 * 1024), pipecache_size / (1024 * 1024));
-    darktable.pixelpipe_cache = dt_dev_pixelpipe_cache_init(pipecache_size);
+    dt_dev_pixelpipe_cache_init(pipecache_size,
+                              (dt_get_debug_flags() & DT_DEBUG_PIPECACHE) != 0,
+                              (dt_get_debug_flags() & DT_DEBUG_VERBOSE) != 0);
   }
   darktable.dtresources.pixelpipe_memory = pipecache_size;
-  if(IS_NULL_PTR(darktable.pixelpipe_cache))
+
+  /* The cache announces three things -- it is full, a cacheline became readable, and the
+   * supervisor's bookkeeping -- and used to do it by calling dt_control_log(), raising
+   * DT_SIGNAL_CACHELINE_READY and calling dt_supervisor_*() itself. That put control/ and
+   * develop/ inside a module that is otherwise pure storage. The orchestrator wires them
+   * here instead: the cache says what happened, the application decides who hears it. */
+  dt_dev_pixelpipe_cache_set_handlers(_pixelpipe_cache_warn, _pixelpipe_cache_ready,
+                                      &_pixelpipe_cache_observer);
+  if(!dt_dev_pixelpipe_cache_is_ready())
   {
     fprintf(stderr, "ERROR: can't init pixelpipe cache, aborting.\n");
     dt_gui_splash_close();
@@ -1453,11 +1512,18 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
 
   // must come before mipmap_cache, because that one will need to access
   // image dimensions stored in here:
-  darktable.image_cache = (dt_image_cache_t *)calloc(1, sizeof(dt_image_cache_t));
-  dt_image_cache_init(darktable.image_cache);
+  dt_image_cache_init((dt_get_debug_flags() & DT_DEBUG_CACHE) != 0);
 
-  darktable.mipmap_cache = (dt_mipmap_cache_t *)calloc(1, sizeof(dt_mipmap_cache_t));
-  dt_mipmap_cache_init(darktable.mipmap_cache);
+  const dt_mipmap_cache_settings_t mipmap_settings = _mipmap_settings_from_conf();
+  dt_mipmap_cache_init(&mipmap_settings, (dt_get_debug_flags() & DT_DEBUG_CACHE) != 0);
+
+  /* Re-tell the cache whenever the user changes one of its four settings. */
+  dt_control_signal_connect(darktable.signals, DT_SIGNAL_PREFERENCES_CHANGE,
+                            G_CALLBACK(_preferences_changed), NULL);
+
+  dt_image_xmp_mode_refresh_from_conf();
+  dt_control_signal_connect(darktable.signals, DT_SIGNAL_PREFERENCES_CHANGE,
+                            G_CALLBACK(_xmp_mode_preferences_changed), NULL);
 
 #ifdef HAVE_OPENCL
   dt_opencl_init(exclude_opencl, print_statistics);
@@ -1694,10 +1760,8 @@ void dt_cleanup()
   dt_selection_free(darktable.selection);
 
   // Mipmap cleanup may still consult the image cache for paths.
-  dt_mipmap_cache_cleanup(darktable.mipmap_cache);
-  dt_free(darktable.mipmap_cache);
-  dt_image_cache_cleanup(darktable.image_cache);
-  dt_free(darktable.image_cache);
+  dt_mipmap_cache_cleanup();
+  dt_image_cache_cleanup();
 
   dt_colorprofiles_cleanup();
   dt_conf_set_int("processing/gui_throttle_runtime_us", dt_gui_throttle_get_runtime_us());
@@ -1713,14 +1777,14 @@ void dt_cleanup()
   darktable.iop_order_rules = NULL;
 
 #ifdef HAVE_OPENCL
-  if(dt_opencl_is_inited() && darktable.pixelpipe_cache)
+  if(dt_opencl_is_inited() && dt_dev_pixelpipe_cache_is_ready())
   {
     for(int i = 0; i < dt_opencl_get_num_devices(); i++)
       dt_opencl_finish(i);
   }
 #endif
 
-  dt_dev_pixelpipe_cache_cleanup(darktable.pixelpipe_cache);
+  dt_dev_pixelpipe_cache_cleanup();
   dt_supervisor_cleanup();
 
   dt_opencl_cleanup();
@@ -2132,7 +2196,10 @@ int dt_worker_threads()
 
 size_t dt_get_available_mem()
 {
-  const size_t budget_left = darktable.pixelpipe_cache->max_memory - darktable.pixelpipe_cache->current_memory;
+  size_t cache_used = 0;
+  size_t cache_max = 0;
+  dt_dev_pixelpipe_cache_get_usage(&cache_used, &cache_max);
+  const size_t budget_left = cache_max - cache_used;
 
   // The budget is only a startup-time plan: cap it by what the system can actually
   // back right now without dropping under the pressure floor (issue #1083), so
@@ -2145,7 +2212,7 @@ size_t dt_get_available_mem()
 
   const size_t pressure_floor = dt_get_memory_pressure_floor();
   const size_t sys_room = ((sys_available > pressure_floor) ? sys_available - pressure_floor : 0)
-                          + darktable.pixelpipe_cache->current_memory / 2;
+                          + cache_used / 2;
   return MIN(budget_left, sys_room);
 }
 

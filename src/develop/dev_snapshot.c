@@ -19,7 +19,7 @@
 #include "develop/dev_snapshot.h"
 
 #include "develop/iop_order.h"
-#include "common/mipmap_cache.h"
+#include "caches/mipmap_cache.h"
 #include "control/control.h"
 #include "control/jobs.h"
 #include "develop/dev_history.h"
@@ -326,7 +326,7 @@ static void _draw_preview_fallback(dt_dev_snapshot_engine_t *engine, dt_develop_
   const float tx = 0.5f * width - dev->roi.x * preview_wd * preview_scale;
   const float ty = 0.5f * height - dev->roi.y * preview_ht * preview_scale;
 
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, engine->preview_locked.entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(TRUE, engine->preview_locked.entry);
   cairo_surface_set_device_scale(engine->preview_locked.surface, ppd, ppd);
   cairo_save(cr);
   cairo_translate(cr, tx, ty);
@@ -335,7 +335,7 @@ static void _draw_preview_fallback(dt_dev_snapshot_engine_t *engine, dt_develop_
   cairo_set_source_surface(cr, engine->preview_locked.surface, 0, 0);
   cairo_fill(cr);
   cairo_restore(cr);
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, engine->preview_locked.entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(FALSE, engine->preview_locked.entry);
 }
 
 gboolean dt_dev_snapshot_capture(dt_dev_snapshot_t *snap, dt_develop_t *dev, int32_t imgid,
@@ -415,12 +415,12 @@ gboolean dt_dev_snapshot_capture(dt_dev_snapshot_t *snap, dt_develop_t *dev, int
     dt_dev_set_history_hash(frozen, dt_dev_history_compute_hash(frozen));
   }
 
-  dt_mipmap_cache_get(dt_mipmap_cache_get_global(), &buf, frozen->image_storage.id, DT_MIPMAP_FULL,
+  dt_mipmap_cache_get(&buf, frozen->image_storage.id, DT_MIPMAP_FULL,
                       DT_MIPMAP_BLOCKING, 'r');
   if(IS_NULL_PTR(buf.buf) || buf.width <= 0 || buf.height <= 0)
   {
     dt_print(DT_DEBUG_DEV, "[dev_snapshot] capture failed: mipmap full unavailable for imgid=%d\n", imgid);
-    dt_mipmap_cache_release(dt_mipmap_cache_get_global(), &buf);
+    dt_mipmap_cache_release(&buf);
     dt_dev_cleanup(frozen);
     dt_free(frozen);
     goto fail;
@@ -429,7 +429,7 @@ gboolean dt_dev_snapshot_capture(dt_dev_snapshot_t *snap, dt_develop_t *dev, int
   engine = (dt_dev_snapshot_engine_t *)calloc(1, sizeof(dt_dev_snapshot_engine_t));
   if(IS_NULL_PTR(engine))
   {
-    dt_mipmap_cache_release(dt_mipmap_cache_get_global(), &buf);
+    dt_mipmap_cache_release(&buf);
     dt_dev_cleanup(frozen);
     dt_free(frozen);
     goto fail;
@@ -442,7 +442,7 @@ gboolean dt_dev_snapshot_capture(dt_dev_snapshot_t *snap, dt_develop_t *dev, int
   engine->preview_pipe = (dt_dev_pixelpipe_t *)calloc(1, sizeof(dt_dev_pixelpipe_t));
   if(IS_NULL_PTR(engine->pipe) || IS_NULL_PTR(engine->preview_pipe))
   {
-    dt_mipmap_cache_release(dt_mipmap_cache_get_global(), &buf);
+    dt_mipmap_cache_release(&buf);
     if(engine->pipe) dt_free(engine->pipe);
     if(engine->preview_pipe) dt_free(engine->preview_pipe);
     dt_pthread_mutex_destroy(&engine->lock);
@@ -461,7 +461,7 @@ gboolean dt_dev_snapshot_capture(dt_dev_snapshot_t *snap, dt_develop_t *dev, int
   if(!pipe_inited || !preview_inited)
   {
     dt_print(DT_DEBUG_DEV, "[dev_snapshot] capture failed: pixelpipe init failed for imgid=%d\n", imgid);
-    dt_mipmap_cache_release(dt_mipmap_cache_get_global(), &buf);
+    dt_mipmap_cache_release(&buf);
     if(pipe_inited) dt_dev_pixelpipe_cleanup(engine->pipe);
     dt_free(engine->pipe);
     if(preview_inited) dt_dev_pixelpipe_cleanup(engine->preview_pipe);
@@ -496,7 +496,7 @@ gboolean dt_dev_snapshot_capture(dt_dev_snapshot_t *snap, dt_develop_t *dev, int
     dt_dev_pixelpipe_get_roi_out(p, p->iwidth, p->iheight, &p->processed_width, &p->processed_height);
   }
 
-  dt_mipmap_cache_release(dt_mipmap_cache_get_global(), &buf);
+  dt_mipmap_cache_release(&buf);
 
   engine->frozen = frozen; // ownership transferred: pipe nodes reference frozen->iop instances.
 

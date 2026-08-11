@@ -26,8 +26,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef DT_DEVELOP_PIXELPIPE_CACHE_H
-#define DT_DEVELOP_PIXELPIPE_CACHE_H
+#ifndef DT_CACHES_PIXELPIPE_CACHE_H
+#define DT_CACHES_PIXELPIPE_CACHE_H
 
 #include "system/memory_arena.h"
 #include "system/atomic.h"
@@ -61,27 +61,8 @@ struct dt_iop_roi_t;
  * protects the whole recursive pixelpipe, so no internal locking is needed nor implemented here.
  */
 
-typedef struct dt_dev_pixelpipe_cache_t
-{
-  GHashTable *entries;
-  // External (temporary) buffers keyed by address hash, separate from pipeline cache entries.
-  GHashTable *external_entries;
-  uint64_t next_serial;
-  uint64_t queries;
-  uint64_t hits;
-  size_t max_memory;
-  size_t current_memory;
-  // System memory-pressure probe cache, guarded by `lock` (see the pressure valve
-  // in pixelpipe_cache.c): last probed system-wide available RAM, decremented by
-  // our own allocations between two rate-limited probes. The estimate legitimately
-  // reaches 0 under pressure, so whether the platform answers at all is a separate
-  // flag rather than an `est == 0` sentinel.
-  gint64 sys_probe_time_us;
-  size_t sys_available_est;
-  gboolean sys_probe_valid;
-  dt_pthread_mutex_t lock; // mutex to protect the cache entries
-  dt_cache_arena_t arena;
-} dt_dev_pixelpipe_cache_t;
+/* Opaque, and there is no accessor: no function below takes a cache handle. */
+typedef struct dt_dev_pixelpipe_cache_t dt_dev_pixelpipe_cache_t;
 
 typedef enum dt_dev_pixelpipe_cache_writable_status_t
 {
@@ -94,13 +75,31 @@ typedef enum dt_dev_pixelpipe_cache_writable_status_t
 /** constructs a new cache with given cache line count (entries) and float buffer entry size in bytes.
   \param[out] returns 0 if fail to allocate mem cache.
 */
-dt_dev_pixelpipe_cache_t *dt_dev_pixelpipe_cache_init(size_t max_memory);
+/**
+ * @brief Reserve the cache's arena and start it.
+ *
+ * @param max_memory arena size in bytes. A session constant: the orchestrator decides it from
+ *        the resource plan and retries smaller on failure, which is resource policy.
+ * @param verbose whether the cache traces at all (was `-d pipecache`).
+ * @param verbose_detail whether it traces in detail (was `-d verbose`). Ignored when
+ *        @p verbose is FALSE, matching the old two-level gate.
+ *
+ * @details Both flags are read ONCE, here, from the session's debug flags by the orchestrator.
+ * The cache does not consult them at runtime: a cache that changes what it does halfway
+ * through a session because a global moved is harder to reason about than one told at startup,
+ * and it keeps the debug machinery out of a storage module.
+ */
+gboolean dt_dev_pixelpipe_cache_init(size_t max_memory, const gboolean verbose,
+                                     const gboolean verbose_detail);
 
 /** The application-wide pixelpipe cache singleton. DECLARED here because it is this
  * module's object; BOUND by the orchestrator (darktable.c), so this header
  * never needs to see the application struct. */
-dt_dev_pixelpipe_cache_t *dt_pixelpipe_cache_get_global(void);
-void dt_dev_pixelpipe_cache_cleanup(dt_dev_pixelpipe_cache_t *cache);
+/** @brief Has the pixelpipe cache been initialised? Callers that run before
+ * dt_dev_pixelpipe_cache_init() succeeds, or after its cleanup, ask this rather than testing
+ * a handle they should not hold. */
+gboolean dt_dev_pixelpipe_cache_is_ready(void);
+void dt_dev_pixelpipe_cache_cleanup(void);
 
 // One pipeline-cache entry, for the GUI memory view.
 typedef struct dt_pixel_cache_stats_entry_t
@@ -115,12 +114,12 @@ typedef struct dt_pixel_cache_stats_entry_t
 } dt_pixel_cache_stats_entry_t;
 
 // Current/max bytes used by the pipeline cache (host RAM).
-void dt_dev_pixelpipe_cache_get_usage(dt_dev_pixelpipe_cache_t *cache, size_t *current, size_t *max);
+void dt_dev_pixelpipe_cache_get_usage(size_t *current, size_t *max);
 
 /* Largest contiguous free run in the arena (bytes): the real upper bound on
  * what an allocation — and, transitively, a tiled module's working set — can
  * get, as opposed to the byte headroom max - current. */
-size_t dt_pixelpipe_cache_get_largest_free_run(dt_dev_pixelpipe_cache_t *cache);
+size_t dt_pixelpipe_cache_get_largest_free_run(void);
 
 // Total device memory across enabled OpenCL devices (0 if OpenCL is off/absent),
 // for the vRAM usage bar's denominator.
@@ -128,11 +127,15 @@ size_t dt_dev_pixelpipe_cache_get_vram_total(void);
 
 // Snapshot of all live entries (newly-allocated GArray of
 // dt_pixel_cache_stats_entry_t; free with g_array_free()).
-GArray *dt_dev_pixelpipe_cache_get_entries_stats(dt_dev_pixelpipe_cache_t *cache);
+GArray *dt_dev_pixelpipe_cache_get_entries_stats(void);
 
 /* Public for by-value snapshots in pipeline pieces (for example realtime
  * output cacheline reuse/rekey). Ownership still belongs to pixelpipe_cache.
  * External code must treat this as metadata only and never free internals. */
+/* PUBLIC, and staying that way: develop/pixelpipe_hb.h embeds one BY VALUE in
+ * dt_dev_pixelpipe_iop_t, as a snapshot of the last reusable cacheline's metadata. That makes
+ * it a value type the pipeline carries, like dt_mipmap_buffer_t -- not the cache's internal
+ * bookkeeping, which is dt_cache_entry_t and is private to this module. */
 typedef struct dt_pixel_cache_entry_t
 {
   uint64_t hash;            // unique identifier of the entry
@@ -174,8 +177,7 @@ const char *dt_pixelpipe_cache_set_current_module(const char *module);
  * @param hash
  * @return struct dt_pixel_cache_entry_t*
  */
-struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry(dt_dev_pixelpipe_cache_t *cache,
-                                                                const uint64_t hash);
+struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry(const uint64_t hash);
 
 /*
  * @brief Find a cache entry that holds the exact data buffer pointer `data`.
@@ -184,8 +186,7 @@ struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry(dt_dev_pixelpipe
  * It does not change refcounts or locks on the returned entry; the caller must
  * manage lifetime if needed.
  */
-struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry_by_data(dt_dev_pixelpipe_cache_t *cache,
-                                                                        void *data);
+struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry_by_data(void *data);
 
 
 /**
@@ -211,7 +212,7 @@ struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_get_entry_by_data(dt_dev_p
   doesn't own the data and shouldn't free it.
  * @return int 1 if the cache line was freshly allocated, 0 if it was found in the cache.
  */
-int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,
+int dt_dev_pixelpipe_cache_get(const uint64_t hash, const size_t size,
                                const char *name, const int id, const gboolean alloc,
                                void **data,
                                struct dt_pixel_cache_entry_t **entry);
@@ -254,7 +255,7 @@ int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t h
  *         on error.
  */
 dt_dev_pixelpipe_cache_writable_status_t
-dt_dev_pixelpipe_cache_get_writable(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash,
+dt_dev_pixelpipe_cache_get_writable(const uint64_t hash,
                                     const size_t size, const char *name, const int id,
                                     const gboolean alloc, const gboolean allow_rekey_reuse,
                                     const struct dt_pixel_cache_entry_t *reuse_hint,
@@ -320,8 +321,7 @@ void dt_dev_pixelpipe_cache_flush_entry_clmem(struct dt_pixel_cache_entry_t *ent
  * @param[out] data Restored host pointer, or NULL on failure.
  * @return gboolean TRUE when host data is available after the call, FALSE otherwise.
  */
-gboolean dt_dev_pixelpipe_cache_restore_host_payload(dt_dev_pixelpipe_cache_t *cache,
-                                                     struct dt_pixel_cache_entry_t *entry,
+gboolean dt_dev_pixelpipe_cache_restore_host_payload(struct dt_pixel_cache_entry_t *entry,
                                                      int preferred_devid, void **data);
 
 /**
@@ -346,7 +346,7 @@ gboolean dt_dev_pixelpipe_cache_restore_host_payload(dt_dev_pixelpipe_cache_t *c
  * @param[out] out_reused Optional flag set TRUE when an existing pinned image was reused.
  * @return void* OpenCL image (`cl_mem`) or NULL on failure.
  */
-void *dt_dev_pixelpipe_cache_get_pinned_image(dt_dev_pixelpipe_cache_t *cache, void *host_ptr,
+void *dt_dev_pixelpipe_cache_get_pinned_image(void *host_ptr,
                                               struct dt_pixel_cache_entry_t *entry_hint, int devid,
                                               int width, int height, int bpp, int flags,
                                               gboolean *out_reused);
@@ -364,7 +364,7 @@ void *dt_dev_pixelpipe_cache_get_pinned_image(dt_dev_pixelpipe_cache_t *cache, v
  * @param entry_hint Optional owning cache entry for regular cache lines, or NULL.
  * @param[in,out] mem Pointer to the `cl_mem` handle (cleared on return).
  */
-void dt_dev_pixelpipe_cache_put_pinned_image(dt_dev_pixelpipe_cache_t *cache, void *host_ptr,
+void dt_dev_pixelpipe_cache_put_pinned_image(void *host_ptr,
                                              struct dt_pixel_cache_entry_t *entry_hint, void **mem);
 
 /**
@@ -382,7 +382,7 @@ void dt_dev_pixelpipe_cache_put_pinned_image(dt_dev_pixelpipe_cache_t *cache, vo
  * @param devid Device id to flush, or -1 for all cached devices for that host buffer.
  * @return gboolean TRUE if at least one pinned image was flushed, FALSE otherwise.
  */
-gboolean dt_dev_pixelpipe_cache_flush_host_pinned_image(dt_dev_pixelpipe_cache_t *cache, void *host_ptr,
+gboolean dt_dev_pixelpipe_cache_flush_host_pinned_image(void *host_ptr,
                                                         struct dt_pixel_cache_entry_t *entry_hint, int devid);
 
 /**
@@ -523,8 +523,7 @@ int dt_dev_pixelpipe_cache_prepare_cl_input(struct dt_dev_pixelpipe_t *pipe,
  * @param host_ptr Host buffer pointer to resolve.
  * @return dt_pixel_cache_entry_t* Owning cache entry with retained refcount, or NULL.
  */
-struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_ref_entry_for_host_ptr(dt_dev_pixelpipe_cache_t *cache,
-                                                                              void *host_ptr);
+struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_ref_entry_for_host_ptr(void *host_ptr);
 
 /**
  * @brief Resolve and retain an existing cache entry by hash.
@@ -545,8 +544,7 @@ struct dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_ref_entry_for_host_ptr(dt_
  * @param entry Returned retained cache entry, if requested.
  * @return TRUE when an existing non-auto-destroy entry was retained.
  */
-gboolean dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_dev_pixelpipe_cache_t *cache,
-                                                  const uint64_t hash,
+gboolean dt_dev_pixelpipe_cache_ref_entry_by_hash(const uint64_t hash,
                                                   void **data,
                                                   struct dt_pixel_cache_entry_t **entry);
 
@@ -574,7 +572,7 @@ size_t dt_pixel_cache_entry_get_size(struct dt_pixel_cache_entry_t *entry);
  * @param entry the cache entry 
  * @return void* Pointer to the allocated data buffer.
  */
-void *dt_pixel_cache_alloc(dt_dev_pixelpipe_cache_t *cache, struct dt_pixel_cache_entry_t *entry);
+void *dt_pixel_cache_alloc(struct dt_pixel_cache_entry_t *entry);
 
 /**
  * @brief Allocate aligned memory tracked by the pixelpipe cache. This allows
@@ -586,7 +584,7 @@ void *dt_pixel_cache_alloc(dt_dev_pixelpipe_cache_t *cache, struct dt_pixel_cach
  * @param name Human-readable name.
  * @return void* Pointer to the allocated buffer, or NULL on failure.
  */
-void *dt_pixelpipe_cache_alloc_align_cache_impl(dt_dev_pixelpipe_cache_t *cache, size_t size, int id,
+void *dt_pixelpipe_cache_alloc_align_cache_impl(size_t size, int id,
                                                 const char *name);
 
 /**
@@ -595,7 +593,7 @@ void *dt_pixelpipe_cache_alloc_align_cache_impl(dt_dev_pixelpipe_cache_t *cache,
  * @param cache Pixelpipe cache to manage.
  * @param mem Pointer to the buffer pointer. Set to NULL on successful free.
  */
-void dt_pixelpipe_cache_free_align_cache(dt_dev_pixelpipe_cache_t *cache, void **mem, const char *message);
+void dt_pixelpipe_cache_free_align_cache(void **mem, const char *message);
 
 
 
@@ -613,7 +611,7 @@ void dt_pixelpipe_cache_free_align_cache(dt_dev_pixelpipe_cache_t *cache, void *
  * - device data is restored into `cl_mem_output` when requested,
  * - broken entries with neither authoritative RAM nor vRAM payload are removed.
  */
-gboolean dt_dev_pixelpipe_cache_peek(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, void **data,
+gboolean dt_dev_pixelpipe_cache_peek(const uint64_t hash, void **data,
                                      struct dt_pixel_cache_entry_t **entry, const int preferred_devid,
                                      void **cl_mem_output);
 
@@ -624,7 +622,7 @@ gboolean dt_dev_pixelpipe_cache_peek(dt_dev_pixelpipe_cache_t *cache, const uint
  * @param cache
  * @param id ID of the pipeline owning the cache line, or -1 to remove all lines.
  */
-void dt_dev_pixelpipe_cache_flush(dt_dev_pixelpipe_cache_t *cache, const int id);
+void dt_dev_pixelpipe_cache_flush(const int id);
 
 /**
  * @brief Invalidate cache lines matching an explicit list of hashes.
@@ -641,8 +639,7 @@ void dt_dev_pixelpipe_cache_flush(dt_dev_pixelpipe_cache_t *cache, const int id)
  * @param count Number of keys in `hashes`.
  * @return int Number of matching entries which could not be removed.
  */
-int dt_dev_pixelpipe_cache_invalidate_hashes(dt_dev_pixelpipe_cache_t *cache,
-                                             const uint64_t *hashes,
+int dt_dev_pixelpipe_cache_invalidate_hashes(const uint64_t *hashes,
                                              const size_t count);
 
 /**
@@ -660,7 +657,7 @@ int dt_dev_pixelpipe_cache_invalidate_hashes(dt_dev_pixelpipe_cache_t *cache,
  *              it (e.g. cleaning up a pipe after it finished) must use
  *              dt_dev_pixelpipe_cache_flush_clmem_for_pipe() instead.
  */
-void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const int devid);
+void dt_dev_pixelpipe_cache_flush_clmem(const int devid);
 
 /**
  * @brief Like dt_dev_pixelpipe_cache_flush_clmem(), for callers that do not hold
@@ -668,7 +665,7 @@ void dt_dev_pixelpipe_cache_flush_clmem(dt_dev_pixelpipe_cache_t *cache, const i
  * dt_dev_pixelpipe_process() already released it). Takes the lock itself, then
  * delegates. No-op if devid < 0 or OpenCL isn't available.
  */
-void dt_dev_pixelpipe_cache_flush_clmem_for_pipe(dt_dev_pixelpipe_cache_t *cache, const int devid);
+void dt_dev_pixelpipe_cache_flush_clmem_for_pipe(const int devid);
 
 
 /**
@@ -679,17 +676,17 @@ void dt_dev_pixelpipe_cache_flush_clmem_for_pipe(dt_dev_pixelpipe_cache_t *cache
  * @param cache
  * @param force
  */
-int dt_dev_pixelpipe_cache_remove(dt_dev_pixelpipe_cache_t *cache, const gboolean force,
+int dt_dev_pixelpipe_cache_remove(const gboolean force,
                                   struct dt_pixel_cache_entry_t *entry);
 
 
 /** print out cache lines/hashes (debug). */
-void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache);
+void dt_dev_pixelpipe_cache_print(void);
 
 /** remove the least used cache entry
  * @return 0 on success, 1 on error
  */
-int dt_dev_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache);
+int dt_dev_pixel_pipe_cache_remove_lru(void);
 
 /**
  * @brief Increase/Decrease the reference count on the cache line as to prevent
@@ -701,7 +698,7 @@ int dt_dev_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache);
  * @param cache
  * @param lock TRUE to lock, FALSE to unlock
  */
-void dt_dev_pixelpipe_cache_ref_count_entry(dt_dev_pixelpipe_cache_t *cache, gboolean lock,
+void dt_dev_pixelpipe_cache_ref_count_entry(gboolean lock,
                                             struct dt_pixel_cache_entry_t *entry);
 
 /**
@@ -710,7 +707,7 @@ void dt_dev_pixelpipe_cache_ref_count_entry(dt_dev_pixelpipe_cache_t *cache, gbo
  * @param cache
  * @param lock TRUE to lock, FALSE to release
  */
-void dt_dev_pixelpipe_cache_wrlock_entry(dt_dev_pixelpipe_cache_t *cache, gboolean lock,
+void dt_dev_pixelpipe_cache_wrlock_entry(gboolean lock,
                                          struct dt_pixel_cache_entry_t *entry);
 
 
@@ -721,7 +718,7 @@ void dt_dev_pixelpipe_cache_wrlock_entry(dt_dev_pixelpipe_cache_t *cache, gboole
  * @param lock TRUE to lock, FALSE to release
  * @param entry The cache entry object to lock.
  */
-void dt_dev_pixelpipe_cache_rdlock_entry(dt_dev_pixelpipe_cache_t *cache, gboolean lock,
+void dt_dev_pixelpipe_cache_rdlock_entry(gboolean lock,
                                          struct dt_pixel_cache_entry_t *entry);
 
 
@@ -734,8 +731,7 @@ void dt_dev_pixelpipe_cache_rdlock_entry(dt_dev_pixelpipe_cache_t *cache, gboole
  *
  * @param cache
  */
-void dt_dev_pixelpipe_cache_flag_auto_destroy(dt_dev_pixelpipe_cache_t *cache,
-                                              struct dt_pixel_cache_entry_t *entry);
+void dt_dev_pixelpipe_cache_flag_auto_destroy(struct dt_pixel_cache_entry_t *entry);
 
 /**
  * @brief Free the entry if it has the flag "auto_destroy".
@@ -747,8 +743,7 @@ void dt_dev_pixelpipe_cache_flag_auto_destroy(dt_dev_pixelpipe_cache_t *cache,
  *
  * @param cache
  */
-void dt_dev_pixelpipe_cache_auto_destroy_apply(dt_dev_pixelpipe_cache_t *cache,
-                                               struct dt_pixel_cache_entry_t *entry);
+void dt_dev_pixelpipe_cache_auto_destroy_apply(struct dt_pixel_cache_entry_t *entry);
 
 /**
  * @brief Find the entry matching hash, and decrease its ref_count if found.
@@ -756,7 +751,7 @@ void dt_dev_pixelpipe_cache_auto_destroy_apply(dt_dev_pixelpipe_cache_t *cache,
  * @param cache 
  * @param hash 
  */
-void dt_dev_pixelpipe_cache_unref_hash(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash);
+void dt_dev_pixelpipe_cache_unref_hash(const uint64_t hash);
 
 /**
  * @brief Change the hash/key of an existing cache line in place, without
@@ -778,14 +773,57 @@ void dt_dev_pixelpipe_cache_unref_hash(dt_dev_pixelpipe_cache_t *cache, const ui
  * @param entry Optional direct entry reference. May be NULL.
  * @return int 0 on success, 1 on error.
  */
-int dt_dev_pixelpipe_cache_rekey(dt_dev_pixelpipe_cache_t *cache, const uint64_t old_hash,
+int dt_dev_pixelpipe_cache_rekey(const uint64_t old_hash,
                                  const uint64_t new_hash, struct dt_pixel_cache_entry_t *entry);
+
+/* --- Telling the rest of the application things ---------------------------
+ *
+ * The cache has three reasons to speak upward: warn the user that it is full, announce that a
+ * cacheline became ready so a waiter can stop waiting, and feed the supervisor its bookkeeping.
+ * Every one of those used to be a direct call -- dt_control_log(), a raised
+ * DT_SIGNAL_CACHELINE_READY, dt_supervisor_*() -- which put control/ and develop/ headers in a
+ * module that is otherwise pure storage, and made the cache depend on the application rather
+ * than the other way round.
+ *
+ * They are handlers now, installed once by the orchestrator. Unset handlers are simply not
+ * called, so the cache works in a build or a test that installs none. Same shape as
+ * dt_colorspaces_set_profile_changed_handler().
+ */
+
+/** @brief Tell the user something went wrong. Called with an already-translated,
+ * already-formatted string; the cache does not know what a toast is. */
+typedef void (*dt_pixelpipe_cache_warn_handler_t)(const char *message);
+
+/** @brief A cacheline finished and is readable. @param hash its content hash,
+ * @param producer_node_key which node published it. Waiters key on both. */
+typedef void (*dt_pixelpipe_cache_ready_handler_t)(uint64_t hash, uint64_t producer_node_key);
+
+/** @brief The supervisor's view of the cache. All four may be NULL; ::active gates the other
+ * three so the cache pays one predicted-false branch when nobody is watching. */
+typedef struct dt_pixelpipe_cache_observer_t
+{
+  gboolean (*active)(void);
+  void (*cacheline_read)(uint64_t hash, size_t size);
+  void (*cacheline_delete)(uint64_t hash, size_t size, int owner_pipe_id, const char *name);
+  void (*rekey)(uint64_t old_hash, uint64_t new_hash);
+} dt_pixelpipe_cache_observer_t;
+
+/**
+ * @brief Install the handlers. Call once, from the orchestrator, before any pipe runs.
+ * @param warn may be NULL -- the warning is then dropped, not printed somewhere else.
+ * @param ready may be NULL.
+ * @param observer BORROWED, not copied: it must outlive the cache. Pass NULL to detach.
+ */
+void dt_dev_pixelpipe_cache_set_handlers(dt_pixelpipe_cache_warn_handler_t warn,
+                                         dt_pixelpipe_cache_ready_handler_t ready,
+                                         const dt_pixelpipe_cache_observer_t *observer);
+
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // DT_DEVELOP_PIXELPIPE_CACHE_H
+#endif // DT_CACHES_PIXELPIPE_CACHE_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

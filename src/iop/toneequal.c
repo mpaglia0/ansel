@@ -116,7 +116,7 @@
 #include "common/hash.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "common/pixelpipe_cache_alloc.h"
+#include "caches/pixelpipe_cache_alloc.h"
 #include "develop/masks.h"
 #include "pixel/fast_guided_filter.h"
 #include "pixel/eigf.h"
@@ -128,7 +128,7 @@
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
-#include "develop/pixelpipe_cache.h"
+#include "caches/pixelpipe_cache.h"
 
 #include "gui/color_picker_proxy.h"
 #include "widgets/draw.h"
@@ -610,7 +610,7 @@ static void invalidate_luminance_cache(dt_iop_module_t *const self)
   dt_iop_gui_leave_critical_section(self);
 
   if(!IS_NULL_PTR(preview_entry))
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
 }
 
 
@@ -989,7 +989,7 @@ static inline __attribute__((always_inline)) int toneeq_process(struct dt_iop_mo
       dt_iop_gui_leave_critical_section(self);
 
       if(preview_entry)
-        dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     }
   }
 
@@ -1012,7 +1012,7 @@ static inline __attribute__((always_inline)) int toneeq_process(struct dt_iop_mo
     static const char cache_tag[] = "toneequal:luminance";
     luminance_hash = dt_hash(piece->global_hash, cache_tag, sizeof(cache_tag));
 
-    created_luminance_entry = dt_dev_pixelpipe_cache_get(dt_pixelpipe_cache_get_global(), luminance_hash,
+    created_luminance_entry = dt_dev_pixelpipe_cache_get(luminance_hash,
                                                          num_elem * sizeof(float), "toneequal luminance",
                                                          pipe->type, TRUE, &cache_data,
                                                          &luminance_entry);
@@ -1022,8 +1022,8 @@ static inline __attribute__((always_inline)) int toneeq_process(struct dt_iop_mo
       if(luminance_entry)
       {
         if(created_luminance_entry)
-          dt_dev_pixelpipe_cache_wrlock_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
-        dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
+          dt_dev_pixelpipe_cache_wrlock_entry(FALSE, luminance_entry);
+        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, luminance_entry);
       }
       return 1;
     }
@@ -1032,13 +1032,13 @@ static inline __attribute__((always_inline)) int toneeq_process(struct dt_iop_mo
     {
       if(compute_luminance_mask(in, luminance, width, height, ch, d) != 0)
       {
-        dt_dev_pixelpipe_cache_wrlock_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
-        dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
-        dt_dev_pixelpipe_cache_remove(dt_pixelpipe_cache_get_global(), TRUE, luminance_entry);
+        dt_dev_pixelpipe_cache_wrlock_entry(FALSE, luminance_entry);
+        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, luminance_entry);
+        dt_dev_pixelpipe_cache_remove(TRUE, luminance_entry);
         return 1;
       }
 
-      dt_dev_pixelpipe_cache_wrlock_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
+      dt_dev_pixelpipe_cache_wrlock_entry(FALSE, luminance_entry);
     }
   }
   else
@@ -1096,14 +1096,14 @@ static inline __attribute__((always_inline)) int toneeq_process(struct dt_iop_mo
     dt_iop_gui_leave_critical_section(self);
 
     if(old_entry)
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, old_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, old_entry);
 
     if(!keep_process_ref)
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, luminance_entry);
   }
   else if(luminance_entry)
   {
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, luminance_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, luminance_entry);
   }
   else
   {
@@ -1450,7 +1450,7 @@ static inline void update_histogram(struct dt_iop_module_t *const self)
     width = g->thumb_preview_buf_width;
     height = g->thumb_preview_buf_height;
     preview_hash = g->thumb_preview_hash;
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, preview_entry);
     needs_histogram = TRUE;
   }
   dt_iop_gui_leave_critical_section(self);
@@ -1458,7 +1458,7 @@ static inline void update_histogram(struct dt_iop_module_t *const self)
   if(!needs_histogram || width == 0 || height == 0)
   {
     if(!IS_NULL_PTR(preview_entry))
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     return;
   }
 
@@ -1467,16 +1467,16 @@ static inline void update_histogram(struct dt_iop_module_t *const self)
   float first_decile = 0.0f;
   float last_decile = 0.0f;
 
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(TRUE, preview_entry);
   const float *const preview_buf = (const float *const)dt_pixel_cache_entry_get_data(preview_entry);
   if(preview_buf)
     compute_log_histogram_and_stats(preview_buf, histogram, width * height, &max_histogram, &first_decile,
                                     &last_decile);
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(FALSE, preview_entry);
 
   if(IS_NULL_PTR(preview_buf))
   {
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     return;
   }
 
@@ -1492,7 +1492,7 @@ static inline void update_histogram(struct dt_iop_module_t *const self)
   }
   dt_iop_gui_leave_critical_section(self);
 
-  dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
 }
 
 
@@ -1825,11 +1825,12 @@ static void _switch_cursors(struct dt_iop_module_t *self)
   }
   else if(!sanity_check(self) || in_mask_editing(self) || dt_iop_color_picker_is_visible(self->dev))
   {
-    // if we are editing masks or using colour-pickers, do not display controls
-    
-    // display default cursor
+    // if we are editing masks or using colour-pickers, do not display our own custom cursor,
+    // but do not force a specific shape either: the mouse can still be over the image here,
+    // and darkroom's own default cursor logic (dot/crosshair/left_ptr, picked per position in
+    // _darkroom_set_default_cursor) already queued the right one before this module's
+    // mouse_moved ran. Un-hide it (it may have been hidden by the branch below) and leave it.
     dt_control_set_cursor_visible(TRUE);
-    dt_control_queue_cursor_by_name("default");
     return;
   }
   else if((self->dev->pipe->processing || self->dev->preview_pipe->processing) && g->cursor_valid)
@@ -1853,21 +1854,12 @@ static void _switch_cursors(struct dt_iop_module_t *self)
 
     dt_control_queue_redraw_center();
   }
-  else if(!g->cursor_valid)
-  {
-    // if module is active and opened but cursor is out of the preview,
-    // display default cursor
-    dt_control_set_cursor_visible(TRUE);
-    dt_control_queue_cursor_by_name("default");
-
-    dt_control_queue_redraw_center();
-  }
   else
   {
-    // in any other situation where module has focus,
-    // reset the cursor but don't launch a redraw
+    // Cursor is out of the preview (off the image entirely): same reasoning as above, let
+    // darkroom's own default cursor stand instead of forcing a specific shape.
     dt_control_set_cursor_visible(TRUE);
-    dt_control_queue_cursor_by_name("default");
+    dt_control_queue_redraw_center();
   }
 }
 
@@ -1935,19 +1927,19 @@ int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressur
       preview_entry = g->thumb_preview_entry;
       preview_width = g->thumb_preview_buf_width;
       preview_height = g->thumb_preview_buf_height;
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(TRUE, preview_entry);
     }
     dt_iop_gui_leave_critical_section(self);
 
     if(!IS_NULL_PTR(preview_entry) && preview_width > 0 && preview_height > 0)
     {
-      dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+      dt_dev_pixelpipe_cache_rdlock_entry(TRUE, preview_entry);
       const float *const preview_buf = (const float *const)dt_pixel_cache_entry_get_data(preview_entry);
       const float cursor_exposure
           = preview_buf ? log2f(get_luminance_from_buffer(preview_buf, preview_width, preview_height,
                                                           (size_t)x_pointer, (size_t)y_pointer))
                         : NAN;
-      dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+      dt_dev_pixelpipe_cache_rdlock_entry(FALSE, preview_entry);
 
       if(!isnan(cursor_exposure))
       {
@@ -1957,7 +1949,7 @@ int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressur
     }
 
     if(preview_entry)
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
   }
 
   _switch_cursors(self);
@@ -2073,26 +2065,26 @@ int scrolled(struct dt_iop_module_t *self, double x, double y, int up, uint32_t 
     preview_height = g->thumb_preview_buf_height;
     cursor_x = g->cursor_pos_x;
     cursor_y = g->cursor_pos_y;
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, preview_entry);
   }
   dt_iop_gui_leave_critical_section(self);
 
   if(IS_NULL_PTR(preview_entry) || preview_width == 0 || preview_height == 0)
   {
     if(!IS_NULL_PTR(preview_entry))
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     return 1;
   }
 
   if(!IS_NULL_PTR(preview_entry) && preview_width > 0 && preview_height > 0)
   {
-    dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+    dt_dev_pixelpipe_cache_rdlock_entry(TRUE, preview_entry);
     const float *const preview_buf = (const float *const)dt_pixel_cache_entry_get_data(preview_entry);
     const float cursor_exposure
         = preview_buf ? log2f(get_luminance_from_buffer(preview_buf, preview_width, preview_height,
                                                         (size_t)cursor_x, (size_t)cursor_y))
                       : NAN;
-    dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_rdlock_entry(FALSE, preview_entry);
 
     if(!isnan(cursor_exposure))
     {
@@ -2101,7 +2093,7 @@ int scrolled(struct dt_iop_module_t *self, double x, double y, int up, uint32_t 
   }
 
   if(!IS_NULL_PTR(preview_entry))
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
 
   // Set the correction from mouse scroll input
   const float increment = (up) ? +1.0f : -1.0f;
@@ -2254,7 +2246,7 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
       preview_entry = g->thumb_preview_entry;
       preview_width = g->thumb_preview_buf_width;
       preview_height = g->thumb_preview_buf_height;
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(TRUE, preview_entry);
       dt_simd_memcpy(g->factors, factors, PIXEL_CHAN);
       sigma = g->sigma;
     }
@@ -2263,7 +2255,7 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
 
   if(!IS_NULL_PTR(preview_entry) && preview_width > 0 && preview_height > 0)
   {
-    dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+    dt_dev_pixelpipe_cache_rdlock_entry(TRUE, preview_entry);
     const float *const preview_buf = (const float *const)dt_pixel_cache_entry_get_data(preview_entry);
     if(!IS_NULL_PTR(preview_buf))
     {
@@ -2279,7 +2271,7 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
       exposure_in = NAN;
       correction = NAN;
     }
-    dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_rdlock_entry(FALSE, preview_entry);
 
     if(!isnan(exposure_in))
     {
@@ -2288,7 +2280,7 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
   }
 
   if(preview_entry)
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
 
   if(isnan(correction) || isnan(exposure_in)) return; // something went wrong
 
@@ -2427,12 +2419,12 @@ void gui_focus(struct dt_iop_module_t *self, gboolean in)
         void *preview_buf = NULL;
         dt_pixel_cache_entry_t *preview_entry = NULL;
 
-        gboolean preview_ready = dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_pixelpipe_cache_get_global(), preview_hash,
+        gboolean preview_ready = dt_dev_pixelpipe_cache_ref_entry_by_hash(preview_hash,
                                                                           &preview_buf, &preview_entry);
         if(preview_ready && (IS_NULL_PTR(preview_buf) || IS_NULL_PTR(preview_entry)))
         {
           if(!IS_NULL_PTR(preview_entry))
-            dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+            dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
           preview_ready = FALSE;
         }
 
@@ -2458,9 +2450,9 @@ void gui_focus(struct dt_iop_module_t *self, gboolean in)
           dt_iop_gui_leave_critical_section(self);
 
           if(old_entry)
-            dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, old_entry);
+            dt_dev_pixelpipe_cache_ref_count_entry(FALSE, old_entry);
           if(!keep_new_entry)
-            dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+            dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
         }
         else
         {
@@ -3052,12 +3044,12 @@ static void _develop_history_resync_callback(gpointer instance, gpointer user_da
   {
     void *preview_buf = NULL;
     dt_pixel_cache_entry_t *preview_entry = NULL;
-    gboolean preview_ready = dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_pixelpipe_cache_get_global(), preview_hash,
+    gboolean preview_ready = dt_dev_pixelpipe_cache_ref_entry_by_hash(preview_hash,
                                                                       &preview_buf, &preview_entry);
     if(preview_ready && (IS_NULL_PTR(preview_buf) || IS_NULL_PTR(preview_entry)))
     {
       if(!IS_NULL_PTR(preview_entry))
-        dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
       preview_ready = FALSE;
     }
 
@@ -3089,9 +3081,9 @@ static void _develop_history_resync_callback(gpointer instance, gpointer user_da
       dt_iop_gui_leave_critical_section(self);
 
       if(old_entry)
-        dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, old_entry);
+        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, old_entry);
       if(!keep_new_entry)
-        dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     }
     else
     {
@@ -3126,12 +3118,12 @@ static void _develop_cacheline_ready_callback(gpointer instance, const guint64 h
 
   void *preview_buf = NULL;
   dt_pixel_cache_entry_t *preview_entry = NULL;
-  const gboolean preview_ready = dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_pixelpipe_cache_get_global(), preview_hash,
+  const gboolean preview_ready = dt_dev_pixelpipe_cache_ref_entry_by_hash(preview_hash,
                                                                           &preview_buf, &preview_entry);
   if(!preview_ready || IS_NULL_PTR(preview_buf) || IS_NULL_PTR(preview_entry))
   {
     if(!IS_NULL_PTR(preview_entry))
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     return;
   }
 
@@ -3155,9 +3147,9 @@ static void _develop_cacheline_ready_callback(gpointer instance, const guint64 h
   dt_iop_gui_leave_critical_section(self);
 
   if(old_entry)
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, old_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, old_entry);
   if(!keep_new_entry)
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
 
   _switch_cursors(self);
   gtk_widget_queue_draw(GTK_WIDGET(g->area));
@@ -3288,28 +3280,28 @@ void color_picker_apply(dt_iop_module_t *self, GtkWidget *picker, dt_dev_pixelpi
   preview_width = g->thumb_preview_buf_width;
   preview_height = g->thumb_preview_buf_height;
   if(!IS_NULL_PTR(preview_entry))
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, preview_entry);
   dt_iop_gui_leave_critical_section(self);
 
   if(IS_NULL_PTR(preview_entry) || preview_width < 1 || preview_height < 1)
   {
     if(!IS_NULL_PTR(preview_entry))
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
     dt_print(DT_DEBUG_DEV, "[picker/toneequal] no preview mask picker=%p pipe=%p hash=%" PRIu64 "\n",
              (void *)picker, (void *)pipe, piece ? piece->global_hash : 0);
     _switch_cursors(self);
     return;
   }
 
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, preview_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(TRUE, preview_entry);
   const float *const preview_buf = (const float *const)dt_pixel_cache_entry_get_data(preview_entry);
   float picked = NAN;
   float picked_min = NAN;
   float picked_max = NAN;
   const gboolean sampled = _sample_picker_luminance_mask(self->dev, preview_buf, preview_width, preview_height,
                                                          &picked, &picked_min, &picked_max);
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
-  dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(FALSE, preview_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
 
   if(!sampled)
   {
@@ -3629,7 +3621,7 @@ void gui_cleanup(struct dt_iop_module_t *self)
   g->luminance_valid = FALSE;
   dt_iop_gui_leave_critical_section(self);
   if(!IS_NULL_PTR(preview_entry))
-    dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, preview_entry);
+    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, preview_entry);
   if(g->desc) pango_font_description_free(g->desc);
   if(g->layout) g_object_unref(g->layout);
   if(g->cr) cairo_destroy(g->cr);

@@ -114,7 +114,7 @@ GList dev->forms
 #include "system/macros.h"
 #include "system/simd.h"
 #include "common/times.h"
-#include "common/pixelpipe_cache_alloc.h"
+#include "caches/pixelpipe_cache_alloc.h"
 #include "develop/develop.h"     // dt_develop_t, and dt_iop_module_t through imageop.h
 #include "develop/pixelpipe.h"
 #include "widgets/draw.h"
@@ -1137,6 +1137,16 @@ void dt_masks_form_delete(dt_develop_t *dev, struct dt_iop_module_t *module, dt_
 int dt_masks_form_change_opacity(dt_develop_t *dev, dt_masks_form_t *form, int parentid, int up, const int flow);
 void dt_masks_form_move(dt_masks_form_t *grp, int formid, int up);
 int dt_masks_form_duplicate(dt_develop_t *dev, int formid);
+/**
+ * @brief Duplicate a shape (dt_masks_form_duplicate) and, if `group_id` names a valid
+ * group, attach the duplicate as a new member of that group right away, inheriting the
+ * source form's group-entry state (operation) and opacity. If `group_id` is not a group
+ * (e.g. <= 0), the duplicate is left unattached in dev->forms, same as
+ * dt_masks_form_duplicate alone. Shared by every "Duplicate shape" UI entry point so the
+ * attach-and-inherit behavior does not get re-implemented per caller.
+ * @return the new form's id, or <= 0 on failure.
+ */
+int dt_masks_form_duplicate_in_group(dt_develop_t *dev, int group_id, int form_id);
 /* returns a duplicate tof form, including the formid */
 dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *form);
 
@@ -1175,6 +1185,21 @@ float dt_masks_rotate_with_anchor(dt_develop_t *dev, const float anchor[2], cons
 
 /** Getters and setters for direct GUI interaction */
 dt_masks_form_group_t *dt_masks_form_group_from_parentid(dt_develop_t *dev, int parentid, int formid);
+/**
+ * @brief Find the group-membership entry for `formid` inside `group_form`'s own `points` list
+ * (not recursive into subgroups) -- the shared primitive behind every "find this shape's row
+ * within its parent group" call site.
+ * @param out_index if non-NULL, receives the entry's position in the list (-1 if not found).
+ */
+dt_masks_form_group_t *dt_masks_form_group_find_entry(dt_masks_form_t *group_form, int formid, int *out_index);
+/**
+ * @brief Find any group that currently references `formid`, searching every top-level group
+ * in dev->forms and their nested subgroups (first match wins -- a shape used by more than one
+ * module has no single "correct" answer). Meant for UI listings that show a shape without
+ * already knowing which group (if any) it belongs to, e.g. a flat "all shapes" row.
+ * @param out_parentid if non-NULL, receives the owning group's formid (0 if none found).
+ */
+dt_masks_form_group_t *dt_masks_form_group_find_any(dt_develop_t *dev, int formid, int *out_parentid);
 int dt_masks_group_index_from_formid(const dt_masks_form_t *group_form, int formid);
 dt_masks_form_group_t *dt_masks_form_get_selected_group(const struct dt_masks_form_t *form,
                                                         const struct dt_masks_form_gui_t *gui);

@@ -89,7 +89,7 @@
 #include "common/history.h"
 #include "develop/history_merge.h"
 #include "common/image.h"
-#include "common/image_cache.h"
+#include "caches/image_cache.h"
 #include "imageio/imageio_core.h"
 #include "imageio/imageio_dng.h"
 #include "imageio/imageio_module.h"
@@ -297,10 +297,25 @@ static int32_t dt_control_save_xmps_job_run(dt_job_t *job)
   for(GList *t = params->index; t; t = g_list_next(t))
   {
     const int32_t imgid = GPOINTER_TO_INT(t->data);
-    if(dt_image_write_sidecar_file(imgid))
-      fprintf(stdout,
-              "cannot write XMP file for image %i. The target storage may be unavailable or read-only.\n",
-              imgid);
+    switch(dt_image_write_sidecar_file(imgid))
+    {
+      case DT_IMAGE_WRITE_SIDECAR_OK:
+        break;
+      case DT_IMAGE_WRITE_SIDECAR_DISABLED:
+        // xmp writing is off, or the setting changed mid-batch: nothing was attempted, nothing to report
+        break;
+      case DT_IMAGE_WRITE_SIDECAR_CACHE_BUSY:
+        fprintf(stdout, "cannot write XMP file for image %i: the image cache entry is busy, try again.\n", imgid);
+        break;
+      case DT_IMAGE_WRITE_SIDECAR_NO_SOURCE_PATH:
+        fprintf(stdout, "cannot write XMP file for image %i: the original file could not be found.\n", imgid);
+        break;
+      case DT_IMAGE_WRITE_SIDECAR_IO_ERROR:
+        fprintf(stdout,
+                "cannot write XMP file for image %i: the target storage may be unavailable or read-only.\n",
+                imgid);
+        break;
+    }
   }
   return 0;
 }
@@ -387,9 +402,9 @@ static int dt_control_merge_hdr_process(dt_imageio_module_data_t *datai, const c
   dt_control_merge_hdr_t *d = data->d;
 
   // just take a copy. also do it after blocking read, so filters will make sense.
-  const dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
+  const dt_image_t *img = dt_image_cache_get(imgid, 'r');
   const dt_image_t image = *img;
-  dt_image_cache_read_release(dt_image_cache_get_global(), img);
+  dt_image_cache_read_release(img);
 
   if(IS_NULL_PTR(d->pixels))
   {
@@ -1200,13 +1215,13 @@ static int32_t dt_control_gpx_apply_job_run(dt_job_t *job)
     int32_t imgid = GPOINTER_TO_INT(t->data);
 
     /* get image */
-    const dt_image_t *cimg = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
+    const dt_image_t *cimg = dt_image_cache_get(imgid, 'r');
     if(IS_NULL_PTR(cimg)) continue;
 
     GDateTime *exif_time = dt_datetime_img_to_gdatetime(cimg, tz_camera);
 
     /* release the lock */
-    dt_image_cache_read_release(dt_image_cache_get_global(), cimg);
+    dt_image_cache_read_release(cimg);
     if(IS_NULL_PTR(exif_time)) continue;
     GDateTime *utc_time = g_date_time_to_timezone(exif_time, dt_datetime_utc_tz());
     g_date_time_unref(exif_time);
@@ -1331,7 +1346,7 @@ static int32_t dt_control_refresh_exif_run(dt_job_t *job)
       char sourcefile[PATH_MAX];
       dt_image_full_path(imgid,  sourcefile,  sizeof(sourcefile),  &from_cache, __FUNCTION__);
 
-      dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'w');
+      dt_image_t *img = dt_image_cache_get(imgid, 'w');
       if(!IS_NULL_PTR(img))
       {
         // Re-sync the file-derived classification flags (LDR/HDR/RAW/sRAW, mosaic, monochrome,
@@ -1348,7 +1363,7 @@ static int32_t dt_control_refresh_exif_run(dt_job_t *job)
             | DT_IMAGE_BUFFER_RESOLVED | DT_IMAGE_HAS_ADDITIONAL_DNG_TAGS;
         img->flags &= ~file_class_flags;
         dt_exif_read(img, sourcefile);
-        dt_image_cache_write_release(dt_image_cache_get_global(), img, DT_IMAGE_CACHE_SAFE);
+        dt_image_cache_write_release(img, DT_IMAGE_CACHE_SAFE);
       }
       else
         fprintf(stderr,"[dt_control_refresh_exif_run] couldn't dt_image_cache_get for imgid %i\n", imgid);
@@ -1457,10 +1472,10 @@ static int32_t dt_control_export_job_run(dt_job_t *job)
     if(dt_tag_attach(etagid, imgid, FALSE, FALSE)) tag_change = TRUE;
 
     /* register export timestamp in cache */
-    dt_image_cache_set_export_timestamp(dt_image_cache_get_global(), imgid);
+    dt_image_cache_set_export_timestamp(imgid);
 
     // check if image still exists:
-    const dt_image_t *image = dt_image_cache_get(dt_image_cache_get_global(), (int32_t)imgid, 'r');
+    const dt_image_t *image = dt_image_cache_get((int32_t)imgid, 'r');
     if(image)
     {
       char imgfilename[PATH_MAX] = { 0 };
@@ -1471,11 +1486,11 @@ static int32_t dt_control_export_job_run(dt_job_t *job)
         dt_control_log(_("image `%s' is currently unavailable"), image->filename);
         fprintf(stderr, "image `%s' is currently unavailable\n", imgfilename);
         // dt_image_remove(imgid);
-        dt_image_cache_read_release(dt_image_cache_get_global(), image);
+        dt_image_cache_read_release(image);
       }
       else
       {
-        dt_image_cache_read_release(dt_image_cache_get_global(), image);
+        dt_image_cache_read_release(image);
         if(mstorage->store(mstorage, sdata, imgid, mformat, fdata, num, total, TRUE,
                            settings->export_masks, settings->icc_type, settings->icc_filename, settings->icc_intent,
                            &metadata) != 0)

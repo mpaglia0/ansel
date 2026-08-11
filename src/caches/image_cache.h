@@ -24,10 +24,10 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef DT_COMMON_IMAGE_CACHE_H
-#define DT_COMMON_IMAGE_CACHE_H
+#ifndef DT_CACHES_IMAGE_CACHE_H
+#define DT_CACHES_IMAGE_CACHE_H
 
-#include "common/cache.h"
+#include "caches/cache.h"
 #include "common/image.h"
 
 #include <sqlite3.h>
@@ -36,11 +36,9 @@
 extern "C" {
 #endif
 
-typedef struct dt_image_cache_t
-{
-  dt_cache_t cache;
-}
-dt_image_cache_t;
+/* Opaque, and there is no accessor: no function below takes a cache handle, so nothing
+ * outside this module needs one. */
+typedef struct dt_image_cache_t dt_image_cache_t;
 
 // what to do if an image struct is
 // released after writing.
@@ -56,12 +54,23 @@ typedef enum dt_image_cache_write_mode_t
 }
 dt_image_cache_write_mode_t;
 
-void dt_image_cache_init(dt_image_cache_t *cache);
-void dt_image_cache_cleanup(dt_image_cache_t *cache);
-void dt_image_cache_print(dt_image_cache_t *cache);
+/**
+ * @brief Initialise the cache.
+ *
+ * @param verbose whether this cache traces to the log. Read ONCE, here, from the session's
+ *        debug flags by the orchestrator -- the cache does not consult them itself, so it
+ *        neither depends on the debug machinery at runtime nor changes behaviour halfway
+ *        through a session. `-d cache` still works: darktable.c turns it into this argument.
+ */
+void dt_image_cache_init(const gboolean verbose);
+void dt_image_cache_cleanup(void);
+void dt_image_cache_print(void);
 
 // Interim accessor (Strategy B, doc/globals-migration.md): implemented by the orchestrator; long-term the handle should be carried on the job/view context (Strategy C).
-struct dt_image_cache_t *dt_image_cache_get_global(void);
+/** @brief Has the image cache been initialised? Callers that run before dt_image_cache_init()
+ * or after its cleanup -- early startup, late teardown -- ask this instead of testing a handle
+ * they should not have. */
+gboolean dt_image_cache_is_ready(void);
 
 // One cached image (dt_image_t), for the GUI memory view.
 typedef struct dt_image_cache_stats_entry_t
@@ -72,11 +81,11 @@ typedef struct dt_image_cache_stats_entry_t
 } dt_image_cache_stats_entry_t;
 
 // Current/max bytes used by the image cache.
-void dt_image_cache_get_usage(dt_image_cache_t *cache, size_t *current, size_t *max);
+void dt_image_cache_get_usage(size_t *current, size_t *max);
 
 // Snapshot of all cached images (newly-allocated GArray of
 // dt_image_cache_stats_entry_t; free with g_array_free()).
-GArray *dt_image_cache_get_entries_stats(dt_image_cache_t *cache);
+GArray *dt_image_cache_get_entries_stats(void);
 
 // blocks until it gets the image struct with this id for reading.
 // also does the sql query if the image is not in cache atm.
@@ -85,19 +94,19 @@ GArray *dt_image_cache_get_entries_stats(dt_image_cache_t *cache);
 // cachelines to free up space if necessary.
 // if an entry is swapped out like this in the background, this is the latest
 // point where sql and xmp can be synched (unsafe setting).
-dt_image_t *dt_image_cache_get(dt_image_cache_t *cache, const int32_t imgid, char mode);
+dt_image_t *dt_image_cache_get(const int32_t imgid, char mode);
 
 // same as read_get, but doesn't block and returns NULL if the image
 // is currently unavailable.
-dt_image_t *dt_image_cache_testget(dt_image_cache_t *cache, const int32_t imgid, char mode);
+dt_image_t *dt_image_cache_testget(const int32_t imgid, char mode);
 
 // like dt_image_cache_get/testget, but always reloads the image data from the database
 // before returning the cache entry.
-dt_image_t *dt_image_cache_get_reload(dt_image_cache_t *cache, const int32_t imgid, char mode);
+dt_image_t *dt_image_cache_get_reload(const int32_t imgid, char mode);
 
 // seed an image cache entry from an already-populated dt_image_t (no SQL).
 // returns 0 on insert, 1 if already present, -1 on failure.
-int dt_image_cache_seed(dt_image_cache_t *cache, const dt_image_t *img);
+int dt_image_cache_seed(const dt_image_t *img);
 
 // Populate the common dt_image_t subset from a SQL row (shared with thumbtable).
 // Expected column order:
@@ -108,7 +117,18 @@ int dt_image_cache_seed(dt_image_cache_t *cache, const dt_image_t *img);
 // aspect_ratio, output_width, output_height.
 //
 // IMPORTANT: this does not call dt_image_init(). Fields not present in the SQL row are left unchanged.
-void dt_image_from_stmt(dt_image_t *info, sqlite3_stmt *stmt);
+/**
+ * @brief Compute the fields the database does not store: rating, monochrome and HDR
+ * predicates, makermodel, and the extension cross-check that logs stale stored flags.
+ *
+ * @details Call this on any ::dt_image_t freshly filled from a database row --
+ * dt_image_repository_load() does it for its own callers, and gui/dtgtk/thumbtable.c must do
+ * it after dt_image_from_stmt() on each row of its bulk query. Skipping it leaves `rating`,
+ * `is_bw`, `is_hdr` and `exif_makermodel` stale from whatever the struct held before.
+ *
+ * @param img image to complete, in place. NULL is a no-op.
+ */
+void dt_image_derive_fields(dt_image_t *img);
 
 struct dt_control_signal_t;
 // Register an IMAGE_INFO_CHANGED handler that force-reloads image cache entries.
@@ -116,20 +136,20 @@ struct dt_control_signal_t;
 void dt_image_cache_connect_info_changed_first(const struct dt_control_signal_t *ctlsig);
 
 // drops the read lock on an image struct
-void dt_image_cache_read_release(dt_image_cache_t *cache, const dt_image_t *img);
+void dt_image_cache_read_release(const dt_image_t *img);
 
 // drops the write privileges on an image struct.
 // this triggers a write-through to sql, and if the setting
 // is present, also to xmp sidecar files (safe setting).
 // minimal mode only releases the lock without any write.
-void dt_image_cache_write_release(dt_image_cache_t *cache, dt_image_t *img, dt_image_cache_write_mode_t mode);
+void dt_image_cache_write_release(dt_image_t *img, dt_image_cache_write_mode_t mode);
 
 // remove the image from the cache
-void dt_image_cache_remove(dt_image_cache_t *cache, const int32_t imgid);
+void dt_image_cache_remove(const int32_t imgid);
 
 // register timestamps in cache
-void dt_image_cache_set_export_timestamp(dt_image_cache_t *cache, const int32_t imgid);
-void dt_image_cache_set_print_timestamp(dt_image_cache_t *cache, const int32_t imgid);
+void dt_image_cache_set_export_timestamp(const int32_t imgid);
+void dt_image_cache_set_print_timestamp(const int32_t imgid);
 
 // return 1 if the image is invalid so we can bail out early
 int dt_image_invalid(const dt_image_t *img);
@@ -138,7 +158,7 @@ int dt_image_invalid(const dt_image_t *img);
 }
 #endif
 
-#endif // DT_COMMON_IMAGE_CACHE_H
+#endif // DT_CACHES_IMAGE_CACHE_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

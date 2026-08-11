@@ -310,6 +310,31 @@ typedef struct dt_image_geoloc_t
 
 struct dt_cache_entry_t;
 
+/**
+ * @brief What a thumbnail shows over an image: its rating, or one of the badge states.
+ *
+ * @details Stored in dt_image_t::rating -- 0..5 stars, or DT_VIEW_REJECT for rejected -- which
+ * is why it lives here rather than in views/view.h where it was defined. It was read 8 times
+ * from common/, 3 from caches/ and 5 from gui/, against a single use in views/ itself: an
+ * enum declared at the top layer and consumed from the bottom, which is what made
+ * common/ratings.c and caches/image_cache.c include the view layer for one constant.
+ */
+typedef enum dt_view_image_over_t
+{
+  DT_VIEW_ERR     = -1,
+  DT_VIEW_DESERT  =  0,
+  DT_VIEW_STAR_1  =  1,
+  DT_VIEW_STAR_2  =  2,
+  DT_VIEW_STAR_3  =  3,
+  DT_VIEW_STAR_4  =  4,
+  DT_VIEW_STAR_5  =  5,
+  DT_VIEW_REJECT  =  6,
+  DT_VIEW_GROUP   =  7,
+  DT_VIEW_AUDIO   =  8,
+  DT_VIEW_ALTERED =  9,
+  DT_VIEW_END     = 10, // placeholder for the end of the list
+} dt_view_image_over_t;
+
 typedef struct dt_image_t
 {
   // minimal exif data here (all in multiples of 4-byte to interface nicely with c++):
@@ -671,12 +696,27 @@ gboolean dt_image_safe_remove(const int32_t imgid);
 /* try to sync .xmp for all local copies */
 void dt_image_local_copy_synch();
 // xmp functions:
-int dt_image_write_sidecar_file(const int32_t imgid);
+/** why dt_image_write_sidecar_file() did not write a sidecar. Distinct causes get distinct
+ * values so callers can report something more useful than a generic "storage unavailable" --
+ * DISABLED and CACHE_BUSY in particular are not I/O problems at all. */
+typedef enum dt_image_write_sidecar_result_t
+{
+  DT_IMAGE_WRITE_SIDECAR_OK = 0,
+  DT_IMAGE_WRITE_SIDECAR_DISABLED,       // xmp writing is off (or an invalid imgid was passed)
+  DT_IMAGE_WRITE_SIDECAR_CACHE_BUSY,     // could not acquire the image cache entry
+  DT_IMAGE_WRITE_SIDECAR_NO_SOURCE_PATH, // the original file / local copy could not be located
+  DT_IMAGE_WRITE_SIDECAR_IO_ERROR,       // the write to storage itself failed
+} dt_image_write_sidecar_result_t;
+dt_image_write_sidecar_result_t dt_image_write_sidecar_file(const int32_t imgid);
 void dt_image_synch_xmp(const int selected);
 void dt_image_synch_xmps(const GList *img);
 void dt_image_synch_all_xmp(const gchar *pathname);
-/** get the mode xmp sidecars are written */
+/** get the mode xmp sidecars are written. Lock-free: reads a cached value, refreshed only at
+ * startup and on DT_SIGNAL_PREFERENCES_CHANGE. */
 gboolean dt_image_get_xmp_mode();
+/** re-read the "write_sidecar_files" preference from conf and update the cache dt_image_get_xmp_mode()
+ * reads. Call once at startup, and wire to DT_SIGNAL_PREFERENCES_CHANGE -- never call from a hot path. */
+void dt_image_xmp_mode_refresh_from_conf(void);
 
 // set datetime to exif_datetime_taken field
 void dt_image_set_datetime(const GList *imgs, const char *datetime, const gboolean undo_on);

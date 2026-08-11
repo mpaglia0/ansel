@@ -43,10 +43,10 @@
 #include "common/film.h"
 #include "control/settings.h"
 #include "common/collection.h"
-#include "common/mipmap_cache.h"
+#include "caches/mipmap_cache.h"
 #include "common/debug.h"
 #include "system/dtpthread.h"
-#include "common/image_cache.h"
+#include "caches/image_cache.h"
 #include "common/tags.h"
 #include "common/conf.h"
 #include "control/control.h"
@@ -396,8 +396,8 @@ void dt_film_remove(const int id)
   {
     const int32_t imgid = sqlite3_column_int(stmt, 0);
     dt_image_local_copy_reset(imgid);
-    dt_mipmap_cache_remove(dt_mipmap_cache_get_global(), imgid, TRUE);
-    dt_image_cache_remove(dt_image_cache_get_global(), imgid);
+    dt_mipmap_cache_remove(imgid, TRUE);
+    dt_image_cache_remove(imgid);
   }
   sqlite3_finalize(stmt);
 

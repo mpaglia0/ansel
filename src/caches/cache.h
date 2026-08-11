@@ -22,8 +22,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef DT_COMMON_CACHE_H
-#define DT_COMMON_CACHE_H
+#ifndef DT_CACHES_CACHE_H
+#define DT_CACHES_CACHE_H
 
 #include "system/dtpthread.h"
 #include <glib.h>
@@ -44,6 +44,24 @@ dt_cache_entry_t;
 
 typedef void((*dt_cache_allocate_t)(void *userdata, dt_cache_entry_t *entry));
 typedef void((*dt_cache_cleanup_t)(void *userdata, dt_cache_entry_t *entry));
+
+/**
+ * @brief Allocate a cache entry that belongs to NO cache, for a one-shot decode.
+ *
+ * @details The decoders write into whatever ::dt_cache_entry_t they are handed, which is
+ * normally one the mipmap cache owns. A caller that just wants a file decoded once has no
+ * cache to get one from, and used to declare a zeroed entry on its own stack -- assembling
+ * this module's bookkeeping by hand to borrow a decoder. These two exist so nothing outside
+ * src/caches needs the layout.
+ *
+ * @return An entry whose `data` is NULL, or NULL on allocation failure. Release it with
+ *         dt_cache_entry_free_detached(), which frees `data` too.
+ * @see dt_imageio_open_standalone(), its only caller.
+ */
+dt_cache_entry_t *dt_cache_entry_new_detached(void);
+
+/** @brief Release an entry from dt_cache_entry_new_detached(), and its `data`. NULL-safe. */
+void dt_cache_entry_free_detached(dt_cache_entry_t *entry);
 
 typedef struct dt_cache_t
 {
@@ -110,7 +128,7 @@ int dt_cache_for_all(dt_cache_t *cache,
     int (*process)(const uint32_t key, const void *data, void *user_data),
     void *user_data);
 
-#endif // DT_COMMON_CACHE_H
+#endif // DT_CACHES_CACHE_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

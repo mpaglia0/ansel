@@ -47,7 +47,7 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/masks.h"
-#include "develop/pixelpipe_cache.h"
+#include "caches/pixelpipe_cache.h"
 #include "gui/color_picker_proxy.h"
 #include "widgets/draw.h"
 #include "gui/application.h"
@@ -1745,6 +1745,11 @@ int mouse_leave(struct dt_iop_module_t *self)
   g->cursor_valid = FALSE;
   _invalidate_preview_cursor(g);
   _switch_preview_cursor(self);
+  // The pointer just left the whole darkroom center view, not just the preview area within
+  // it -- unlike mouse_moved/focus changes, there is no later _darkroom_set_default_cursor
+  // call to fall back on here, so this is the one place that must still force a cursor.
+  dt_control_set_cursor_visible(TRUE);
+  dt_control_queue_cursor_by_name("default");
 
   const dt_iop_colorequal_ring_t ring = _active_ring_from_gui(g);
   const dt_iop_colorequal_channel_t channel = _active_channel_from_gui(g, ring);
@@ -1959,13 +1964,14 @@ static void _switch_preview_cursor(dt_iop_module_t *self)
 
   if(!widget || !gtk_widget_get_window(widget)) return;
 
+  // Un-hide the cursor (it may have been hidden by the branch below) and, in every case that
+  // doesn't need a specific shape of its own, leave it there: darkroom's own default cursor
+  // logic (dot/crosshair/left_ptr, picked per position in _darkroom_set_default_cursor)
+  // already queued the right one before this module's mouse_moved ran.
   dt_control_set_cursor_visible(TRUE);
 
   if(!g->has_focus || dt_iop_color_picker_is_visible(self->dev))
-  {
-    dt_control_queue_cursor_by_name("default");
     return;
-  }
 
   if(g->cursor_valid && self->dev && self->dev->preview_pipe && self->dev->preview_pipe->processing)
   {
@@ -1979,10 +1985,7 @@ static void _switch_preview_cursor(dt_iop_module_t *self)
     dt_control_hinter_message(dt_control_get_global(),
                               _("scroll over image to adjust the selected color graph\n"
                                 "right-click to add a node at the sampled hue"));
-    return;
   }
-
-    dt_control_queue_cursor_by_name("default");
 }
 
 static gboolean _refresh_preview_cursor_sample(dt_iop_module_t *self)
@@ -2021,8 +2024,8 @@ static gboolean _refresh_preview_cursor_sample(dt_iop_module_t *self)
     return FALSE;
   }
 
-  dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), TRUE, input_entry);
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, input_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(TRUE, input_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(TRUE, input_entry);
 
   const float point_preview[2] = { (float)g->cursor_pos_x, (float)g->cursor_pos_y };
   float point_image[2] = { point_preview[0], point_preview[1] };
@@ -2049,8 +2052,8 @@ static gboolean _refresh_preview_cursor_sample(dt_iop_module_t *self)
   input_rgb[2] = input_rgbf[2];
   input_rgb[3] = 0.f;
 
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, input_entry);
-  dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, input_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(FALSE, input_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
 
   const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_pipe_current_profile_info(self, dev->preview_pipe);
   const dt_iop_order_iccprofile_info_t *const lut_profile = g->viewer_lut.lut_profile;

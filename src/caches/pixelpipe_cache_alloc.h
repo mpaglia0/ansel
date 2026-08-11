@@ -15,18 +15,23 @@
     You should have received a copy of the GNU General Public License
     along with Ansel.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifndef DT_COMMON_PIXELPIPE_CACHE_ALLOC_H
-#define DT_COMMON_PIXELPIPE_CACHE_ALLOC_H
+#ifndef DT_CACHES_PIXELPIPE_CACHE_ALLOC_H
+#define DT_CACHES_PIXELPIPE_CACHE_ALLOC_H
 
 /* Convenience allocators over the pixelpipe cache, bound to the application-wide
  * cache singleton (and, for the perthread variants, to the application's OpenMP
  * thread count).
  *
  * They moved here from darktable.h: they are pipeline-cache API glue, not
- * orchestrator material. The binding goes through the dt_pixelpipe_cache_get_global()
+ * orchestrator material. The binding is resolved inside caches/pixelpipe_cache.c
  * and dt_get_num_openmp_threads() accessors — declared by the libs, implemented by
  * the orchestrator (darktable.c) — so including this helper does NOT drag
  * darktable.h (and with it the whole application) into the translation unit. */
+
+/* Kept SEPARATE from pixelpipe_cache.h on purpose. 94 translation units -- most of src/iop
+ * and src/pixel -- want the allocators below and nothing else; pixelpipe_cache.h is the
+ * cache's full API and pulls more than twice the transitive headers. Merging the two would
+ * hand 90 files a supply line they never asked for. */
 
 #include "system/macros.h"
 #include "system/mem_alloc.h"
@@ -36,31 +41,27 @@
 extern "C" {
 #endif
 
-/* Deliberately does NOT include develop/pixelpipe_cache.h. This header is the
+/* Deliberately does NOT include caches/pixelpipe_cache.h. This header is the
  * ALLOCATOR INTERFACE; the cache implementation is a develop/ concern. Pulling the full
  * cache header in dragged develop/ into 96 files -- 11 in common/ and 16 in pixel/ --
  * purely to allocate a buffer, i.e. an upward dependency for something the caller never
  * touches. The three entry points below take the cache as an opaque pointer, so a tag
  * declaration is enough; the *_perthread_impl helpers are static inline right here. */
-/* An OPAQUE handle, deliberately. dt_decl_def_audit reports the two functions below as
- * declared here but defined in develop/pixelpipe_cache.c, and that is correct and should
- * stay: they need the cache's internals, which develop/ owns, while the allocation macros
- * built on them are used from pixel/ (14 files), common/ (6), math/ and imageio/. Moving the
- * declarations up to develop/ would force every one of those layers to include develop/;
- * moving the definitions down would drag the cache internals into layer 1. Passing an opaque
- * pointer through costs neither. */
-struct dt_dev_pixelpipe_cache_t;
+/* These two take NO cache handle. There is one pixelpipe cache, it is a file-static inside
+ * caches/pixelpipe_cache.c, and these resolve it there.
+ *
+ * They used to take `struct dt_dev_pixelpipe_cache_t *`, which meant the macros below had to
+ * call dt_pixelpipe_cache_get_global() to fill it -- so the accessor had to be DECLARED here,
+ * in a header 94 translation units include, handing every one of them the cache pointer
+ * whether it wanted it or not. An argument nobody chooses is not a parameter, it is a leak.
+ * The accessor still exists for the cache's own API in pixelpipe_cache.h; it is simply not
+ * part of allocating. */
+void *dt_pixelpipe_cache_alloc_align_cache_impl(size_t size, int id, const char *name);
 
-struct dt_dev_pixelpipe_cache_t *dt_pixelpipe_cache_get_global(void);
-
-void *dt_pixelpipe_cache_alloc_align_cache_impl(struct dt_dev_pixelpipe_cache_t *cache, size_t size,
-                                                int id, const char *name);
-
-void dt_pixelpipe_cache_free_align_cache(struct dt_dev_pixelpipe_cache_t *cache, void **mem,
-                                         const char *message);
+void dt_pixelpipe_cache_free_align_cache(void **mem, const char *message);
 
 #define dt_pixelpipe_cache_alloc_align_cache(size, id) \
-  dt_pixelpipe_cache_alloc_align_cache_impl(dt_pixelpipe_cache_get_global(), (size), (id), __FILE__ ":" DT_STRINGIFY(__LINE__))
+  dt_pixelpipe_cache_alloc_align_cache_impl((size), (id), __FILE__ ":" DT_STRINGIFY(__LINE__))
 
 #ifndef dt_pixelpipe_cache_alloc_align
 #define dt_pixelpipe_cache_alloc_align(size, pipe) \
@@ -101,7 +102,7 @@ void dt_pixelpipe_cache_free_align_cache(struct dt_dev_pixelpipe_cache_t *cache,
 #endif
 
 #define dt_pixelpipe_cache_free_align(mem) \
-  dt_pixelpipe_cache_free_align_cache(dt_pixelpipe_cache_get_global(), (void **)&(mem), __FILE__ ":" DT_STRINGIFY(__LINE__));
+  dt_pixelpipe_cache_free_align_cache((void **)&(mem), __FILE__ ":" DT_STRINGIFY(__LINE__));
 
 // Allocate a buffer for 'n' objects each of size 'objsize' bytes for each of the program's threads.
 // Ensures that there is no false sharing among threads by aligning and rounding up the allocation to
@@ -114,7 +115,7 @@ static inline void *dt_pixelpipe_cache_alloc_perthread_impl(const size_t n, cons
   const size_t cache_lines = (alloc_size + DT_CACHELINE_BYTES - 1) / DT_CACHELINE_BYTES;
   *padded_size = DT_CACHELINE_BYTES * cache_lines / objsize;
   const size_t total_bytes = DT_CACHELINE_BYTES * cache_lines * dt_get_num_openmp_threads();
-  void *buf = dt_pixelpipe_cache_alloc_align_cache_impl(dt_pixelpipe_cache_get_global(), total_bytes, 0, message);
+  void *buf = dt_pixelpipe_cache_alloc_align_cache_impl(total_bytes, 0, message);
   if(IS_NULL_PTR(buf)) return NULL;
   return __builtin_assume_aligned(buf, DT_CACHELINE_BYTES);
 }
@@ -158,7 +159,7 @@ static inline float *dt_pixelpipe_cache_alloc_perthread_float_impl(const size_t 
 }
 #endif
 
-#endif // DT_COMMON_PIXELPIPE_CACHE_ALLOC_H
+#endif // DT_CACHES_PIXELPIPE_CACHE_ALLOC_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

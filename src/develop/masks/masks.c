@@ -52,7 +52,7 @@
 #include "control/signal.h"
 #include "common/database.h"
 #include "system/dtpthread.h"
-#include "common/pixelpipe_cache_alloc.h"
+#include "caches/pixelpipe_cache_alloc.h"
 #include "widgets/gdkkeys.h"
 #include "develop/masks.h"
 #include "develop/develop.h"
@@ -320,19 +320,29 @@ dt_masks_form_t *dt_masks_dup_masks_form(const dt_masks_form_t *mask_form)
 }
 
 /**
- * @brief Find a form entry inside a group by form id.
+ * @brief Find the group-membership entry for `form_id` inside `group_form`'s own `points`
+ * list (not recursive into subgroups) -- the shared primitive behind every "find this shape's
+ * row within its parent group" call site.
  *
  * Assumption: only valid for DT_MASKS_GROUP forms.
+ * @param out_index if non-NULL, receives the entry's position in the list (-1 if not found).
  */
-static inline dt_masks_form_group_t *_masks_group_find_form(dt_masks_form_t *group_form, const int form_id)
+dt_masks_form_group_t *dt_masks_form_group_find_entry(dt_masks_form_t *group_form, const int form_id, int *out_index)
 {
+  if(out_index) *out_index = -1;
   if(IS_NULL_PTR(group_form) || !(group_form->type & DT_MASKS_GROUP)) return NULL;
 
   // Iterate group entries to find the matching form id.
+  int index = 0;
   for(GList *group_node = group_form->points; group_node; group_node = g_list_next(group_node))
   {
     dt_masks_form_group_t *group_entry = (dt_masks_form_group_t *)group_node->data;
-    if(group_entry && group_entry->formid == form_id) return group_entry;
+    if(group_entry && group_entry->formid == form_id)
+    {
+      if(out_index) *out_index = index;
+      return group_entry;
+    }
+    index++;
   }
   return NULL;
 }
@@ -442,7 +452,66 @@ dt_masks_form_group_t *dt_masks_form_group_from_parentid(dt_develop_t *dev, int 
 {
   dt_masks_form_t *group_form = dt_masks_get_from_id(dev, parent_id);
   if(IS_NULL_PTR(group_form) || !(group_form->type & DT_MASKS_GROUP)) return NULL;
-  return _masks_group_find_form(group_form, form_id);
+  return dt_masks_form_group_find_entry(group_form, form_id, NULL);
+}
+
+// Read-only recursive search: dev->forms's top-level groups and their nested subgroups.
+// grp == NULL starts the search at dev->forms itself. max_depth bounds the recursion so a
+// corrupted or maliciously crafted masks_history (a group referencing an ancestor of itself --
+// dt_masks_group_add_form guards against this interactively via _find_in_group, but a raw
+// DB/XMP load does not validate it) cannot stack-overflow the caller; the UI never nests
+// groups anywhere near this deep (see the `depth < 3` guards in libs/masks.c).
+static dt_masks_form_t *_masks_find_any_parent_group(dt_develop_t *dev, dt_masks_form_t *grp, int form_id,
+                                                      int max_depth)
+{
+  if(max_depth <= 0) return NULL;
+
+  if(IS_NULL_PTR(grp))
+  {
+    for(GList *forms = dev->forms; forms; forms = g_list_next(forms))
+    {
+      dt_masks_form_t *form = (dt_masks_form_t *)forms->data;
+      if(form->type & DT_MASKS_GROUP)
+      {
+        dt_masks_form_t *found = _masks_find_any_parent_group(dev, form, form_id, max_depth - 1);
+        if(found) return found;
+      }
+    }
+    return NULL;
+  }
+
+  for(GList *points = grp->points; points; points = g_list_next(points))
+  {
+    dt_masks_form_group_t *point = (dt_masks_form_group_t *)points->data;
+    if(point->formid == form_id) return grp;
+    dt_masks_form_t *sub = dt_masks_get_from_id(dev, point->formid);
+    if(sub && (sub->type & DT_MASKS_GROUP))
+    {
+      dt_masks_form_t *found = _masks_find_any_parent_group(dev, sub, form_id, max_depth - 1);
+      if(found) return found;
+    }
+  }
+  return NULL;
+}
+
+/**
+ * @brief Find any group that currently references `form_id`, searching every top-level group
+ * in dev->forms and their nested subgroups (first match wins -- a shape used by more than one
+ * module has no single "correct" answer). Touches the owning group for COW safety before
+ * resolving the entry pointer, same rule as dt_masks_form_group_from_parentid's callers use
+ * when they already know the parent.
+ * @param out_parentid if non-NULL, receives the owning group's formid (0 if none found).
+ */
+dt_masks_form_group_t *dt_masks_form_group_find_any(dt_develop_t *dev, int form_id, int *out_parentid)
+{
+  if(out_parentid) *out_parentid = 0;
+
+  dt_masks_form_t *grp = _masks_find_any_parent_group(dev, NULL, form_id, 32);
+  if(IS_NULL_PTR(grp)) return NULL;
+
+  grp = dt_masks_cow_touch(dev, grp);
+  if(out_parentid) *out_parentid = grp->formid;
+  return dt_masks_form_group_find_entry(grp, form_id, NULL);
 }
 
 /**
@@ -1562,6 +1631,34 @@ int dt_masks_form_duplicate(dt_develop_t *develop, int form_id)
   return dest_form->formid;
 }
 
+int dt_masks_form_duplicate_in_group(dt_develop_t *develop, int group_id, int form_id)
+{
+  const int nid = dt_masks_form_duplicate(develop, form_id);
+  if(nid <= 0) return nid;
+
+  dt_masks_form_t *grp = (group_id > 0) ? dt_masks_get_from_id(develop, group_id) : NULL;
+  if(IS_NULL_PTR(grp) || !(grp->type & DT_MASKS_GROUP)) return nid;
+
+  grp = dt_masks_cow_touch(develop, grp);
+
+  dt_masks_form_group_t *orig_entry = NULL;
+  for(GList *pts = grp->points; pts; pts = g_list_next(pts))
+  {
+    dt_masks_form_group_t *pt = (dt_masks_form_group_t *)pts->data;
+    if(pt->formid == form_id) { orig_entry = pt; break; }
+  }
+
+  dt_masks_form_t *dup_form = dt_masks_get_from_id(develop, nid);
+  dt_masks_form_group_t *new_entry = dup_form ? dt_masks_group_add_form(develop, grp, dup_form) : NULL;
+  if(new_entry && orig_entry)
+  {
+    new_entry->state = orig_entry->state;
+    new_entry->opacity = orig_entry->opacity;
+  }
+
+  return nid;
+}
+
 int dt_masks_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
                                float **point_buffer, int *point_count,
                                float **border_buffer, int *border_count,
@@ -2308,20 +2405,38 @@ static void _set_cursor_shape(dt_masks_form_gui_t *mask_gui)
 {
   if(IS_NULL_PTR(mask_gui)) return;
 
+  if(mask_gui->creation)
+  {
+    dt_masks_form_t *creation_form = dt_masks_get_visible_form(mask_gui->dev);
+    if(!IS_NULL_PTR(creation_form) && (creation_form->type & DT_MASKS_BRUSH))
+    {
+      // The brush tool draws its own filled size/hardness preview circle at the cursor
+      // position (_brush_events_post_expose) -- a system cursor on top of it is redundant.
+      dt_control_set_cursor_visible(FALSE);
+      return;
+    }
+  }
+
+  // Any other case un-hides the cursor: it may have been hidden by a brush creation that
+  // just ended or was switched away from.
+  dt_control_set_cursor_visible(TRUE);
+
   // circular arrows
   if(mask_gui->pivot_selected)
     dt_control_queue_cursor(GDK_EXCHANGE);
   // pointing hand
   else if(mask_gui->creation_closing_form)
     dt_control_queue_cursor(GDK_HAND2);
+  // precise-placement cursor while drawing a new shape -- distinct from darkroom's own
+  // default "dot"/"crosshair" cursors (views/darkroom.c's _darkroom_set_default_cursor)
+  else if(mask_gui->creation)
+    dt_control_queue_cursor_by_name("cell");
 
   /*else if(gui->handle_dragging >= 0)
     dt_control_set_cursor(GDK_HAND1);*/
 
   // crosshair
-  else if(!mask_gui->creation
-          && (dt_masks_is_anything_selected(mask_gui)
-              || dt_masks_is_anything_hovered(mask_gui)))
+  else if(dt_masks_is_anything_selected(mask_gui) || dt_masks_is_anything_hovered(mask_gui))
     dt_control_queue_cursor(GDK_FLEUR);
 }
 
@@ -2550,6 +2665,16 @@ int dt_masks_events_button_pressed(dt_develop_t *dev, struct dt_iop_module_t *mo
                                           ? (prev_group_selected >= 0 && prev_group_selected == form_index)
                                           : prev_any_selected;
   _apply_gui_button_pressed_state(mask_gui, button, state, shape_was_selected);
+
+  // Refresh hover/highlight state, the hint message and the cursor shape now that the click
+  // has been dispatched: button_pressed above may have changed geometry (e.g. a new node in
+  // creation mode) or the active selection, neither of which the pre-dispatch hover computed
+  // at the top of this function accounts for. Without this, the display only catches up with
+  // what the click just did on the next physical mouse move -- same class of staleness as
+  // mouse_moved()/button_released(), which already refresh all three at their own tail.
+  _dt_masks_events_update_hover(dispatch_form, mask_gui, form_index);
+  _set_hinter_message(mask_gui, mask_form);
+  _set_cursor_shape(mask_gui);
 
   if(button == 3 && !return_val)
   {
@@ -3681,6 +3806,13 @@ float dt_masks_form_set_interaction_value(dt_masks_form_group_t *form_group,
   if(IS_NULL_PTR(target_form) || !target_form->functions
      || !target_form->functions->set_interaction_value) return NAN;
 
+  // The shape's own geometry is refcounted like any other dt_masks_form_t (an undo/redo
+  // snapshot can share it) -- touch it before the vtable call below mutates form->points in
+  // place, or a shared shape's geometry changes behind the back of a snapshot that still
+  // references it. Safe to re-touch on every call: target_form is re-resolved by formid each
+  // time, never cached across slider drag steps.
+  target_form = dt_masks_cow_touch(dev, target_form);
+
   const float result = target_form->functions->set_interaction_value(target_form, interaction, value, increment,
                                                                      flow, mask_gui, module);
   if(isnan(result)) return NAN;
@@ -3817,7 +3949,7 @@ int dt_masks_form_change_opacity(dt_develop_t *dev, dt_masks_form_t *mask_form, 
   if(IS_NULL_PTR(parent_form) || !(parent_form->type & DT_MASKS_GROUP)) return 0;
   parent_form = dt_masks_cow_touch(dev, parent_form);
 
-  dt_masks_form_group_t *form_group = _masks_group_find_form(parent_form, mask_form->formid);
+  dt_masks_form_group_t *form_group = dt_masks_form_group_find_entry(parent_form, mask_form->formid, NULL);
   if(IS_NULL_PTR(form_group)) return 0;
 
   float amount = scroll_up ? 0.02f : -0.02f;

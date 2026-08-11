@@ -66,9 +66,9 @@
 #include "common/logging.h"
 #include "common/times.h"
 #include "common/paths.h"
-#include "common/pixelpipe_cache_alloc.h"
+#include "caches/pixelpipe_cache_alloc.h"
 #include "common/exif.h"
-#include "common/image_cache.h"
+#include "caches/image_cache.h"
 #include "common/history.h"
 #include "common/image_extensions.h"
 #include "imageio/imageio_core.h"
@@ -100,7 +100,7 @@
 #include "imageio/imageio_webp.h"
 #endif
 #include "imageio/imageio_libraw.h"
-#include "common/mipmap_cache.h"
+#include "caches/mipmap_cache.h"
 #include "common/styles.h"
 #include "common/conf.h"
 #include "control/control.h"
@@ -943,7 +943,6 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   dt_get_times(&start);
 
   dt_mipmap_buffer_t buf;
-  dt_mipmap_cache_t *cache = dt_mipmap_cache_get_global();
   void *outbuf = NULL;
 
   // Get the history, aka sequence of editing changes
@@ -985,17 +984,17 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   dt_mipmap_size_t size = DT_MIPMAP_FULL;
 
   // Take a local copy of the input buffer so we can release the mipmap cache lock immediately
-  dt_mipmap_cache_get(cache, &buf, imgid, size, DT_MIPMAP_BLOCKING, 'r');
+  dt_mipmap_cache_get(&buf, imgid, size, DT_MIPMAP_BLOCKING, 'r');
 
   if(IS_NULL_PTR(buf.buf) || buf.width == 0 || buf.height == 0)
   {
-    dt_mipmap_cache_release(cache, &buf);
+    dt_mipmap_cache_release(&buf);
     goto error;
   }
 
   const size_t buf_width = buf.width;
   const size_t buf_height = buf.height;
-  dt_mipmap_cache_release(cache, &buf);
+  dt_mipmap_cache_release(&buf);
 
   // Update size with actual input and resync nodes
   dt_dev_pixelpipe_set_input(&pipe, imgid, buf_width, buf_height, buf.iscale, size);
@@ -1060,19 +1059,18 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
    * returning and our ref_count_entry() call — leaving us with a dangling data pointer that
    * the OpenMP conversion threads then read → SIGSEGV.  ref_entry_by_hash() closes that
    * window by holding cache->lock across both the lookup and the increment. */
-  if(!dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_pixelpipe_cache_get_global(),
-                                               dt_dev_backbuf_get_hash(&pipe.backbuf),
+  if(!dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_dev_backbuf_get_hash(&pipe.backbuf),
                                                &data, &cache_entry)
      || !data)
   {
     if(cache_entry)
-      dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, cache_entry);
+      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, cache_entry);
     goto error;
   }
 
   /* Hold a read lock for the duration of the conversion so no writer can replace the buffer
    * while the OpenMP threads are reading it. */
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), TRUE, cache_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(TRUE, cache_entry);
 
   // Down-conversion to low-precision formats:
   const size_t pixels = pipe.backbuf.width * pipe.backbuf.height * 4;
@@ -1130,8 +1128,8 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   }
 
   // Decrease ref count on the cache entry and release the read lock
-  dt_dev_pixelpipe_cache_ref_count_entry(dt_pixelpipe_cache_get_global(), FALSE, cache_entry);
-  dt_dev_pixelpipe_cache_rdlock_entry(dt_pixelpipe_cache_get_global(), FALSE, cache_entry);
+  dt_dev_pixelpipe_cache_ref_count_entry(FALSE, cache_entry);
+  dt_dev_pixelpipe_cache_rdlock_entry(FALSE, cache_entry);
 
   if(IS_NULL_PTR(outbuf)) goto error;
 
@@ -1266,6 +1264,32 @@ dt_imageio_retval_t dt_imageio_open(dt_image_t *img,               // non-const 
   dt_image_buffer_resolve_flags(img);
 
   return ret;
+}
+
+dt_imageio_retval_t dt_imageio_open_standalone(dt_image_t *img, const char *filename,
+                                               dt_mipmap_buffer_t *buf)
+{
+  if(IS_NULL_PTR(buf)) return DT_IMAGEIO_LOAD_FAILED;
+
+  memset(buf, 0, sizeof(*buf));
+  buf->size = DT_MIPMAP_FULL;
+
+  /* The decoder allocates into the entry it is handed. Owning one here is what lets callers
+   * decode a file without knowing that a cache entry exists -- see the header. */
+  buf->cache_entry = dt_cache_entry_new_detached();
+  if(IS_NULL_PTR(buf->cache_entry)) return DT_IMAGEIO_CACHE_FULL;
+
+  const dt_imageio_retval_t ret = dt_imageio_open(img, filename, buf);
+  if(ret != DT_IMAGEIO_OK) dt_imageio_close_standalone(buf);
+  return ret;
+}
+
+void dt_imageio_close_standalone(dt_mipmap_buffer_t *buf)
+{
+  if(IS_NULL_PTR(buf) || IS_NULL_PTR(buf->cache_entry)) return;
+  dt_cache_entry_free_detached(buf->cache_entry);
+  buf->cache_entry = NULL;
+  buf->buf = NULL;
 }
 
 gboolean dt_imageio_lookup_makermodel(const char *maker, const char *model,

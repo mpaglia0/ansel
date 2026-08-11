@@ -55,7 +55,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #ifdef HAVE_CONFIG_H
-#include "common/pixelpipe_cache_alloc.h"
+#include "caches/pixelpipe_cache_alloc.h"
 #include "widgets/widget_settings.h"
 #include "common/conf.h"
 #include "config.h"
@@ -78,7 +78,7 @@
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
-#include "develop/pixelpipe_cache.h"
+#include "caches/pixelpipe_cache.h"
 #include "develop/tiling.h"
 
 #include "widgets/draw.h"

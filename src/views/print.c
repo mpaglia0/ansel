@@ -31,7 +31,7 @@
 /** this is the view for the print module.  */
 #include "common/cups_print.h"
 #include "common/printing.h"
-#include "common/image_cache.h"
+#include "caches/image_cache.h"
 #include "common/module_versioning.h"
 #include "common/selection.h"
 #include "control/control.h"
@@ -450,7 +450,7 @@ int try_enter(dt_view_t *self)
   }
 
   // this loads the image from db if needed:
-  const dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
+  const dt_image_t *img = dt_image_cache_get(imgid, 'r');
   // get image and check if it has been deleted from disk first!
 
   char imgfilename[PATH_MAX] = { 0 };
@@ -459,11 +459,11 @@ int try_enter(dt_view_t *self)
   if(!g_file_test(imgfilename, G_FILE_TEST_IS_REGULAR))
   {
     dt_control_log(_("image `%s' is currently unavailable"), img->filename);
-    dt_image_cache_read_release(dt_image_cache_get_global(), img);
+    dt_image_cache_read_release(img);
     return 1;
   }
   // and drop the lock again.
-  dt_image_cache_read_release(dt_image_cache_get_global(), img);
+  dt_image_cache_read_release(img);
 
   // we need to setup the selected image
   prt->pending_imgid = imgid;

@@ -52,7 +52,8 @@
 #include "gui/dtgtk/thumbtable_info.h"
 #include "common/collection.h"
 #include "common/history.h"
-#include "common/image_cache.h"
+#include "caches/image_cache.h"
+#include "database/image_repository.h"
 #include "common/hash.h"
 #include "common/selection.h"
 #include "common/times.h"
@@ -651,12 +652,12 @@ void _add_thumbnail_at_rowid(dt_thumbtable_t *table, const size_t rowid, const i
 {
   const int32_t imgid = table->lut[rowid].imgid;
   dt_image_t info;
-  dt_image_t *img = dt_image_cache_get(dt_image_cache_get_global(), imgid, 'r');
+  dt_image_t *img = dt_image_cache_get(imgid, 'r');
   if(IS_NULL_PTR(img)) return;
 
   // Take a private copy
   info = *img;
-  dt_image_cache_read_release(dt_image_cache_get_global(), img);
+  dt_image_cache_read_release(img);
 
   dt_thumbnail_t *thumb = NULL;
   gboolean new_item = TRUE;
@@ -981,11 +982,11 @@ static void _dt_image_info_changed_callback(gpointer instance, gpointer imgs, gp
     {
       // Refresh the cached LUT info from the image cache for write-driven updates
       // (ratings, color labels, etc.) while still keeping read paths cache-free.
-      const dt_image_t *img = dt_image_cache_testget(dt_image_cache_get_global(), imgid, 'r');
+      const dt_image_t *img = dt_image_cache_testget(imgid, 'r');
       if(img)
       {
         dt_thumbnail_resync_info(thumb, img);
-        dt_image_cache_read_release(dt_image_cache_get_global(), img);
+        dt_image_cache_read_release(img);
         dt_thumbnail_update_gui(thumb);
         _add_thumbnail_group_borders(table, thumb);
         gtk_widget_queue_draw(thumb->widget);
@@ -1036,6 +1037,7 @@ static void _dt_collection_lut(dt_thumbtable_t *table)
     dt_image_t info;
     dt_image_init(&info);
     dt_image_from_stmt(&info, stmt);
+    dt_image_derive_fields(&info);
 
 #ifndef NDEBUG
     dt_thumbtable_info_debug_assert_matches_cache(&info);

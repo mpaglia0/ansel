@@ -29,7 +29,7 @@
 
 #include "config.h"
 
-#include "common/cache.h"
+#include "caches/cache.h"
 #include "system/dtpthread.h"
 #include "system/macros.h"
 #include "system/mem_alloc.h"
@@ -449,6 +449,18 @@ int dt_cache_seed(dt_cache_t *cache, const uint32_t key, const void *data, size_
 
   dt_pthread_mutex_unlock(&cache->lock);
   return 0;
+}
+
+dt_cache_entry_t *dt_cache_entry_new_detached(void)
+{
+  return (dt_cache_entry_t *)calloc(1, sizeof(dt_cache_entry_t));
+}
+
+void dt_cache_entry_free_detached(dt_cache_entry_t *entry)
+{
+  if(IS_NULL_PTR(entry)) return;
+  dt_free_align(entry->data);
+  free(entry);
 }
 
 // clang-format off
