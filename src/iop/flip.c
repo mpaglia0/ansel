@@ -43,12 +43,13 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+#include "database/database.h"
+#include "database/history_repository.h"
 #include <assert.h>
 #include "system/openmp.h"
 #include "system/mem_alloc.h"
 #include "common/logging.h"
 #include "common/module_versioning.h"
-#include "common/database.h"
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
 #include <inttypes.h>
@@ -56,7 +57,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "common/debug.h"
 #include "imageio/imageio_core.h"
 #include "common/opencl.h"
 #include "develop/develop.h"
@@ -445,7 +445,7 @@ void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev
 void init_presets(dt_iop_module_so_t *self)
 {
   dt_iop_flip_params_t p = (dt_iop_flip_params_t){ ORIENTATION_NONE };
-  dt_database_start_transaction(dt_database_get_global());
+  dt_database_start_transaction();
 
   p.orientation = ORIENTATION_NULL;
   dt_gui_presets_add_generic(_("autodetect"), self->op,
@@ -476,7 +476,7 @@ void init_presets(dt_iop_module_so_t *self)
   dt_gui_presets_add_generic(_("rotate by 180 degrees"), self->op,
                              self->version(), &p, sizeof(p), 1, DEVELOP_BLEND_CS_NONE);
 
-  dt_database_release_transaction(dt_database_get_global());
+  dt_database_release_transaction();
 }
 
 void reload_defaults(dt_iop_module_t *self)
@@ -490,19 +490,14 @@ void reload_defaults(dt_iop_module_t *self)
   if(self->dev->image_storage.legacy_flip.user_flip != 0
      && self->dev->image_storage.legacy_flip.user_flip != 0xff)
   {
-    sqlite3_stmt *stmt;
-    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get_sqlite3_global(),
-                                "SELECT * FROM main.history WHERE imgid = ?1 AND operation = 'flip'", -1, &stmt,
-                                NULL);
-    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, self->dev->image_storage.id);
-    if(sqlite3_step(stmt) != SQLITE_ROW)
+    // The legacy flip bits only apply when the image has no flip history of its own.
+    if(!dt_history_repository_module_exists(self->dev->image_storage.id, "flip"))
     {
       // convert the old legacy flip bits to a proper parameter set:
       d->orientation
           = merge_two_orientations(dt_image_orientation(&self->dev->image_storage),
                                    (dt_image_orientation_t)(self->dev->image_storage.legacy_flip.user_flip));
     }
-    sqlite3_finalize(stmt);
   }
 }
 

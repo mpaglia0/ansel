@@ -69,7 +69,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include "common/database.h"
+#include "database/database.h"
 
 /* Set once by dt_mipmap_cache_init(); see the header. */
 static gboolean _verbose = FALSE;
@@ -295,7 +295,7 @@ static int dt_mipmap_cache_get_filename(gchar *mipmapfilename, size_t size)
   dt_loc_get_user_cache_dir(cachedir, sizeof(cachedir));
 
   // Build the mipmap filename fram hashing the path of the library DB
-  const gchar *dbfilename = dt_database_get_path(dt_database_get_global());
+  const gchar *dbfilename = dt_database_get_path();
 
   if(!strcmp(dbfilename, ":memory:"))
   {

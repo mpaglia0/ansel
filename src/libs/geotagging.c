@@ -46,8 +46,6 @@
 #include "widgets/togglebutton.h"
 #include "libs/lib.h"
 #include "widgets/gdkkeys.h"
-#include "common/database.h"
-#include "common/debug.h"
 #include "system/macros.h"
 #include "common/module_versioning.h"
 #include "common/file_location.h"
@@ -924,6 +922,11 @@ static void _preview_gpx_file(GtkWidget *widget, dt_lib_module_t *self)
   gtk_widget_destroy(dialog);
 }
 
+static gint _cmp_imgid_asc(gconstpointer a, gconstpointer b)
+{
+  return GPOINTER_TO_INT(a) - GPOINTER_TO_INT(b);
+}
+
 static void _setup_selected_images_list(dt_lib_module_t *self)
 {
   dt_lib_geotagging_t *d = (dt_lib_geotagging_t *)self->data;
@@ -939,13 +942,19 @@ static void _setup_selected_images_list(dt_lib_module_t *self)
   d->imgs = NULL;
   d->nb_imgs = 0;
 
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get_sqlite3_global(),
-                              "SELECT imgid FROM main.selected_images",
-                              -1, &stmt, NULL);
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  // selection.h reserves the raw "SELECT imgid FROM main.selected_images" for JOINs that fetch
+  // metadata in the same query; this loop reads its metadata from the image cache, so it is the
+  // other case and must iterate the selection.
+  //
+  // Sorted ascending, and that is load-bearing: the in-memory selection comes back in
+  // pick order, but the SQL scan this replaced yielded ascending imgid (the table's
+  // INTEGER PRIMARY KEY), and _refresh_images_displayed_on_track() collapses same-location
+  // images into one map marker by comparing each entry with its list NEIGHBOUR -- adjacency
+  // the deterministic order provided and click order does not.
+  GList *selected = g_list_sort(dt_selection_get_list(dt_selection_get_global()), _cmp_imgid_asc);
+  for(GList *l = selected; l; l = g_list_next(l))
   {
-    const int32_t imgid = sqlite3_column_int(stmt, 0);
+    const int32_t imgid = GPOINTER_TO_INT(l->data);
     const dt_image_t *cimg = dt_image_cache_get(imgid, 'r');
     char dt[DT_DATETIME_LENGTH];
     if(IS_NULL_PTR(cimg)) continue;
@@ -959,7 +968,7 @@ static void _setup_selected_images_list(dt_lib_module_t *self)
     d->imgs = g_list_prepend(d->imgs, img);
     d->nb_imgs++;
   }
-  sqlite3_finalize(stmt);
+  g_list_free(selected);   // shallow: the elements are the selection's own ints
 }
 
 static void _choose_gpx_callback(GtkWidget *widget, dt_lib_module_t *self)

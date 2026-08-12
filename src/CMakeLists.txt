@@ -71,7 +71,7 @@ FILE(GLOB SOURCE_FILES
   "math/splines.cpp"
   "common/curl_tools.c"
   "darktable.c"
-  "common/database.c"
+  "database/database.c"
   "common/datetime.c"
   "common/dbus.c"
   "common/dtpthread.c"
@@ -100,6 +100,17 @@ FILE(GLOB SOURCE_FILES
   "common/gpx.c"
   "common/image.c"
   "caches/image_cache.c"
+  "database/collection_query.c"
+  "database/colorlabel_repository.c"
+  "database/selection_repository.c"
+  "database/history_snapshot_repository.c"
+  "database/metadata_repository.c"
+  "database/film_repository.c"
+  "database/history_repository.c"
+  "database/style_repository.c"
+  "database/tag_repository.c"
+  "database/location_repository.c"
+  "database/preset_repository.c"
   "database/image_repository.c"
   "common/image_extensions.c"
   "common/imagebuf.c"
@@ -118,7 +129,7 @@ FILE(GLOB SOURCE_FILES
   "pixel/locallaplacian.c"
   "pixel/locallaplaciancl.c"
   "common/l10n.c"
-  "common/legacy_presets.c"
+  "database/legacy_presets.c"
   "pixel/lut3d.c"
   "gui/lut_viewer.c"
   "common/metadata.c"
@@ -589,7 +600,7 @@ if(USE_ICU)
   if(TARGET ICU::uc)
     target_link_libraries(ansel_deps INTERFACE ICU::uc ICU::i18n ICU::data)
     add_definitions(-DHAVE_ICU=1 -DSQLITE_CORE -DSQLITE_ENABLE_ICU)
-    list(APPEND SOURCES common/sqliteicu.c)
+    list(APPEND SOURCES database/sqliteicu.c)
   endif()
 endif()
 
