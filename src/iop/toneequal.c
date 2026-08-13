@@ -100,6 +100,7 @@
 #include "config.h"
 #include "widgets/widget_settings.h"
 #endif
+#include "develop/masks_gui.h"
 #include <assert.h>
 #include <math.h>
 #include <stdlib.h>
@@ -143,6 +144,9 @@
 #include "widgets/scroll_wrap.h"
 #include "widgets/widget_style.h"
 #include "gui/screen_metrics.h"
+
+#include "control/signal.h"
+#include "widgets/togglebutton.h"
 
 #ifdef _OPENMP
 #include <omp.h>

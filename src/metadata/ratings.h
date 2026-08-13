@@ -3,12 +3,17 @@
     Copyright (C) 2010-2011 Henrik Andersson.
     Copyright (C) 2010, 2012 johannes hanika.
     Copyright (C) 2012 Richard Wonka.
-    Copyright (C) 2013, 2019-2020 Pascal Obry.
-    Copyright (C) 2014-2015 Jérémy Rosen.
+    Copyright (C) 2013, 2020 Pascal Obry.
     Copyright (C) 2014, 2016 Tobias Ellinghaus.
-    Copyright (C) 2016 Roman Lebedev.
-    Copyright (C) 2021 Aldric Renaudin.
+    Copyright (C) 2018 Rick Yorgason.
+    Copyright (C) 2019-2020 Philippe Weyland.
+    Copyright (C) 2020 Aldric Renaudin.
+    Copyright (C) 2021 Diederik Ter Rahe.
+    Copyright (C) 2021 Hubert Kowalski.
     Copyright (C) 2022 Martin Bařinka.
+    Copyright (C) 2022 solarer.
+    Copyright (C) 2023, 2025 Aurélien PIERRE.
+    Copyright (C) 2025 Alynx Zhou.
     
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,25 +29,37 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef DT_COMMON_PRESETS_H
-#define DT_COMMON_PRESETS_H
+#ifndef DT_METADATA_RATINGS_H
+#define DT_METADATA_RATINGS_H
 
-#include <glib.h>
+#include <gtk/gtk.h>
+#include <stdint.h>
 
-/** save preset to file */
-void dt_presets_save_to_file(const int rowid, const char *preset_name, const char *filedir);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/** load preset from file */
-int dt_presets_import_from_file(const char *preset_path);
+#define DT_VIEW_RATINGS_MASK 0x7
+// first three bits of dt_view_image_over_t
 
-// does the module support autoapplying presets ?
-gboolean dt_presets_module_can_autoapply(const gchar *operation);
+/** get rating for the specified image */
+int dt_ratings_get(const int32_t imgid);
 
-#endif // DT_COMMON_PRESETS_H
+/** apply rating to the specified image */
+void dt_ratings_apply_on_image(const int32_t imgid, const int rating, const gboolean single_star_toggle,
+                               const gboolean undo_on, const gboolean group_on);
+
+/** apply rating to all images in the list */
+void dt_ratings_apply_on_list(GList *list, const int rating, const gboolean undo_on);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // DT_METADATA_RATINGS_H
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

@@ -39,11 +39,13 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "develop/masks.h"
+#include "develop/masks_gui.h"
 #include "common/logging.h"
 #include "system/macros.h"
 #include "common/module_versioning.h"
 #include "control/control.h"
 #include "develop/blend.h"
+#include "develop/blend_gui.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "widgets/draw.h"
@@ -53,6 +55,8 @@
 #include "views/view.h"
 #include "widgets/scroll_wrap.h"
 
+#include "widgets/togglebutton.h"
+#include "control/signal.h"
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif

@@ -41,7 +41,7 @@
 #include "control/jobs/control_jobs.h"
 #include "system/macros.h"
 #include "common/module_versioning.h"
-#include "common/metadata.h"
+#include "metadata/metadata.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/dev_snapshot.h"
@@ -56,6 +56,7 @@
 #include "widgets/scroll_wrap.h"
 #include "widgets/widget_settings.h"
 #include "widgets/widget_style.h"
+#include "control/signal.h"
 
 DT_MODULE(1)
 

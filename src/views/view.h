@@ -52,14 +52,14 @@
 #include "system/atomic.h"
 #include "system/dtpthread.h"
 
-#include "common/history.h"
+#include "history/history.h"
 #ifdef HAVE_PRINT
 #include "common/cups_print.h"
 #include "common/printing.h"
 #endif
 #ifdef HAVE_MAP
-#include "common/geo.h"
-#include "common/map_locations.h"
+#include "metadata/geo.h"
+#include "metadata/map_locations.h"
 #include <osm-gps-map.h>
 #endif
 #include <cairo.h>
@@ -194,8 +194,9 @@ typedef struct dt_view_manager_t
   // images currently active in the main view (there can be more than 1 in culling)
   GList *active_images;
 
-  // copy/paste history structure
-  dt_history_copy_item_t copy_paste;
+  // the copy/paste history clipboard used to live here; the view manager never touched
+  // it, so it is now file-static in common/history_actions.c behind
+  // dt_history_copy_paste_get(), and that file no longer includes views/view.h
 
   // The imgid of the image for which we currently show the image info
   int32_t image_info_id;

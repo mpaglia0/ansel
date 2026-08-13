@@ -67,9 +67,10 @@
 #include "common/times.h"
 #include "common/paths.h"
 #include "caches/pixelpipe_cache_alloc.h"
-#include "common/exif.h"
+#include "common/xmp_sidecar.h"
+#include "metadata/exif.h"
 #include "caches/image_cache.h"
-#include "common/history.h"
+#include "history/history.h"
 #include "common/image_extensions.h"
 #include "imageio/imageio_core.h"
 #include "imageio/imageio_module.h"
@@ -104,7 +105,6 @@
 #include "common/styles.h"
 #include "common/conf.h"
 #include "control/control.h"
-#include "develop/blend.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 
@@ -124,6 +124,7 @@
 #include <string.h>
 #include <strings.h>
 #include "imageio/imageio_profile.h"
+#include "control/signal.h"
 
 /**
  * @brief Map Exiv2 preview MIME types to decoder format identifiers.

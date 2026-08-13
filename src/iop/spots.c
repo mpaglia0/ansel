@@ -45,6 +45,7 @@
 #include "caches/pixelpipe_cache_alloc.h"
 #include "config.h"
 #endif
+#include "develop/masks_gui.h"
 #include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
@@ -52,6 +53,7 @@
 #include "common/module_versioning.h"
 #include "control/control.h"
 #include "develop/blend.h"
+#include "develop/blend_gui.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/masks.h"

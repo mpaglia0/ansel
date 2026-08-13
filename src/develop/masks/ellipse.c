@@ -33,6 +33,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+#include "control/control.h"
 #include "system/macros.h"
 #include "system/openmp.h"
 #include "common/logging.h"
@@ -41,6 +42,8 @@
 #include "common/conf.h"
 #include "develop/imageop.h"
 #include "develop/masks.h"
+#include "develop/masks_gui.h"
+#include "develop/masks/masks_functions.h"
 #include "math/openmp_maths.h"
 
 

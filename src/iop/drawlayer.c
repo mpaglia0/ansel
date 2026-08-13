@@ -27,6 +27,7 @@
 #include "common/hash.h"
 #include "config.h"
 #endif
+#include "develop/masks_gui.h"
 
 #include "widgets/bauhaus.h"
 #include "common/colorspaces_inline_conversions.h"
@@ -38,7 +39,6 @@
 #include "common/conf.h"
 #include "control/control.h"
 #include "control/jobs.h"
-#include "develop/blend.h"
 #include "develop/dev_history.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
@@ -159,6 +159,7 @@ typedef struct drawlayer_wait_dialog_t
 
 #include "drawlayer/conf.c"
 #include "drawlayer/coordinates.c"
+#include "control/signal.h"
 
 /** @brief Convert one display-space brush color snapshot to pipeline space. */
 static void _brush_pipeline_color_from_display(dt_iop_module_t *self, const float display_rgb[3], float pipeline_rgb[3])

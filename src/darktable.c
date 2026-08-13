@@ -108,15 +108,15 @@
 #include "common/collection.h"
 #include "gui/common/database_gui.h"
 #include "colorprofiles/colorspaces.h"
-#include "common/colorlabels.h"
+#include "metadata/colorlabels.h"
 #include "darktable.h"
 #include "common/anonymous_ids.h"
 #include "system/capabilities.h"
 #include "common/global_mutexes.h"
 #include "system/sys_resources.h"
 #include "common/datetime.h"
-#include "common/exif.h"
-#include "common/history.h"
+#include "metadata/exif.h"
+#include "history/history.h"
 #include "database/history_repository.h"
 #include "common/pwstorage/pwstorage.h"
 #include "common/selection.h"
@@ -140,13 +140,20 @@
 #include "imageio/imageio_module.h"
 #include "develop/iop_order.h"
 #include "common/l10n.h"
-#include "common/metadata.h"
+#include "metadata/metadata.h"
+#include "common/image_notify.h"
+#include "develop/dev_history_gui.h"
+#include "gui/import.h"
+#include "develop/pipeline_notify.h"
+#include "history/notify.h"
+#include "history/presets.h"
+#include "metadata/notify.h"
 #include "caches/mipmap_cache.h"
 #include "common/noiseprofiles.h"
 #include "common/opencl.h"
 #include "common/points.h"
 #include "system/resource_limits.h"
-#include "common/tags.h"
+#include "metadata/tags.h"
 #include "common/styles.h"
 #include "common/undo.h"
 #include "system/fp_mode.h"
@@ -719,6 +726,105 @@ static void _database_settings_from_conf(void)
 static void _database_renamed(const char *new_library_name)
 {
   dt_conf_set_string("database", new_library_name);
+}
+
+static void _metadata_tags_changed(void)
+{
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_TAG_CHANGED);
+}
+
+/* src/metadata states what it did; where that appears is ours to decide. Installed
+ * unconditionally: dt_control_log()/dt_toast_log() are themselves no-ops without a GUI, so
+ * this keeps the headless behaviour the direct calls had. */
+static void _metadata_notify(const dt_metadata_notice_t kind, const char *message)
+{
+  if(kind == DT_METADATA_NOTICE_TOAST)
+    dt_toast_log("%s", message);
+  else
+    dt_control_log("%s", message);
+}
+
+/* The pipeline worker names what it is chewing on; the banner and its repaint are ours.
+ * Called from worker threads, as the calls it replaces were -- dt_set_main_message()
+ * under log_mutex and the centre redraw are both worker-safe. */
+static void _pipeline_busy(const char *message_or_null)
+{
+  dt_control_t *const control = dt_control_get_global();
+  dt_pthread_mutex_lock(&control->log_mutex);
+  dt_set_main_message(message_or_null ? g_strdup(message_or_null) : NULL);
+  dt_pthread_mutex_unlock(&control->log_mutex);
+  dt_control_queue_redraw_center();
+}
+
+static void _pipeline_message(const char *message)
+{
+  dt_control_log("%s", message);
+}
+
+/* The geotag list is copied here, at the raise site, exactly where the old call sites
+ * copied it: the signal takes ownership of what it is given. */
+static void _metadata_geotags_changed(const GList *imgs)
+{
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_GEOTAG_CHANGED,
+                                g_list_copy((GList *)imgs), 0);
+}
+
+static void _image_imported(const int32_t imgid)
+{
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_IMAGE_IMPORT, imgid);
+}
+
+/* History, styles and presets state what happened; turning that into a signal is ours. */
+static void _history_notify(const char *message)
+{
+  dt_control_log("%s", message);
+}
+
+static void _history_toast(const char *message)
+{
+  dt_toast_log("%s", message);
+}
+
+static void _history_changed(const dt_history_change_t what)
+{
+  switch(what)
+  {
+    case DT_HISTORY_CHANGE_TAGS:
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_TAG_CHANGED);
+      break;
+    case DT_HISTORY_CHANGE_STYLES:
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_STYLE_CHANGED);
+      break;
+    case DT_HISTORY_CHANGE_DEVELOP:
+      DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_DEVELOP_HISTORY_CHANGE);
+      break;
+  }
+}
+
+/* The copy is made here, at the raise site, exactly where the call site used to make it:
+ * the signal takes ownership of the list it is given, and the caller keeps its own. */
+static void _history_images_changed(const GList *imgs)
+{
+  DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_IMAGE_INFO_CHANGED,
+                                g_list_copy((GList *)imgs));
+}
+
+/* Only the side that loaded the modules knows what an operation is called. */
+static const char *_history_operation_name(const char *operation)
+{
+  return dt_iop_get_localized_name(operation);
+}
+
+/* Only the side of the application that owns the panels can answer this. */
+static gboolean _presets_can_autoapply(const gchar *operation)
+{
+  for(const GList *lib_modules = dt_lib_get_global()->plugins; lib_modules;
+      lib_modules = g_list_next(lib_modules))
+  {
+    dt_lib_module_t *lib_module = (dt_lib_module_t *)lib_modules->data;
+    if(!strcmp(lib_module->plugin_name, operation)) return dt_lib_presets_can_autoapply(lib_module);
+  }
+  return TRUE;
 }
 
 /* The two parameters are the GTK signal signature, not ours; neither carries anything we
@@ -1304,6 +1410,11 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
   // SQL layer never reads conf itself and "when does this take effect" has one answer.
   _database_settings_from_conf();
   dt_database_set_renamed_handler(_database_renamed);
+  dt_metadata_set_notify_handler(_metadata_notify);
+  dt_history_set_message_handler(_history_notify);
+  dt_history_set_toast_handler(_history_toast);
+  dt_presets_set_autoapply_resolver(_presets_can_autoapply);
+  dt_history_set_operation_name_resolver(_history_operation_name);
 
   gchar *configured_library = dt_conf_get_string("database");
   const dt_database_params_t db_params = { .alternative = dbfilename_from_command,
@@ -1398,6 +1509,21 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
 
   // Initialize the signal system
   darktable.signals = dt_control_signal_init();
+
+  /* src/metadata reports that the tag vocabulary changed; turning that into the GTK signal
+   * its consumers already listen for is ours. Installed HERE, not with the other handlers
+   * further up: the signal system does not exist until the line above, and nothing can
+   * edit a tag before it does. */
+  dt_metadata_set_tags_changed_handler(_metadata_tags_changed);
+  dt_dev_history_gui_init();
+  dt_gui_import_init_handlers();
+  dt_metadata_set_geotags_changed_handler(_metadata_geotags_changed);
+  dt_image_notify_set_imported_handler(_image_imported);
+  dt_pipeline_set_message_handler(_pipeline_message);
+  dt_pipeline_set_busy_handler(_pipeline_busy);
+  // Same reason for these two: they raise signals, so they wait for the signal system.
+  dt_history_set_changed_handler(_history_changed);
+  dt_history_set_images_changed_handler(_history_images_changed);
   // Critical: ensure image cache gets refreshed BEFORE any other IMAGE_INFO_CHANGED handlers.
   // This handler reloads dt_image_t from DB so all downstream callbacks see fresh metadata.
   dt_image_cache_connect_info_changed_first(darktable.signals);

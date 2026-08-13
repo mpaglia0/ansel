@@ -46,6 +46,7 @@
 #include "common/conf.h"
 #include "config.h"
 #endif
+#include "control/control.h"
 #include "widgets/bauhaus.h"
 #include "system/macros.h"
 #include "system/openmp.h"
@@ -63,9 +64,11 @@
 #include "common/imagebuf.h"
 #include "common/opencl.h"
 #include "develop/blend.h"
+#include "develop/blend_gui.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "develop/masks.h"
+#include "develop/masks_gui.h"
 #include "develop/tiling.h"
 #include "gui/actions/menu.h"
 #include "iop/iop_api.h"
@@ -74,6 +77,7 @@
 #include <stdlib.h>
 #include "widgets/label.h"
 #include "gui/screen_metrics.h"
+#include "control/signal.h"
 
 // this is the version of the modules parameters,
 // and includes version information about compile-time dt

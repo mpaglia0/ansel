@@ -298,9 +298,55 @@ elif [ "${database_conf_debug_now}" -lt "${database_conf_debug_baseline}" ] \
   findings=$((findings + 1))
 fi
 
+# 7. src/metadata is closed: what a photograph says about itself, and nothing about the
+#    application showing it.
+#
+#   upcalls  : includes from a higher layer. ZERO, and it is a boundary, not a ratchet --
+#              the module reached this state in the commit that created it. Ratings and
+#              colour labels used to call dt_control_log()/dt_toast_log() and tags used to
+#              raise DT_SIGNAL_TAG_CHANGED, all of which put control/ (layer 3) inside a
+#              layer-1 module. They go out through the handlers in metadata/notify.h now,
+#              installed by src/darktable.c. A new one belongs there too; where a message
+#              appears is not a decision this module can make, and a module that cannot be
+#              built without the control loop cannot be tested without it either.
+metadata_upcalls_baseline=0
+
+metadata_upcalls_now=$(grep -rcE '^#include "(control|gui|libs|views|iop|imageio|widgets|develop|apps)/' \
+                       src/metadata/ 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+
+echo "metadata:      ${metadata_upcalls_now} includes from a higher layer (baseline ${metadata_upcalls_baseline})."
+
+if [ "${metadata_upcalls_now}" -gt "${metadata_upcalls_baseline}" ]; then
+  echo "metadata: the module reached up into the application. Outbound notifications go"
+  echo "          through metadata/notify.h -- state the fact, let the caller present it."
+  findings=$((findings + 1))
+fi
+
+
+# 8. src/history is closed: the history stack, styles and presets. It reached up for three
+#    different reasons and each was inverted rather than tolerated -- dt_control_log() and
+#    the signals through history/notify.h, dt_lib_presets_can_autoapply() through the
+#    resolver in history/presets.h, and dt_iop_get_localized_name() through the one in
+#    history/history.h. A history item holds a dt_iop_module_t *, so the pipeline half of
+#    this code genuinely belongs at layer 5 and stays there; what is in this directory is
+#    the half that does not.
+history_upcalls_baseline=0
+
+history_upcalls_now=$(grep -rcE '^#include "(control|gui|libs|views|iop|imageio|widgets|develop|apps)/' \
+                      src/history/ 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+
+echo "history:       ${history_upcalls_now} includes from a higher layer (baseline ${history_upcalls_baseline})."
+
+if [ "${history_upcalls_now}" -gt "${history_upcalls_baseline}" ]; then
+  echo "history: the module reached up into the application. Messages and notifications go"
+  echo "         through history/notify.h; a question only the application can answer gets"
+  echo "         a resolver, as presets.h and history.h already do."
+  findings=$((findings + 1))
+fi
+
 if [ "${findings}" -gt 0 ]; then
   exit 1
 fi
 
-echo "OK: src/system is closed, src/widgets does not reach into gui/; colorprofiles, opencl, caches and database held."
+echo "OK: src/system is closed, src/widgets does not reach into gui/; colorprofiles, opencl, caches, database, metadata and history held."
 exit 0

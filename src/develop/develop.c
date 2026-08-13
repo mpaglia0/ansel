@@ -68,11 +68,12 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "widgets/widget_settings.h"
 #include "system/atomic.h"
-#include "common/history.h"
+#include "history/history.h"
 #include "caches/image_cache.h"
 #include "caches/mipmap_cache.h"
-#include "common/tags.h"
+#include "metadata/tags.h"
 #include "common/conf.h"
 #include "control/control.h"
 #include "control/signal.h"
@@ -146,12 +147,6 @@ void dt_dev_init(dt_develop_t *dev, int32_t gui_attached)
     dt_dev_pixelpipe_init(dev->pipe, dev);
     dt_dev_pixelpipe_init_preview(dev->preview_pipe, dev);
     dt_dev_pixelpipe_init_preview(dev->virtual_pipe, dev);
-    dev->histogram_pre_tonecurve = (uint32_t *)calloc(4 * 256, sizeof(uint32_t));
-    dev->histogram_pre_levels = (uint32_t *)calloc(4 * 256, sizeof(uint32_t));
-
-    // FIXME: these are uint32_t, setting to -1 is confusing
-    dev->histogram_pre_tonecurve_max = -1;
-    dev->histogram_pre_levels_max = -1;
   }
 
   dt_dev_set_backbuf(&dev->raw_histogram, 0, 0, 0, -1, -1);
@@ -287,10 +282,6 @@ void dt_dev_cleanup(dt_develop_t *dev)
   }
   g_list_free_full(dev->iop_order_list, dt_free_gpointer);
   dev->iop_order_list = NULL;
-
-
-  dt_free(dev->histogram_pre_tonecurve);
-  dt_free(dev->histogram_pre_levels);
 
   if(dev->color_picker.primary_sample)
   {

@@ -58,7 +58,7 @@ http://www.youtube.com/watch?v=JVoUgR6bhBc
 #include "system/target_clones.h"
 #include "system/mem_alloc.h"
 #include "common/module_versioning.h"
-#include "common/exif.h"
+#include "metadata/exif.h"
 #include "develop/blend.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
@@ -70,6 +70,7 @@ http://www.youtube.com/watch?v=JVoUgR6bhBc
 
 //#include <gtk/gtk.h>
 #include <stdlib.h>
+#include "control/signal.h"
 
 // these are not in a state to be useful. but they look nice. too bad i couldn't map the enhanced mode with
 // negative values to the wheels :(

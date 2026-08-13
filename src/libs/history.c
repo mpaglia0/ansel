@@ -50,6 +50,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "widgets/widget_settings.h"
 #include "common/history_actions.h"
 #include "gui/common/history_actions_gui.h"
 #include "system/macros.h"
@@ -57,6 +58,7 @@
 #include "common/styles.h"
 #include "develop/develop.h"
 #include "develop/masks.h"
+#include "develop/blend_gui.h"
 
 #include "gui/application.h"
 #include "libs/lib.h"
@@ -64,6 +66,7 @@
 #include <complex.h>
 #include "widgets/label.h"
 #include "widgets/scroll_wrap.h"
+#include "control/signal.h"
 
 DT_MODULE(1)
 

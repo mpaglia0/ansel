@@ -37,6 +37,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "widgets/draw.h"
+#include "control/control.h"
 #include "common/conf.h"
 #include "caches/mipmap_cache.h"
 #include <glib.h>
@@ -48,13 +50,13 @@
 #include "caches/image_cache.h"
 #include "common/logging.h"
 #include "system/macros.h"
-#include "common/metadata.h"
+#include "metadata/metadata.h"
 #include "common/module_versioning.h"
 #include "common/pdf.h"
 #include "colorprofiles/printprof.h"
 #include "common/printing.h"
 #include "common/styles.h"
-#include "common/tags.h"
+#include "metadata/tags.h"
 #include "common/usermanual_url.h"
 #include "common/utility.h"
 #include "control/jobs.h"
@@ -67,6 +69,8 @@
 #include <glib/gstdio.h>
 #include "widgets/label.h"
 #include "imageio/imageio_profile.h"
+#include "widgets/togglebutton.h"
+#include "control/signal.h"
 
 DT_MODULE(4)
 

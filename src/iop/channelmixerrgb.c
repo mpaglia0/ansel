@@ -47,6 +47,7 @@
 #include "config.h"
 #endif
 #include "widgets/bauhaus.h"
+#include "widgets/collapsible_section.h"
 #include "system/macros.h"
 #include "system/openmp.h"
 #include "system/target_clones.h"
@@ -89,6 +90,7 @@
 #include "widgets/label.h"
 #include "widgets/notebook.h"
 #include "gui/screen_metrics.h"
+#include "control/signal.h"
 
 DT_MODULE_INTROSPECTION(3, dt_iop_channelmixer_rgb_params_t)
 
