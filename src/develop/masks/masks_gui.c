@@ -2183,7 +2183,8 @@ gboolean dt_masks_form_exit_creation(dt_iop_module_t *module, dt_masks_form_gui_
       }
 
       dt_masks_iop_update(creation_module);
-      dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)creation_module->blend_data;
+      dt_iop_gui_blend_data_t *blend_data
+          = creation_module->gui ? (dt_iop_gui_blend_data_t *)creation_module->gui->blend_data : NULL;
       if(!IS_NULL_PTR(dev) && !IS_NULL_PTR(dev->form_gui))
         dev->form_gui->edit_mode = DT_MASKS_EDIT_FULL;
       if(!IS_NULL_PTR(blend_data) && GTK_IS_TOGGLE_BUTTON(blend_data->masks_edit))
@@ -3375,9 +3376,9 @@ void dt_masks_reset_form_gui(dt_develop_t *dev)
   dt_masks_shape_buttons_deactivate_all(NULL);
   dt_iop_module_t *module = dev->gui_module;
   if(!IS_NULL_PTR(module) && (module->flags() & IOP_FLAGS_SUPPORTS_BLENDING) && !(module->flags() & IOP_FLAGS_NO_MASKS)
-    && !IS_NULL_PTR(module->blend_data))
+    && !IS_NULL_PTR(module->gui) && !IS_NULL_PTR(module->gui->blend_data))
   {
-    dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->blend_data;
+    dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->gui->blend_data;
     blend_data->masks_shown = DT_MASKS_EDIT_OFF;
     if(!IS_NULL_PTR(blend_data->masks_edit))
       gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(blend_data->masks_edit), 0);
@@ -3391,9 +3392,9 @@ void dt_masks_reset_show_masks_icons(dt_develop_t *dev)
   {
     dt_iop_module_t *module = (dt_iop_module_t *)module_node->data;
     if(module && (module->flags() & IOP_FLAGS_SUPPORTS_BLENDING) && !(module->flags() & IOP_FLAGS_NO_MASKS)
-    && !IS_NULL_PTR(module->blend_data))
+    && !IS_NULL_PTR(module->gui) && !IS_NULL_PTR(module->gui->blend_data))
     {
-      dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->blend_data;
+      dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->gui->blend_data;
       blend_data->masks_shown = DT_MASKS_EDIT_OFF;
       if(!IS_NULL_PTR(blend_data->masks_edit))
       {
@@ -3460,7 +3461,7 @@ void dt_masks_iop_combo_populate(GtkWidget *widget, void *data)
   // we ensure that the module has focus
   dt_iop_module_t *module = (dt_iop_module_t *)data;
   dt_iop_request_focus(module);
-  dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->blend_data;
+  dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->gui->blend_data;
 
   // we determine a higher approx of the entry number
   const guint forms_count = g_list_length(module->dev->forms);
@@ -3542,7 +3543,7 @@ void dt_masks_iop_combo_populate(GtkWidget *widget, void *data)
 void dt_masks_iop_value_changed_callback(GtkWidget *widget, struct dt_iop_module_t *module)
 {
   // we get the corresponding value
-  dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->blend_data;
+  dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->gui->blend_data;
 
   int selection_index = dt_bauhaus_combobox_get(blend_data->masks_combo);
   if(selection_index == 0) return;
@@ -3639,7 +3640,7 @@ gboolean dt_masks_form_get_gravity_center(dt_develop_t *dev, const dt_masks_form
  * @brief Center the darkroom ROI on a mask form gravity center.
  *
  * @details Mask forms store their gravity center in normalized RAW coordinates,
- * while `dev->roi.x` and `dev->roi.y` address the processed image. Transforming
+ * while `dt_dev_viewport_center_x(dev)` and `dt_dev_viewport_center_y(dev)` address the processed image. Transforming
  * through absolute RAW and processed-image coordinates keeps the center aligned
  * with the final image after distortion modules, then the ROI clamp preserves
  * the same bounds used by manual panning.
@@ -3658,9 +3659,8 @@ int dt_masks_center_view_on_form(dt_develop_t *dev, const dt_masks_form_t *mask_
   if(!dt_dev_coordinates_raw_abs_to_image_abs(dev, center, 1)) return 1;
   dt_dev_coordinates_image_abs_to_image_norm(dev, center, 1);
 
-  dev->roi.x = center[0];
-  dev->roi.y = center[1];
-  dt_dev_check_zoom_pos_bounds(dev, &dev->roi.x, &dev->roi.y, NULL, NULL);
+  dt_dev_viewport_set_center(dev, center[0], center[1]);
+  dt_dev_clamp_viewport_center(dev);
   dt_dev_pixelpipe_change_zoom_main(dev);
 
   return 0;
@@ -3971,8 +3971,9 @@ void dt_masks_set_source_pos_initial_state(dt_masks_form_gui_t *mask_gui, const 
 void dt_masks_set_source_pos_initial_value(dt_masks_form_gui_t *mask_gui, dt_masks_form_t *mask_form)
 {
   dt_develop_t *dev = mask_gui->dev;
-  const float raw_width = dev->roi.raw_width;
-  const float raw_height = dev->roi.raw_height;
+  const dt_dev_image_geometry_t geometry = dt_dev_geometry_snapshot(dev);
+  const float raw_width = geometry.raw_width;
+  const float raw_height = geometry.raw_height;
 
   const float xx = mask_gui->pos[0];
   const float yy = mask_gui->pos[1];
@@ -4045,8 +4046,9 @@ void dt_masks_calculate_source_pos_origin(dt_masks_form_gui_t *mask_gui, const f
 {
   float source_x = 0.0f;
   float source_y = 0.0f;
-  const float raw_width = mask_gui->dev->roi.raw_width;
-  const float raw_height = mask_gui->dev->roi.raw_height;
+  const dt_dev_image_geometry_t geometry = dt_dev_geometry_snapshot(mask_gui->dev);
+  const float raw_width = geometry.raw_width;
+  const float raw_height = geometry.raw_height;
   if(mask_gui->source_pos_type == DT_MASKS_SOURCE_POS_RELATIVE)
   {
     source_x = xpos + mask_gui->pos_source[0];
@@ -4202,7 +4204,7 @@ void apply_operation(struct dt_masks_form_group_t *group_entry, const dt_masks_s
 void dt_masks_set_edit_mode(struct dt_iop_module_t *module, dt_masks_edit_mode_t value)
 {
   if(IS_NULL_PTR(module)) return;
-  dt_iop_gui_blend_data_t *blend_data = (dt_iop_gui_blend_data_t *)module->blend_data;
+  dt_iop_gui_blend_data_t *blend_data = module->gui ? (dt_iop_gui_blend_data_t *)module->gui->blend_data : NULL;
   if(IS_NULL_PTR(blend_data)) return;
 
   dt_masks_form_t *group_form = NULL;

@@ -188,8 +188,9 @@ static void _picker_get_module_bounds_image_norm(const dt_develop_t *dev,
   bounds[3] = 1.0f;
 
   if(IS_NULL_PTR(dev) || IS_NULL_PTR(dev->preview_pipe) || IS_NULL_PTR(active_module)) return;
-  const float processed_width = dev->roi.processed_width;
-  const float processed_height = dev->roi.processed_height;
+  const dt_dev_image_geometry_t geometry = dt_dev_geometry_snapshot(dev);
+  const float processed_width = geometry.processed_width;
+  const float processed_height = geometry.processed_height;
   if(processed_width <= 0.0f || processed_height <= 0.0f) return;
 
   const dt_dev_pixelpipe_iop_t *const piece = dt_dev_pixelpipe_get_module_piece(dev->preview_pipe,
@@ -227,8 +228,9 @@ static void _picker_initialize_geometry_raw(dt_iop_color_picker_t *picker, dt_de
   float bounds[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
   _picker_get_module_bounds_image_norm(dev, picker->module, bounds);
 
-  const float processed_width = dev->roi.processed_width;
-  const float processed_height = dev->roi.processed_height;
+  const dt_dev_image_geometry_t geometry = dt_dev_geometry_snapshot(dev);
+  const float processed_width = geometry.processed_width;
+  const float processed_height = geometry.processed_height;
   if(processed_width <= 0.0f || processed_height <= 0.0f) return;
   // Fixed border inset in scale-1 image pixels, then converted to image-norm.
   // Keep this explicit here so the caller directly controls default picker coverage.
@@ -761,8 +763,8 @@ static gboolean _color_picker_callback_button_press(GtkWidget *button, GdkEventB
     if(prior_picker->module) prior_picker->module->request_color_pick = DT_REQUEST_COLORPICK_OFF;
   }
 
-  if(module && module->off)
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(module->off), TRUE);
+  GtkWidget *off = dt_iop_gui_get_off(module);
+  if(off) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(off), TRUE);
 
   const GdkModifierType state = !IS_NULL_PTR(e) ? e->state : dt_key_modifier_state();
   const gboolean ctrl_key_pressed = dt_modifier_is(state, GDK_CONTROL_MASK) || (!IS_NULL_PTR(e) && e->button == 3);
