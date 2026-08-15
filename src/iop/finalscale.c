@@ -177,7 +177,10 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelp
   // Darkroom pipes only. Depending on ROI zoom level, we may need to enable finalscale so
   // the pipeline runs at most at 100%, for pixel-level accuracy, and we upscale at the end.
   // This is important for consistency with exports.
-  const float darkroom_zoom = dt_dev_viewport_scaling(pipe->dev) * dt_dev_roi_request_natural_scale(pipe->dev);
+  // The pipe's latched snapshot, not a live read off dev: this runs on the pipeline thread, and
+  // piece->enabled must agree with the ROI the same iteration planned.
+  const dt_dev_roi_request_t request = dt_dev_roi_request_of_pipe(pipe);
+  const float darkroom_zoom = request.scaling * request.natural_scale;
   piece->enabled = (darkroom_zoom > 1.f)
     || (dt_conf_get_int("darkroom/render_size") != 1 && darkroom_zoom != 1.f);
 }
