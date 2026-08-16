@@ -52,6 +52,7 @@
 #endif
 
 #include "control/jobs.h"
+#include "control/user_message.h"   // the message API moved out; still supplied here
 #include "control/progress.h"
 #include "libs/lib.h"
 #include <gtk/gtk.h>
@@ -92,10 +93,13 @@ void *dt_control_expose(void *voidptr);
 void dt_control_button_pressed(double x, double y, double pressure, int which, int type, uint32_t state);
 
 /** Message painted over the main preview while the pipeline is working. Written by the
- * pipeline (develop/pixelpipe_hb.c), rendered by control/control.c; the storage belongs
- * to the orchestrator. dt_set_main_message() TAKES OWNERSHIP of `message` and frees the
- * previous one; pass NULL to clear. */
-const char *dt_get_main_message(void);
+ * pipeline (develop/pixelpipe_hb.c) from WORKER threads, rendered by control/control.c on the
+ * GUI thread; the storage belongs to the orchestrator and carries its own lock.
+ *
+ * dt_set_main_message() TAKES OWNERSHIP of `message` and frees the previous one; pass NULL to
+ * clear. The reader gets a COPY it must free -- there is no safe way to lend the pointer, since
+ * the next write frees it and the writer is on another thread. */
+char *dt_get_main_message_copy(void);
 void dt_set_main_message(char *message);
 void dt_control_button_released(double x, double y, int which, uint32_t state);
 void dt_control_mouse_moved(double x, double y, double pressure, int which);
@@ -105,13 +109,6 @@ void dt_control_key_pressed(GdkEventKey *event);
 void dt_control_mouse_leave();
 void dt_control_mouse_enter();
 gboolean dt_control_configure(GtkWidget *da, GdkEventConfigure *event, gpointer user_data);
-void dt_control_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
-void dt_toast_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
-void dt_toast_markup_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
-void dt_control_log_busy_enter();
-void dt_control_toast_busy_enter();
-void dt_control_log_busy_leave();
-void dt_control_toast_busy_leave();
 void dt_control_draw_busy_msg(cairo_t *cr, int width, int height);
 // disable the possibility to change the cursor shape with dt_control_change_cursor
 void dt_control_forbid_change_cursor();
