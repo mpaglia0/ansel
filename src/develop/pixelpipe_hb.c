@@ -418,6 +418,23 @@ int dt_dev_pixelpipe_init_preview(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
   return res;
 }
 
+/**
+ * @brief Set the drawn-mask rasterisation step for the frame this pipe is about to run.
+ *
+ * @param step Maximum distance, in image pixels, between consecutive samples of a mask outline.
+ * Clamped to at least 1 (pixel accuracy).
+ *
+ * @details Called by the darkroom, which is the only place that knows both the zoom level and
+ * the user's preference. Nothing else raises it, so a pipe that is never told -- every headless
+ * export, thumbnail and snapshot -- keeps the pixel-accurate default it was initialised with.
+ */
+void dt_dev_pixelpipe_set_mask_rasterization_step(dt_dev_pixelpipe_t *pipe, const int step)
+{
+  if(IS_NULL_PTR(pipe)) return;
+
+  pipe->mask_rasterization_step = MAX(1, step);
+}
+
 int dt_dev_pixelpipe_init(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
 {
   const int res = dt_dev_pixelpipe_init_cached(pipe);
@@ -438,6 +455,16 @@ int dt_dev_pixelpipe_init_cached(dt_dev_pixelpipe_t *pipe)
   pipe->roi_request.value = dt_dev_roi_request_neutral();
   pipe->devid = -1;
   pipe->last_devid = -1;
+
+  /* Pixel accuracy, the safe default: only the darkroom ever raises this, from the GUI thread.
+   * It is set HERE, in the one function every pipe init calls, and not in each of them: the
+   * per-type version of this missed dt_dev_pixelpipe_init_dummy(), which gui/dtgtk/focus.h uses
+   * for the focus-ring overlay, and left it at the memset's 0. Zero does not divide by anything
+   * -- `use_sparse' is `step > 1' and the interpolation loop is `for(k = 1; k < step; k++)', so
+   * both are simply skipped -- but it makes _is_within_pxl_threshold() test `< 0', which is
+   * never true, so the outline subdivides until `tmax - tmin < 0.0001' instead of stopping at
+   * one pixel: thousands of samples per segment, on an overlay that wanted the cheap path. */
+  pipe->mask_rasterization_step = 1;
   dt_dev_pixelpipe_set_changed(pipe, DT_DEV_PIPE_UNCHANGED);
   dt_dev_pixelpipe_set_hash(pipe, DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_dev_pixelpipe_set_history_hash(pipe, DT_PIXELPIPE_CACHE_HASH_INVALID);

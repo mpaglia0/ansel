@@ -54,6 +54,7 @@
 #include "common/startup_progress.h"
 #include "common/utility.h"   // dt_util_str_replace, used under __APPLE__ only
 #include "system/capabilities.h"
+#include "system/sys_resources.h"
 #include "pixel/bilateralcl.h"
 #include "darktable.h"
 #include "common/dlopencl.h"
@@ -1735,7 +1736,10 @@ void dt_opencl_reserve_device_by_id(const int devid)
   dt_opencl_t *cl = _opencl;
   if(!cl->inited) return;
   if(devid < 0 || devid >= cl->num_devs) return;
-  dt_pthread_mutex_lock(&cl->dev[devid].lock);
+  // paired with dt_opencl_release_device()'s dt_pthread_mutex_BAD_unlock(): the lock is held
+  // across this function boundary and released by a different function, which the analyzer
+  // can't model -- same reason dt_opencl_try_reserve_device_by_id() already uses the BAD variant.
+  dt_pthread_mutex_BAD_lock(&cl->dev[devid].lock);
 }
 
 int dt_opencl_try_reserve_device_by_id(const int devid)
@@ -2854,7 +2858,44 @@ cl_ulong dt_opencl_get_device_available(const int devid)
   if(!(_opencl && _opencl->inited) || devid < 0) return 0;
   const cl_ulong limit = _opencl->dev[devid].used_available;
   const size_t in_use = _opencl->dev[devid].memory_in_use;
-  return (limit > in_use) ? (limit - in_use) : 0;
+  cl_ulong available = (limit > in_use) ? (limit - in_use) : 0;
+
+  /* A host-unified device is bounded by two DIFFERENT things, and they must not be conflated.
+   *
+   * 1. Free space. Its "vRAM" is system RAM, shared with every other process and with the host
+   *    side of our own pipeline, so max_global_mem is the size of the machine rather than a
+   *    budget -- a P630 reports 28.75 GiB on a 31 GiB box. dt_get_system_available_mem() already
+   *    measures what is actually left (free plus reclaimable, cgroup limits included), so clamp
+   *    to it. A 0 return means the platform will not say; that is "no information", not "no
+   *    memory", so the device's own accounting stands.
+   *
+   * 2. How much the driver can have in flight at once, which is NOT a free-space question and
+   *    does not get better when RAM is free. Measured on the P630 with 22 GiB genuinely
+   *    available: an ~8 GiB working set fails, the pipe loses OpenCL entirely and drops to CPU;
+   *    ~4 GiB fails mid-tile; ~2 GiB completes. The ceiling is the GPU aperture / address space
+   *    per context, which OpenCL publishes no query for. max_mem_alloc is the closest thing it
+   *    does publish -- NEO reports min(global/4, 4 GiB), which tracks that aperture -- so half
+   *    of it is used as a working-set ceiling. It is a proxy chosen to match the measurement,
+   *    not a measurement of anything, and it is written here as its own clamp so it cannot be
+   *    misread as free space.
+   *
+   * This lives in the reader rather than in dt_opencl_check_tuning() because the tilers and the
+   * fit checks call it while deciding: limit 1 is then re-probed at each decision instead of
+   * frozen once per pipe run, before any of the allocations it governs. The probe caches for
+   * tens of milliseconds, which is what makes that affordable.
+   *
+   * Discrete devices never enter here: their max_global_mem really is dedicated vRAM. */
+  if(_opencl->dev[devid].host_unified_memory)
+  {
+    const size_t reserved = (size_t)_opencl->dev[devid].forced_headroom * 1024 * 1024;
+
+    const size_t system_available = dt_get_system_available_mem();
+    if(system_available > 0)
+      available = MIN(available, (cl_ulong)((system_available > reserved) ? system_available - reserved : 0));
+
+    available = MIN(available, (cl_ulong)(_opencl->dev[devid].max_mem_alloc / 2));
+  }
+  return available;
 }
 
 static cl_ulong _opencl_get_device_memalloc(const int devid)
