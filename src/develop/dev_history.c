@@ -676,6 +676,21 @@ static void _pop_undo(gpointer user_data, dt_undo_type_t type, dt_undo_data_t da
   // TODO: check if we need to rebuild the full pipeline and do it only if needed
   dt_dev_history_pixelpipe_update(dev, TRUE);
 
+  /* Republish the darkroom geometry, like every other path that replays history in bulk:
+   * dt_dev_pop_history_items() does it, so does the history-row click in libs/history.c, and
+   * so do image load and compress/truncate. This one did not, and undo is the path where it
+   * matters most -- undoing a crop changes the processed size, and without this the geometry
+   * record (hence natural_scale, the preview dimensions, and everything the pipes plan from)
+   * kept describing the pre-undo image until some unrelated later caller happened to refresh
+   * it. dt_dev_history_pixelpipe_update() above rebuilds the virtual pipe, so this only folds
+   * and publishes.
+   *
+   * After the history lock is released, never inside it: dt_dev_get_thumbnail_size() resyncs
+   * the virtual pipe, which takes history_mutex as reader, and the same-thread reentrancy that
+   * makes this survivable is a safety net, not a licence -- the sibling call sites all note the
+   * same ordering constraint. */
+  if(dev->gui_attached) dt_dev_get_thumbnail_size(dev);
+
   if(dev->gui_module)
   {
     dt_masks_set_edit_mode(dev->gui_module, hist->mask_edit_mode);
@@ -1185,7 +1200,7 @@ dt_dev_history_item_t *dt_dev_history_cow_touch(dt_develop_t *dev, dt_dev_histor
   // dt_dev_pixelpipe_synch_top to bound the resync range). dt_dev_pixelpipe_change() holds
   // history_mutex for its whole resync, same as this splice, so a plain compare-and-assign is
   // enough -- no concurrent access is possible.
-  dt_dev_pixelpipe_t *const pipes[] = { dev->pipe, dev->preview_pipe, dev->virtual_pipe };
+  dt_dev_pixelpipe_t *const pipes[] = { dev->pipe, dev->preview_pipe };
   for(size_t i = 0; i < G_N_ELEMENTS(pipes); i++)
     if(pipes[i] && pipes[i]->last_history_item == hist)
       pipes[i]->last_history_item = clone;
@@ -1410,7 +1425,7 @@ void dt_apply_dev_history_update(dt_develop_t *dev)
   dt_dev_reload_history_items(dev, dev->image_storage.id);
   dt_dev_history_gui_update(dev);
   // Re-derive dev->roi.processed_{width,height} (and the natural scale) from the new
-  // history through the virtual pipe. Without this, a history change that alters the
+  // history, through the geometry service's size fold. Without this, a history change that alters the
   // final image geometry (e.g. removing a crop/ashift step) still renders at the old,
   // stale ROI -- same fix as _history_apply_history_end() in libs/history.c.
   if(dev->gui_attached) dt_dev_get_thumbnail_size(dev);

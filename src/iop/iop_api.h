@@ -58,6 +58,7 @@ struct dt_iop_module_so_t;
 struct dt_iop_module_t;
 struct dt_dev_pixelpipe_t;
 struct dt_dev_pixelpipe_iop_t;
+struct dt_geometry_record_t;
 struct dt_iop_roi_t;
 struct dt_develop_tiling_t;
 struct dt_iop_buffer_dsc_t;
@@ -198,6 +199,25 @@ DEFAULT(gboolean, has_defaults, struct dt_iop_module_t *self);
  *  (dt_colorspaces_conversion_identity()) and hash THAT. */
 DEFAULT(gboolean, runtime_data_hash, struct dt_iop_module_t *self, struct dt_dev_pixelpipe_t *pipe,
                                      const struct dt_dev_pixelpipe_iop_t *piece);
+
+/** Publish this module's geometry as data, for develop/geometry (the service that replaced the
+ *  GUI's pixel-less clone of the pipeline -- see doc/geometry-service.md).
+ *
+ *  Fill @p record's vtable/data and return TRUE; return FALSE (the default) for a module that
+ *  does not change geometry. Called on the GUI thread.
+ *
+ *  @p params is THE SAME BLOB commit_params() is handed for this module -- resolved from the
+ *  history stack, or the module's defaults where the pipe would use those. It is not
+ *  self->params: those are the GUI thread's live values, and dt_dev_add_history_item() is
+ *  throttled, so between an edit and its commit they describe a geometry the pipes are not
+ *  rendering. Read this argument, exactly as commit_params() reads its own.
+ *
+ *  THE ONE-CONSTRUCTOR RULE: whatever commit_params() derives for geometry and whatever the
+ *  record carries must come from ONE shared helper, and the record's evaluators must be the
+ *  same code distort_transform()/modify_roi_out() run. Two derivations of the same geometry
+ *  drift, and the drift surfaces as an overlay that no longer sits on what it describes. */
+OPTIONAL(gboolean, geometry_record, struct dt_iop_module_t *self, const void *params,
+                                    struct dt_geometry_record_t *record);
 
 /** called after the image has changed in darkroom */
 OPTIONAL(void, change_image, struct dt_iop_module_t *self);

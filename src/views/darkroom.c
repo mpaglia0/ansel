@@ -505,7 +505,9 @@ static gboolean _render_main_direct_debug(cairo_t *cr, dt_develop_t *dev, const 
   cairo_paint(cr);
 
   if(!dt_dev_pixelpipe_is_backbufer_valid(dev->pipe, dev)) return FALSE;
-  const uint64_t hash = dt_dev_backbuf_get_hash(&dev->pipe->backbuf);
+  // One read of the publication: the hash and the shape must come from the same frame (dt_backbuf_t).
+  const dt_backbuf_state_t published = dt_dev_backbuf_snapshot(&dev->pipe->backbuf);
+  const uint64_t hash = published.hash;
   if(hash == (uint64_t)-1) return FALSE;
 
   dt_pixel_cache_entry_t *entry = NULL;
@@ -518,8 +520,8 @@ static gboolean _render_main_direct_debug(cairo_t *cr, dt_develop_t *dev, const 
 
   dt_dev_pixelpipe_cache_rdlock_entry(TRUE, entry);
 
-  const int bw = (int)dev->pipe->backbuf.width;
-  const int bh = (int)dev->pipe->backbuf.height;
+  const int bw = (int)published.width;
+  const int bh = (int)published.height;
   if(bw <= 0 || bh <= 0)
   {
     dt_dev_pixelpipe_cache_rdlock_entry(FALSE, entry);
@@ -840,13 +842,23 @@ void expose(
   const uint64_t zoom_hash = _darkroom_zoom_hash(dev);
   const gboolean roi_changed = !_darkroom_locked_main_valid_for_zoom(&expose_state, zoom_hash);
 
+  /* The expose is timed as a whole and nothing inside it is, which is why a redraw that grows
+   * from 11 ms to 400 ms across a drawing session cannot be attributed: the mask overlay reports
+   * 1.5 ms of it and the rest is dark. Three stages, so the next log says which. */
+  dt_times_t stage = { 0 };
+  dt_get_times(&stage);
+
   _darkroom_prepare_image_surface(dev, width, height, &expose_state);
+
+  if(dt_get_debug_flags() & DT_DEBUG_PERF) dt_show_times(&stage, "[darkroom] surface prepared");
+  dt_get_times(&stage);
 
   cairo_t *cr = cairo_create(dev->image_surface);
   const int full_width = dt_dev_roi_request_preview_width(dev);
   const int full_height = dt_dev_roi_request_preview_height(dev);
+  const dt_backbuf_state_t preview_published = dt_dev_backbuf_snapshot(&dev->preview_pipe->backbuf);
   const uint64_t main_backbuf_hash = dt_dev_backbuf_get_hash(&dev->pipe->backbuf);
-  const uint64_t preview_backbuf_hash = dt_dev_backbuf_get_hash(&dev->preview_pipe->backbuf);
+  const uint64_t preview_backbuf_hash = preview_published.hash;
   const gboolean main_has_backbuf = main_backbuf_hash != DT_PIXELPIPE_CACHE_HASH_INVALID;
   const gboolean preview_has_backbuf = preview_backbuf_hash != DT_PIXELPIPE_CACHE_HASH_INVALID;
   // Compare main against the last main surface, not against the last source painted into
@@ -859,8 +871,8 @@ void expose(
   const gboolean preview_matches_full_image
       = preview_has_backbuf && dt_dev_pipelines_share_preview_output(dev)
         && full_width > 0 && full_height > 0
-        && dev->preview_pipe->backbuf.width == full_width
-        && dev->preview_pipe->backbuf.height == full_height;
+        && preview_published.width == (size_t)full_width
+        && preview_published.height == (size_t)full_height;
   const gboolean full_image_backbuf_ready = main_ready_for_current_view || preview_matches_full_image;
 
   dt_aligned_pixel_t bg_color = { 0.0f };
@@ -1073,6 +1085,9 @@ void expose(
     cairo_restore(cri);
   }
 
+  if(dt_get_debug_flags() & DT_DEBUG_PERF) dt_show_times(&stage, "[darkroom] image painted");
+  dt_get_times(&stage);
+
   const gboolean picker_active = dt_iop_color_picker_is_visible(dev);
 
   // draw colorpicker for in focus module or execute module callback hook
@@ -1088,12 +1103,22 @@ void expose(
     const gboolean display_masks = (dev->gui_module && dev->gui_module->enabled)
                                  || dt_lib_gui_get_expanded(dt_lib_get_module("masks"));
 
+    if(dt_get_debug_flags() & DT_DEBUG_PERF) dt_show_times(&stage, "[darkroom] overlay predicates");
+
     if(dt_masks_get_visible_form(dev) && display_masks)
       dt_masks_events_post_expose(dev, dev->gui_module, cri, width, height, pointerx, pointery);
       
+    if(dt_get_debug_flags() & DT_DEBUG_PERF) dt_show_times(&stage, "[darkroom] overlays drawn");
+    dt_get_times(&stage);
+
     // module
     if(dev->gui_module && dev->gui_module->enabled && dev->gui_module->gui_post_expose)
+    {
       dev->gui_module->gui_post_expose(dev->gui_module, cri, width, height, pointerx, pointery);
+
+      if(dt_get_debug_flags() & DT_DEBUG_PERF)
+        dt_show_times_f(&stage, "[darkroom]", "module %s gui_post_expose", dev->gui_module->op);
+    }
   }
 
   // indicate if we are in gamut check or softproof mode
@@ -1458,7 +1483,8 @@ static void _preview_pipe_finished(gpointer instance, gpointer user_data)
   const gboolean autoset_running_before
       = !IS_NULL_PTR(_autoset_manager) && _autoset_manager->progress_cursor_active;
   const int32_t imgid = dt_dev_get_global()->image_storage.id;
-  dt_mipmap_size_t mip = dt_mipmap_cache_get_fitting_size(pipe->backbuf.width, pipe->backbuf.height, imgid);
+  const dt_backbuf_state_t published = dt_dev_backbuf_snapshot(&pipe->backbuf);
+  dt_mipmap_size_t mip = dt_mipmap_cache_get_fitting_size(published.width, published.height, imgid);
 
   // Check if the cache is ready for that mipmap size.
   dt_mipmap_buffer_t tmp;
@@ -1968,7 +1994,6 @@ void leave(dt_view_t *self)
   dev->exit = 1;
   dt_atomic_set_int(&dev->pipe->shutdown, TRUE);
   dt_atomic_set_int(&dev->preview_pipe->shutdown, TRUE);
-  if(dev->virtual_pipe) dt_atomic_set_int(&dev->virtual_pipe->shutdown, TRUE);
   dev->pipelines_started = FALSE;
 
   /* dev->exit / the shutdown atomics above are only checked by the darkroom worker thread
@@ -2050,13 +2075,6 @@ void leave(dt_view_t *self)
   dt_dev_set_backbuf(&dev->preview_pipe->backbuf, 0, 0, 0, DT_PIXELPIPE_CACHE_HASH_INVALID,
                      DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_pthread_mutex_unlock(&dev->preview_pipe->busy_mutex);
-
-  dt_pthread_mutex_lock(&dev->virtual_pipe->busy_mutex);
-  dt_dev_pixelpipe_cleanup_nodes(dev->virtual_pipe);
-  dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&dev->virtual_pipe->backbuf));
-  dt_dev_set_backbuf(&dev->virtual_pipe->backbuf, 0, 0, 0, DT_PIXELPIPE_CACHE_HASH_INVALID,
-                     DT_PIXELPIPE_CACHE_HASH_INVALID);
-  dt_pthread_mutex_unlock(&dev->virtual_pipe->busy_mutex);
 
   /* Device-side cache payloads are only an acceleration layer. Once darkroom
    * leaves, drop the cl_mem objects these pipes produced -- but only on the

@@ -67,6 +67,7 @@
 #include "common/opencl.h"
 #include "control/control.h"
 #include "develop/develop.h"
+#include "develop/geometry/geometry.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "widgets/button.h"
@@ -2536,7 +2537,7 @@ static void do_crop(dt_iop_module_t *self, dt_iop_ashift_params_t *p)
     g->grid_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
     if(g->editing)
     {
-      dt_dev_pixelpipe_sync_virtual(self->dev, DT_DEV_PIPE_SYNCH);
+      dt_geometry_chain_rebuild(self->dev);
       dt_dev_get_thumbnail_size(self->dev);
       dt_dev_pixelpipe_resync_history_all(self->dev);
     }
@@ -2544,16 +2545,16 @@ static void do_crop(dt_iop_module_t *self, dt_iop_ashift_params_t *p)
   }
 
   // Auto-crop is a purely geometric fit: it only needs ashift's *full* (uncropped) input size, not
-  // pixel data. Read it from the virtual-pipe piece, which is synchronized on the GUI thread and
-  // remains available when the preview worker exact-hits downstream cache entries without running
-  // ashift's process() to populate g->buf. ashift's roi_in is crop-dependent, while buf_in is the
+  // pixel data. Read it from the geometry record, which is GUI-thread state and remains available
+  // when the preview worker exact-hits downstream cache entries without running ashift's process()
+  // to populate g->buf. ashift's roi_in is crop-dependent, while buf_in is the
   // stable full input geometry required by the fit.
   int crop_width = 0, crop_height = 0;
-  const dt_dev_pixelpipe_iop_t *crop_piece = dt_dev_distort_get_iop_pipe(self->dev->virtual_pipe, self);
-  if(!IS_NULL_PTR(crop_piece) && crop_piece->buf_in.width > 0 && crop_piece->buf_in.height > 0)
+  dt_iop_roi_t crop_in;
+  if(dt_dev_module_geometry_gui(self->dev, self, &crop_in, NULL) && crop_in.width > 0 && crop_in.height > 0)
   {
-    crop_width = crop_piece->buf_in.width;
-    crop_height = crop_piece->buf_in.height;
+    crop_width = crop_in.width;
+    crop_height = crop_in.height;
   }
   else
   {
@@ -2709,7 +2710,7 @@ static void do_crop(dt_iop_module_t *self, dt_iop_ashift_params_t *p)
 
   if(g->editing)
   {
-    dt_dev_pixelpipe_sync_virtual(self->dev, DT_DEV_PIPE_SYNCH);
+    dt_geometry_chain_rebuild(self->dev);
     dt_dev_get_thumbnail_size(self->dev);
     dt_dev_pixelpipe_resync_history_all(self->dev);
   }
@@ -2788,7 +2789,7 @@ static void _draw_save_lines_to_params(dt_iop_module_t *self)
     float pts[8] = { g->lines[0].p1[0], g->lines[0].p1[1], g->lines[0].p2[0],
                      g->lines[0].p2[1], g->lines[1].p1[0], g->lines[1].p1[1],
                      g->lines[1].p2[0], g->lines[1].p2[1] };
-    if(dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    if(dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                          DT_DEV_TRANSFORM_DIR_BACK_EXCL, pts, 4))
     {
       for(int i = 0; i < 8; i++) p->last_quad_lines[i] = pts[i];
@@ -2813,7 +2814,7 @@ static void _draw_save_lines_to_params(dt_iop_module_t *self)
         if(p->last_drawn_lines_count >= MAX_SAVED_LINES) break;
       }
     }
-    dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                       DT_DEV_TRANSFORM_DIR_BACK_EXCL, p->last_drawn_lines,
                                       p->last_drawn_lines_count * 2);
   }
@@ -2829,7 +2830,12 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self, dt_iop_a
   dt_iop_ashift_params_t *p = _get_ashift_params(self);
   if(IS_NULL_PTR(g) || IS_NULL_PTR(p)) return FALSE;
 
-  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self->dev->virtual_pipe, self);
+  /* The saved lines are in the raw frame, and so is the size they are measured against -- what
+   * used to be read off a pipe piece's iwidth/iheight, which is the pipe's own input size. Ask
+   * the dev for it, the same way _do_get_structure_lines() below does. */
+  int32_t raw_width = 0;
+  int32_t raw_height = 0;
+  if(!dt_dev_geometry_get_raw_size(self->dev, &raw_width, &raw_height)) return FALSE;
 
   if(method == ASHIFT_METHOD_QUAD
      && p->last_quad_lines[0] > 0.0f && p->last_quad_lines[1] > 0.0f
@@ -2839,7 +2845,7 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self, dt_iop_a
                      p->last_quad_lines[2], p->last_quad_lines[3],
                      p->last_quad_lines[4], p->last_quad_lines[5],
                      p->last_quad_lines[6], p->last_quad_lines[7] };
-    if(dt_dev_distort_transform_plus(self->dev->virtual_pipe, self->iop_order,
+    if(dt_dev_distort_transform_gui(self->dev, self->iop_order,
                                      DT_DEV_TRANSFORM_DIR_BACK_EXCL, pts, 4))
     {
       if(g->lines)
@@ -2864,8 +2870,8 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self, dt_iop_a
       g->horizontal_count = 2;
       g->vertical_weight = 2.0;
       g->horizontal_weight = 2.0;
-      g->lines_in_width = piece->iwidth;
-      g->lines_in_height = piece->iheight;
+      g->lines_in_width = raw_width;
+      g->lines_in_height = raw_height;
       g->current_structure_method = method;
       return TRUE;
     }
@@ -2878,7 +2884,7 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self, dt_iop_a
     for(int i = 0; i < p->last_drawn_lines_count * 4; i++)
       pts[i] = p->last_drawn_lines[i];
 
-    if(dt_dev_distort_transform_plus(self->dev->virtual_pipe, self->iop_order,
+    if(dt_dev_distort_transform_gui(self->dev, self->iop_order,
                                      DT_DEV_TRANSFORM_DIR_BACK_EXCL, pts, p->last_drawn_lines_count * 2))
     {
       if(g->lines)
@@ -2908,8 +2914,8 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self, dt_iop_a
       g->horizontal_count = hnb;
       g->vertical_weight = (float)vnb;
       g->horizontal_weight = (float)hnb;
-      g->lines_in_width = piece->iwidth;
-      g->lines_in_height = piece->iheight;
+      g->lines_in_width = raw_width;
+      g->lines_in_height = raw_height;
       g->current_structure_method = method;
       return TRUE;
     }
@@ -3010,14 +3016,17 @@ static void _do_get_structure_lines(dt_iop_module_t *self)
   // Manual line drawing only needs the module input geometry, never the pixel buffer (unlike
   // auto-detection). Tying it to g->buf used to block all manual input whenever the preview buffer
   // was momentarily unavailable, e.g. when the module already had parameters set (#710).
-  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self->dev->virtual_pipe, self);
-  if(IS_NULL_PTR(piece) || piece->iwidth <= 0 || piece->iheight <= 0) return;
+  /* piece->iwidth/iheight was the PIPE's input size, which is the raw geometry -- not anything
+   * this module derives -- so it is read from where that fact lives. */
+  int32_t raw_width = 0, raw_height = 0;
+  if(!dt_dev_geometry_get_raw_size(self->dev, &raw_width, &raw_height)) return;
+  if(raw_width <= 0 || raw_height <= 0) return;
 
   _do_clean_structure(self, p, TRUE);
 
   g->current_structure_method = ASHIFT_METHOD_LINES;
-  g->lines_in_width = piece->iwidth;
-  g->lines_in_height = piece->iheight;
+  g->lines_in_width = raw_width;
+  g->lines_in_height = raw_height;
   g->lines_x_off = 0;
   g->lines_y_off = 0;
 
@@ -3036,8 +3045,11 @@ static void _do_get_structure_quad(dt_iop_module_t *self)
 
   // The manual perspective rectangle only needs the module input geometry, never the pixel buffer
   // (unlike auto-detection), so it must not wait for the preview input buffer (#710).
-  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self->dev->virtual_pipe, self);
-  if(IS_NULL_PTR(piece) || piece->iwidth <= 0 || piece->iheight <= 0) return;
+  /* piece->iwidth/iheight was the PIPE's input size, which is the raw geometry -- not anything
+   * this module derives -- so it is read from where that fact lives. */
+  int32_t raw_width = 0, raw_height = 0;
+  if(!dt_dev_geometry_get_raw_size(self->dev, &raw_width, &raw_height)) return;
+  if(raw_width <= 0 || raw_height <= 0) return;
 
   _do_clean_structure(self, p, TRUE);
 
@@ -3053,7 +3065,7 @@ static void _do_get_structure_quad(dt_iop_module_t *self)
     const float wd = geometry.processed_width;
     const float ht = geometry.processed_height;
     float pts[8] = { wd * 0.2, ht * 0.2, wd * 0.2, ht * 0.8, wd * 0.8, ht * 0.2, wd * 0.8, ht * 0.8 };
-    if(dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    if(dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                          DT_DEV_TRANSFORM_DIR_FORW_INCL, pts, 4))
     {
       g->current_structure_method = ASHIFT_METHOD_QUAD;
@@ -3072,8 +3084,8 @@ static void _do_get_structure_quad(dt_iop_module_t *self)
       // get real line type (they may be wrong due to image rotation)
       for(int i = 0; i < 4; i++) _draw_retrieve_line_type(&g->lines[i]);
 
-      g->lines_in_width = piece->iwidth;
-      g->lines_in_height = piece->iheight;
+      g->lines_in_width = raw_width;
+      g->lines_in_height = raw_height;
       g->lines_x_off = 0;
       g->lines_y_off = 0;
       g->vertical_count = 2;
@@ -3196,8 +3208,22 @@ int process(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const 
     float ivec[2] = { points[2] - points[0], points[3] - points[1] };
     float ivecl = sqrtf(ivec[0] * ivec[0] + ivec[1] * ivec[1]);
 
-    // where do they go?
-    dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    /* Where do they go? Asked of THIS pipe, the one whose frame we are producing.
+     *
+     * This used to walk the GUI thread's pixel-less clone pipe: a worker thread reading
+     * another thread's node list with no lock, while the GUI can be
+     * resyncing it (dt_dev_pixelpipe_change() rebuilds pipe->nodes from dev->iop). The answer
+     * was also whatever history the virtual pipe happened to hold, not the history this frame
+     * is being rendered from.
+     *
+     * The running pipe answers the same question by construction: every distorting module
+     * downstream of ashift -- liquify, rotatepixels, scalepixels, flip, clipping, crop,
+     * borders -- commits identical params on every darkroom pipe (none of them is pipe-type
+     * dependent), and piece->buf_in/buf_out are full-resolution scale-1.0 dims on every pipe,
+     * because dt_dev_pixelpipe_get_roi_out() seeds its fold from pipe->iwidth/iheight at
+     * scale 1. So the geometry is the same, the ownership is correct, and the answer now
+     * describes the frame in hand. */
+    dt_dev_distort_backtransform_plus(pipe, self->iop_order,
                                       DT_DEV_TRANSFORM_DIR_FORW_EXCL, points, 2);
 
     float ovec[2] = { points[2] - points[0], points[3] - points[1] };
@@ -3336,8 +3362,22 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     const float ivec[2] = { points[2] - points[0], points[3] - points[1] };
     const float ivecl = sqrtf(ivec[0] * ivec[0] + ivec[1] * ivec[1]);
 
-    // where do they go?
-    dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    /* Where do they go? Asked of THIS pipe, the one whose frame we are producing.
+     *
+     * This used to walk the GUI thread's pixel-less clone pipe: a worker thread reading
+     * another thread's node list with no lock, while the GUI can be
+     * resyncing it (dt_dev_pixelpipe_change() rebuilds pipe->nodes from dev->iop). The answer
+     * was also whatever history the virtual pipe happened to hold, not the history this frame
+     * is being rendered from.
+     *
+     * The running pipe answers the same question by construction: every distorting module
+     * downstream of ashift -- liquify, rotatepixels, scalepixels, flip, clipping, crop,
+     * borders -- commits identical params on every darkroom pipe (none of them is pipe-type
+     * dependent), and piece->buf_in/buf_out are full-resolution scale-1.0 dims on every pipe,
+     * because dt_dev_pixelpipe_get_roi_out() seeds its fold from pipe->iwidth/iheight at
+     * scale 1. So the geometry is the same, the ownership is correct, and the answer now
+     * describes the frame in hand. */
+    dt_dev_distort_backtransform_plus(pipe, self->iop_order,
                                       DT_DEV_TRANSFORM_DIR_FORW_EXCL, points, 2);
 
     const float ovec[2] = { points[2] - points[0], points[3] - points[1] };
@@ -3689,9 +3729,9 @@ static int get_points(struct dt_iop_module_t *self, const dt_iop_ashift_line_t *
   }
 
   // third step: transform all points
-  if(!dt_dev_distort_transform_plus(dev->virtual_pipe, self->iop_order, DT_DEV_TRANSFORM_DIR_FORW_INCL, my_points, total_points))
+  if(!dt_dev_distort_transform_gui(dev, self->iop_order, DT_DEV_TRANSFORM_DIR_FORW_INCL, my_points, total_points))
     goto error;
-  if(!dt_dev_distort_transform_plus(dev->virtual_pipe, self->iop_order, DT_DEV_TRANSFORM_DIR_FORW_INCL,
+  if(!dt_dev_distort_transform_gui(dev, self->iop_order, DT_DEV_TRANSFORM_DIR_FORW_INCL,
                                     my_extremas, 2 * lines_count))
     goto error;
 
@@ -3748,27 +3788,21 @@ error:
   return FALSE;
 }
 
-/* this function replaces this sentence, it calls distort_transform() for this module on the pipe
-if(!dt_dev_distort_transform_plus(self->dev, self->dev->virtual_pipe, self->priority, self->priority + 1,
-      (float *)V, 4))
-*/
-static int call_distort_transform(dt_dev_pixelpipe_t *pipe, struct dt_iop_module_t *self,
-                                  float *points, size_t points_count)
+/* This module's own transform and nothing else -- no direction bound expresses that, since
+ * FORW_INCL at this module's own iop_order includes everything after it too.
+ *
+ * It used to be done by resolving this module's piece on the GUI's pixel-less pipe and invoking
+ * its distort_transform() by hand, with the focused-module exception applied around it. The
+ * geometry service expresses the whole thing directly and applies the same exception, so what is
+ * left is the call.
+ *
+ * The old hand-rolled version deliberately did NOT test piece->enabled: it is FALSE for exactly
+ * the first mouse_moved following a button_pressed while ASHIFT_CROP_ASPECT is active, which drew
+ * one frame of the centre image without the crop overlay. Records carry their enabled state from
+ * history rather than from a piece mid-commit, so that flicker has no equivalent here. */
+static int call_distort_transform(struct dt_iop_module_t *self, float *points, size_t points_count)
 {
-  int ret = 0;
-  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(pipe, self);
-  if(IS_NULL_PTR(piece)) return ret;
-  if(piece->module == self && /*piece->enabled && */  //see note below
-     !dt_dev_pixelpipe_activemodule_disables_currentmodule(pipe->dev, piece->module))
-  {
-    if(piece->module->distort_transform)
-    ret = piece->module->distort_transform(piece->module, pipe, piece, points, points_count);
-  }
-  return ret;
-  //NOTE: piece->enabled is FALSE for exactly the first mouse_moved event following a button_pressed event
-  //  when ASHIFT_CROP_ASPECT is active, which causes the first gui_post_expose call on starting to resize
-  //  the crop box to draw the center image without the crop overlay, resulting in an annoying visual glitch.
-  //  Removing the check appears to have no adverse effects and eliminates the glitch.
+  return dt_geometry_module_transform(self->dev, self, points, points_count);
 }
 
 void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, int32_t height,
@@ -3877,17 +3911,17 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
   dt_dev_clip_roi(dev, cr, width, height);
   dt_dev_rescale_roi(dev, cr, width, height);
 
-  // we draw the cropping area; use the input ROI from the virtual pipe piece
-  dt_dev_pixelpipe_iop_t *piece = dt_dev_distort_get_iop_pipe(self->dev->virtual_pipe, self);
-  if(IS_NULL_PTR(piece))
+  // we draw the cropping area; use this module's own input rectangle
+  dt_iop_roi_t mod_in;
+  if(!dt_dev_module_geometry_gui(self->dev, self, &mod_in, NULL))
   {
     cairo_restore(cr);
     return;
   }
-  const float iwd = piece->buf_in.width;
-  const float iht = piece->buf_in.height;
-  const float ixo = piece->buf_in.x;
-  const float iyo = piece->buf_in.y;
+  const float iwd = mod_in.width;
+  const float iht = mod_in.height;
+  const float ixo = mod_in.x;
+  const float iyo = mod_in.y;
 
   // The four corners of the inner image polygon
   float V[4][2] = { { ixo,        iyo       },
@@ -3896,7 +3930,7 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
                     { ixo + iwd,  iyo       } };
 
   // convert coordinates of corners to coordinates of this module's output
-  if(!call_distort_transform(self->dev->virtual_pipe, self, (float *)V, 4))
+  if(!call_distort_transform(self, (float *)V, 4))
     return;
 
   // get x/y-offset as well as width and height of output buffer
@@ -3913,10 +3947,10 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
   // Paint black outside area when not in editing mode then returns.
   if(!g->editing)
   {
-    if(!dt_dev_distort_transform_plus(self->dev, self->dev->virtual_pipe, self->iop_order,
+    if(!dt_dev_distort_transform_gui(self->dev, self->iop_order,
                                     DT_DEV_TRANSFORM_DIR_FORW_EXCL, (float *)V, 4))
       return;
-    const float scale_factor = dt_dev_get_natural_scale(dev, dev->virtual_pipe);
+    const float scale_factor = dt_dev_get_natural_scale(dev, dev->preview_pipe);
     for(size_t i = 0; i < 4; i++)
     {
       V[i][0] *= scale_factor;
@@ -3947,10 +3981,10 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
                     { xmin + p->cr * owd, ymin + p->ct * oht } };
 
   // convert clipping corners to final output image
-  if(!dt_dev_distort_transform_plus(self->dev->virtual_pipe, self->iop_order,
+  if(!dt_dev_distort_transform_gui(self->dev, self->iop_order,
                                     DT_DEV_TRANSFORM_DIR_FORW_EXCL, (float *)C, 4))
     return;
-  if(!dt_dev_distort_transform_plus(self->dev->virtual_pipe, self->iop_order,
+  if(!dt_dev_distort_transform_gui(self->dev, self->iop_order,
                                     DT_DEV_TRANSFORM_DIR_FORW_EXCL, (float *)V, 4))
     return;
 
@@ -4011,12 +4045,10 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
   // no structural data or visibility switched off? -> stop here
   if(g->fitting || IS_NULL_PTR(g->lines) || IS_NULL_PTR(g->buf) || !self->enabled) return;
 
-  // ensure virtual pipe params are in sync so distortions use current settings
-  if(dt_dev_pixelpipe_get_history_hash(dev->virtual_pipe) != dt_dev_get_history_hash(dev))
-    dt_dev_pixelpipe_sync_virtual(dev, DT_DEV_PIPE_TOP_CHANGED);
-
-  // get hash value that changes if distortions from here to the end of the pixelpipe changed
-  // virtual_pipe doesn't process pixels, so its hash isn't reliable for invalidation.
+  // get hash value that changes if distortions from here to the end of the pixelpipe changed.
+  // The composed geometry has no hash of its own -- it is rebuilt wherever a pipe flag is raised,
+  // so it cannot be stale here -- and the preview pipe's is what actually tracks the distortions
+  // these points are drawn against.
   const uint64_t hash = dt_dev_pixelpipe_get_hash(dev->preview_pipe);
   // get hash value that changes if coordinates of lines have changed
   const uint64_t lines_hash = _get_lines_hash(g->lines, g->lines_count);
@@ -4271,7 +4303,7 @@ int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressur
     const float pd_w = geometry.processed_width;
     const float pd_h = geometry.processed_height;
     float pts[2] = { pzx * pd_w, pzy * pd_h };
-    if(dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    if(dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                          DT_DEV_TRANSFORM_DIR_FORW_INCL, pts, 1))
     {
       // first we move the point
@@ -4338,7 +4370,7 @@ int mouse_moved(struct dt_iop_module_t *self, double x, double y, double pressur
     const float pd_w = geometry.processed_width;
     const float pd_h = geometry.processed_height;
     float pts[2] = { pzx * pd_w, pzy * pd_h };
-    if(dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    if(dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                          DT_DEV_TRANSFORM_DIR_FORW_INCL, pts, 1))
     {
       const float dx = (pts[0] - g->draw_pointmove_x);
@@ -4578,7 +4610,7 @@ int button_pressed(struct dt_iop_module_t *self, double x, double y, double pres
         const float pd_w = geometry.processed_width;
         const float pd_h = geometry.processed_height;
         float pts[2] = { pzx * pd_w, pzy * pd_h };
-        dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+        dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                           DT_DEV_TRANSFORM_DIR_FORW_INCL, pts, 1);
         g->draw_line_move = n;
         g->draw_pointmove_x = pts[0];
@@ -4679,7 +4711,7 @@ int button_pressed(struct dt_iop_module_t *self, double x, double y, double pres
     const float pd_w = geometry.processed_width;
     const float pd_h = geometry.processed_height;
     float pts[2] = { pzx * pd_w, pzy * pd_h };
-    dt_dev_distort_backtransform_plus(self->dev->virtual_pipe, self->iop_order,
+    dt_dev_distort_backtransform_gui(self->dev, self->iop_order,
                                       DT_DEV_TRANSFORM_DIR_FORW_INCL, pts, 1);
     const int count = g->lines_count + 1;
     // if count > MAX_SAVED_LINES we alert that the next lines won't be saved in params
@@ -4751,7 +4783,7 @@ int button_released(struct dt_iop_module_t *self, double x, double y, int which,
     const float pd_w = geometry.processed_width;
     const float pd_h = geometry.processed_height;
     float pts[4] = { pzx * pd_w, pzy * pd_h, g->lastx * pd_w, g->lasty * pd_h };
-    dt_dev_distort_backtransform_plus(self->dev->virtual_pipe,
+    dt_dev_distort_backtransform_gui(self->dev,
                                       self->iop_order,
                                       DT_DEV_TRANSFORM_DIR_FORW_EXCL, pts, 2);
 
@@ -5402,12 +5434,12 @@ static void _enter_edit_mode(GtkToggleButton* button, struct dt_iop_module_t *se
     gtk_widget_set_sensitive(g->commit_button, FALSE);
   }
 
-  // Entering or leaving edit mode changes ashift's runtime crop contract. Settle that contract on
-  // the virtual pipe first, then publish the resulting full-image dimensions before waking either
-  // pixel worker. Resyncing first and queuing separate ZOOMED updates afterwards let a worker start
+  // Entering or leaving edit mode changes ashift's runtime crop contract. Settle the composed
+  // geometry first, then publish the resulting full-image dimensions before waking either pixel
+  // worker. Resyncing first and queuing separate ZOOMED updates afterwards let a worker start
   // with the previous ROI, get killed by the next update, and repeatedly feed slightly different
   // preview dimensions back into the GUI geometry.
-  dt_dev_pixelpipe_sync_virtual(self->dev, DT_DEV_PIPE_SYNCH);
+  dt_geometry_chain_rebuild(self->dev);
   dt_dev_get_thumbnail_size(self->dev);
   dt_dev_pixelpipe_resync_history_all(self->dev);
 }
@@ -5527,14 +5559,25 @@ static void _event_process_after_ui_callback(gpointer instance, gpointer user_da
   dt_control_queue_redraw_center();
 }
 
-void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
-                   dt_dev_pixelpipe_iop_t *piece)
+/* --- the shared geometry core ----------------------------------------------------------
+ *
+ * commit_params() below and the geometry service's record (develop/geometry/geometry.h) both go
+ * through _ashift_resolve(), and both evaluate through homography(), which is already a pure
+ * function of the resolved parameters and the input dimensions. So the correction the pipe
+ * applies and the one the GUI overlays are drawn against are the same one, expressed once.
+ *
+ * The edit-mode branch is why the record cannot be built from history alone: while the ashift
+ * GUI is editing, the effective parameters live in g->new_params -- which never reach history --
+ * and the crop is neutralised so the full transformed frame is visible. A record built from
+ * history would describe a crop nobody is rendering, exactly when the overlays matter most.
+ */
+static void _ashift_resolve(struct dt_iop_module_t *self, const dt_iop_ashift_params_t *const p1,
+                            dt_iop_ashift_data_t *d)
 {
-  dt_iop_ashift_data_t *d = (dt_iop_ashift_data_t *)piece->data;
   dt_iop_ashift_gui_data_t *g = (dt_iop_ashift_gui_data_t *)dt_iop_gui_data(self);
 
   const gboolean editing = !IS_NULL_PTR(g) && g->editing;
-  dt_iop_ashift_params_t *p = editing ? &g->new_params : (dt_iop_ashift_params_t *)p1;
+  const dt_iop_ashift_params_t *p = editing ? &g->new_params : p1;
 
   d->rotation = p->rotation;
   d->lensshift_v = p->lensshift_v;
@@ -5564,6 +5607,107 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
     d->ct = p->ct;
     d->cb = p->cb;
   }
+}
+
+void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
+                   dt_dev_pixelpipe_iop_t *piece)
+{
+  _ashift_resolve(self, (const dt_iop_ashift_params_t *)p1, (dt_iop_ashift_data_t *)piece->data);
+}
+
+/* --- the geometry service's view of this module (develop/geometry/geometry.h) --------- */
+
+/** @brief Apply the homography plus the clipping offset, in whichever direction. */
+static int _ashift_geometry_apply(const void *data, const dt_geometry_record_t *const record, float *points,
+                                  size_t points_count, const int direction)
+{
+  const dt_iop_ashift_data_t *const d = (const dt_iop_ashift_data_t *)data;
+  if(isneutral(d)) return 1;
+
+  float DT_ALIGNED_ARRAY h[3][3];
+  homography((float *)h, d->rotation, d->lensshift_v, d->lensshift_h, d->shear, d->f_length_kb, d->orthocorr,
+             d->aspect, record->in.width, record->in.height, direction);
+
+  // clipping offset
+  const float fullwidth = (float)record->out.width / (d->cr - d->cl);
+  const float fullheight = (float)record->out.height / (d->cb - d->ct);
+  const float cx = fullwidth * d->cl;
+  const float cy = fullheight * d->ct;
+
+  const gboolean forward = (direction == ASHIFT_HOMOGRAPH_FORWARD);
+  for(size_t i = 0; i < points_count * 2; i += 2)
+  {
+    float DT_ALIGNED_PIXEL pi[3] = { points[i] + (forward ? 0.f : cx), points[i + 1] + (forward ? 0.f : cy),
+                                     1.0f };
+    float DT_ALIGNED_PIXEL po[3];
+    mat3mulv(po, (float *)h, pi);
+    points[i] = po[0] / po[2] - (forward ? cx : 0.f);
+    points[i + 1] = po[1] / po[2] - (forward ? cy : 0.f);
+  }
+  return 1;
+}
+
+static void _ashift_geometry_map_size(const void *data, const dt_iop_roi_t *const in, dt_iop_roi_t *out)
+{
+  const dt_iop_ashift_data_t *const d = (const dt_iop_ashift_data_t *)data;
+  *out = *in;
+  if(isneutral(d)) return;
+
+  float h[3][3];
+  homography((float *)h, d->rotation, d->lensshift_v, d->lensshift_h, d->shear, d->f_length_kb, d->orthocorr,
+             d->aspect, in->width, in->height, ASHIFT_HOMOGRAPH_FORWARD);
+
+  float xm = FLT_MAX, xM = -FLT_MAX, ym = FLT_MAX, yM = -FLT_MAX;
+
+  // the four vertices of the input rect, through the homograph, give the output bounding box
+  for(int y = 0; y < in->height; y += in->height - 1)
+    for(int x = 0; x < in->width; x += in->width - 1)
+    {
+      float pin[3] = { (in->x + x) / in->scale, (in->y + y) / in->scale, 1.0f };
+      float pout[3];
+      mat3mulv(pout, (float *)h, pin);
+      pout[0] = pout[0] / pout[2] * out->scale;
+      pout[1] = pout[1] / pout[2] * out->scale;
+      xm = MIN(xm, pout[0]);
+      xM = MAX(xM, pout[0]);
+      ym = MIN(ym, pout[1]);
+      yM = MAX(yM, pout[1]);
+    }
+
+  // clipping adjustments
+  out->width = floorf((xM - xm + 1) * (d->cr - d->cl));
+  out->height = floorf((yM - ym + 1) * (d->cb - d->ct));
+}
+
+static int _ashift_geometry_transform(const void *data, const dt_geometry_record_t *const record,
+                                      dt_geometry_chain_t *chain, float *points, size_t points_count)
+{
+  return _ashift_geometry_apply(data, record, points, points_count, ASHIFT_HOMOGRAPH_FORWARD);
+}
+
+static int _ashift_geometry_backtransform(const void *data, const dt_geometry_record_t *const record,
+                                          dt_geometry_chain_t *chain, float *points, size_t points_count)
+{
+  return _ashift_geometry_apply(data, record, points, points_count, ASHIFT_HOMOGRAPH_INVERTED);
+}
+
+static const dt_geometry_vtable_t _ashift_geometry_vtable = {
+  .map_size = _ashift_geometry_map_size,
+  .transform = _ashift_geometry_transform,
+  .backtransform = _ashift_geometry_backtransform,
+};
+
+gboolean geometry_record(struct dt_iop_module_t *self, const void *params, dt_geometry_record_t *record)
+{
+  dt_iop_ashift_data_t *data = (dt_iop_ashift_data_t *)g_malloc0(sizeof(dt_iop_ashift_data_t));
+  if(IS_NULL_PTR(data)) return FALSE;
+
+  _ashift_resolve(self, (const dt_iop_ashift_params_t *)params, data);
+
+  record->data = data;
+  record->free_data = dt_free_gpointer;
+  record->vtable = &_ashift_geometry_vtable;
+  return TRUE;
 }
 
 gboolean runtime_data_hash(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe,

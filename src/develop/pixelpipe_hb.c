@@ -1359,9 +1359,68 @@ static void _update_backbuf_cache_reference(dt_dev_pixelpipe_t *pipe, dt_iop_roi
     dt_dev_pixelpipe_cache_ref_count_entry(TRUE, entry);
   }
 
+  /* The backbuf advertises the ROI THIS RUN ASKED FOR, paired with whatever cacheline it
+   * resolved. Those two are supposed to describe the same image, and every consumer trusts that
+   * they do: the display paths compute a cairo stride from the width and walk the cacheline with
+   * it. When they disagree the picture is drawn with the wrong row length -- the diagonal
+   * striping of a stride error -- and nothing downstream can detect it, because a cacheline is
+   * just bytes and carries no shape of its own.
+   *
+   * They can disagree. Cache entries are reused in place by rekeying rather than reallocated
+   * (caches/pixelpipe_cache.c), so an entry produced at one ROI can be handed back under a key
+   * planned at another.
+   *
+   * The invariant worth checking is that the cacheline is BIG ENOUGH for the advertised
+   * dimensions -- not that it is exactly that size. Buffers come from an aligned allocator and
+   * from a reuse pool, so a cacheline is routinely larger than width x height x bpp: measured on
+   * an ordinary darkroom entry, the display buffers run about 0.2 % over and a thumbnail's can
+   * be several times over. That slack is why `bpp' below, a division by the requested pixel
+   * count, is not a pixel size and should not be read as one -- nothing does; the field exists
+   * for a consumer that no longer has one.
+   *
+   * Too SMALL is the dangerous direction, and the only one a consumer cannot survive: every
+   * display path computes a cairo stride from the width and walks that many rows, so a short
+   * cacheline is an out-of-bounds read, and a wrong width is the diagonal striping of a stride
+   * error. Report it; do not try to repair it here, where neither the true shape of the entry nor
+   * the reason it was selected is known. */
   int bpp = 0;
   if(roi.width > 0 && roi.height > 0)
-    bpp = (int)(dt_pixel_cache_entry_get_size(entry) / ((size_t)roi.width * (size_t)roi.height));
+  {
+    const size_t entry_size = dt_pixel_cache_entry_get_size(entry);
+    const size_t pixels = (size_t)roi.width * (size_t)roi.height;
+    bpp = (int)(entry_size / pixels);
+
+    /* 4 bytes per pixel: this is the final, display-encoded backbuffer. */
+    if(entry_size < pixels * 4)
+      dt_print(DT_DEBUG_ALWAYS,
+               // %llu, not %zu: MinGW's printf does not implement the C99 length modifier.
+               "[pixelpipe] BACKBUF TOO SMALL on pipe %s: roi %dx%d needs %llu bytes, cacheline holds "
+               "%llu; hash %" PRIu64 "\n",
+               dt_pixelpipe_get_pipe_name(pipe->type), roi.width, roi.height,
+               (unsigned long long)(pixels * 4), (unsigned long long)entry_size, (uint64_t)entry_hash);
+
+    /* And the shape itself. `roi' is what this run ASKED the pipe for; the pixels in the
+     * cacheline are whatever the last node actually produced, which is its roi_out. Those are
+     * supposed to be the same rectangle, and the backbuffer advertises the former while handing
+     * consumers the latter -- so if they differ, every display path computes its cairo stride
+     * from a width the data does not have, and draws the diagonal striping of a stride error.
+     *
+     * The cache cannot answer this on its own: an entry records how many BYTES it holds and not
+     * what shape they are in, so a cacheline reused at another size is indistinguishable from a
+     * correct one by size alone -- large-but-wrong passes every check a consumer can make. The
+     * last node's planned output is the only place the true shape survives. */
+    const GList *const last = g_list_last(pipe->nodes);
+    if(!IS_NULL_PTR(last))
+    {
+      const dt_dev_pixelpipe_iop_t *const tail = (const dt_dev_pixelpipe_iop_t *)last->data;
+      if(tail->roi_out.width != roi.width || tail->roi_out.height != roi.height)
+        dt_print(DT_DEBUG_ALWAYS,
+                 "[pixelpipe] BACKBUF SHAPE MISMATCH on pipe %s: advertising %dx%d but %s produced "
+                 "%dx%d; hash %" PRIu64 "\n",
+                 dt_pixelpipe_get_pipe_name(pipe->type), roi.width, roi.height, tail->module->op,
+                 tail->roi_out.width, tail->roi_out.height, (uint64_t)entry_hash);
+    }
+  }
 
   // Always refresh backbuf geometry/state, even when the cache key is unchanged.
   // Realtime drawing can update pixels in-place in the same cacheline, so width/height/history

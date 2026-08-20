@@ -32,6 +32,7 @@
 #include "control/control.h"
 #include "system/macros.h"
 #include "system/mem_alloc.h"
+#include "develop/geometry/geometry.h"   // dt_geometry_chain_generation()
 #include "develop/masks.h"
 #include "develop/masks_gui.h"
 #include "develop/masks/masks_functions.h"
@@ -1305,7 +1306,7 @@ void dt_masks_gui_init(dt_develop_t *dev)
 
   dt_masks_clear_form_gui(dev);
   dt_masks_set_visible_form(dev, NULL);
-  dev->form_gui->pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
+  dev->form_gui->geometry_generation = 0;
   dev->form_gui->formid = 0;
 }
 
@@ -1847,8 +1848,20 @@ void dt_masks_gui_form_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
 
   dt_masks_form_gui_points_t *gui_points
       = (dt_masks_form_gui_points_t *)g_list_nth_data(mask_gui->points, form_index);
-  if(dt_masks_get_points_border(mask_gui->dev, mask_form, &gui_points->points, &gui_points->points_count,
-                                &gui_points->border, &gui_points->border_count, 0, NULL) == 0)
+  const int border_status
+      = dt_masks_get_points_border(mask_gui->dev, mask_form, &gui_points->points, &gui_points->points_count,
+                                   &gui_points->border, &gui_points->border_count, 0, NULL);
+
+  /* A shape that fails here leaves the cache key UNSET, so the next expose rebuilds the whole
+   * group again -- and the one after that, forever. An empty shape mid-creation is the obvious
+   * candidate and it is invisible in a log otherwise: say so. */
+  if(border_status != 0 && (dt_get_debug_flags() & DT_DEBUG_MASKS))
+    dt_print(DT_DEBUG_MASKS,
+             "[masks] outline build FAILED for %s (index %d, %d nodes): the cache key stays unset,"
+             " so every later expose rebuilds this whole group\n",
+             mask_form->name, form_index, g_list_length(mask_form->points));
+
+  if(border_status == 0)
   {
     if(mask_form->type & DT_MASKS_CLONE)
     {
@@ -1857,7 +1870,7 @@ void dt_masks_gui_form_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
          != 0)
         return;
     }
-    mask_gui->pipe_hash = dt_dev_backbuf_get_hash(&mask_gui->dev->preview_pipe->backbuf);
+    mask_gui->geometry_generation = dt_geometry_chain_generation(mask_gui->dev->geometry_chain);
     mask_gui->formid = mask_form->formid;
     mask_gui->type = mask_form->type;
 
@@ -1882,9 +1895,13 @@ gboolean dt_masks_gui_form_create_throttled(dt_masks_form_t *mask_form, dt_masks
   const double now = dt_get_wtime();
   const double min_delta_time = 1.0 / 60.0;
   const float min_dist2 = 4.0f;
+  /* Bypass the throttle only when the GEOMETRY moved -- the outlines would then be drawn in the
+   * wrong place, which no amount of throttling makes acceptable. It used to bypass on the preview
+   * pipe's backbuffer hash instead, so a republished frame counted as a reason: dragging a brush
+   * republishes continuously, the clause was therefore true on essentially every mouse move, and
+   * the throttle below never ran. #1158. */
   const gboolean force_rebuild
-      = (develop->preview_pipe
-         && mask_gui->pipe_hash != dt_dev_backbuf_get_hash(&develop->preview_pipe->backbuf));
+      = (mask_gui->geometry_generation != dt_geometry_chain_generation(develop->geometry_chain));
 
   if(!force_rebuild && mask_gui->last_rebuild_ts > 0.0)
   {
@@ -2278,7 +2295,7 @@ void dt_masks_gui_form_remove(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
 {
   dt_masks_form_gui_points_t *gui_points
       = (dt_masks_form_gui_points_t *)g_list_nth_data(mask_gui->points, form_index);
-  mask_gui->pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
+  mask_gui->geometry_generation = 0;
   mask_gui->formid = 0;
 
   if(!IS_NULL_PTR(gui_points))
@@ -2296,12 +2313,20 @@ void dt_masks_gui_form_remove(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
 void dt_masks_gui_form_test_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *mask_gui,
                                    dt_iop_module_t *module)
 {
-  // we test if the image has changed
-  if(mask_gui->pipe_hash != DT_PIXELPIPE_CACHE_HASH_INVALID)
+  // we test if the geometry the cached outlines were built against has moved
+  const uint64_t live_generation = dt_geometry_chain_generation(mask_gui->dev->geometry_chain);
+  if(dt_get_debug_flags() & DT_DEBUG_MASKS)
+    dt_print(DT_DEBUG_MASKS, "[masks] outline cache: held for geometry %lu, live %lu -> %s\n",
+             (unsigned long)mask_gui->geometry_generation, (unsigned long)live_generation,
+             (mask_gui->geometry_generation == 0)
+                 ? "REBUILD (nothing cached)"
+                 : ((mask_gui->geometry_generation != live_generation) ? "REBUILD (geometry moved)" : "reuse"));
+
+  if(mask_gui->geometry_generation != 0)
   {
-    if(mask_gui->pipe_hash != dt_dev_backbuf_get_hash(&mask_gui->dev->preview_pipe->backbuf))
+    if(mask_gui->geometry_generation != live_generation)
     {
-      mask_gui->pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
+      mask_gui->geometry_generation = 0;
       mask_gui->formid = 0;
       g_list_free_full(mask_gui->points, dt_masks_form_gui_points_free);
       mask_gui->points = NULL;
@@ -2309,7 +2334,7 @@ void dt_masks_gui_form_test_create(dt_masks_form_t *mask_form, dt_masks_form_gui
   }
 
   // we create the form if needed
-  if(mask_gui->pipe_hash == DT_PIXELPIPE_CACHE_HASH_INVALID)
+  if(mask_gui->geometry_generation == 0)
   {
     if(mask_form->type & DT_MASKS_GROUP)
     {
@@ -2464,7 +2489,7 @@ void dt_masks_gui_form_save_creation(dt_develop_t *develop, dt_iop_module_t *mod
     dt_masks_dynbuf_free(mask_gui->guipoints_payload);
     mask_gui->guipoints_payload = NULL;
     mask_gui->guipoints_count = 0;
-    mask_gui->pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
+    mask_gui->geometry_generation = 0;
     mask_gui->formid = 0;
     mask_gui->creation_closing_form = FALSE;
     dt_masks_soft_reset_form_gui(mask_gui);
@@ -2631,7 +2656,23 @@ static void _dt_masks_events_set_current_pos(const double x, const double y, dt_
   dt_dev_coordinates_image_abs_to_raw_abs(mask_gui->dev, mask_gui->raw_pos, 1);
 }
 
+static int _dt_masks_events_mouse_moved(dt_develop_t *dev, struct dt_iop_module_t *module, double x,
+                                       double y, double pressure, int which);
+
 int dt_masks_events_mouse_moved(dt_develop_t *dev, struct dt_iop_module_t *module, double x, double y, double pressure, int which)
+{
+  /* Timed because it is the other thing that scales with the number of shapes and is not part of
+   * the expose: hit-testing walks every shape in the group and, for a brush, every point of it.
+   * The #1158 logs show the darkroom redraw growing to 400 ms with only 1.5 ms of mask overlay in
+   * it, so whatever grows is either here or in the expose's earlier stages -- both are now timed. */
+  dt_times_t moved_start = { 0 };
+  dt_get_times(&moved_start);
+  const int moved_result = _dt_masks_events_mouse_moved(dev, module, x, y, pressure, which);
+  if(dt_get_debug_flags() & DT_DEBUG_PERF) dt_show_times(&moved_start, "[masks] mouse moved");
+  return moved_result;
+}
+
+static int _dt_masks_events_mouse_moved(dt_develop_t *dev, struct dt_iop_module_t *module, double x, double y, double pressure, int which)
 {
   // This assume that if this event is generated, the mouse is over the center window.
   // record mouse position even if there are no masks visible
@@ -3127,6 +3168,23 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
   int current_segment_index = 0;
   cairo_move_to(cr, points[node_count * 6], points[node_count * 6 + 1]);
 
+  /* Emit at screen resolution, not at the resolution the outline was built with.
+   *
+   * The outline is sampled one point per RAW pixel along the path -- measured on #1158, a mean of
+   * 89 150 points per shape and a maximum of 208 095, for a mean of 11.9 nodes -- while the view
+   * it is drawn into is a fraction of that: at the zoom in those logs, roughly four outline points
+   * land inside every device pixel. Issuing a cairo_line_to() for each of them costs 93 ms per
+   * shape and draws a curve indistinguishable from the one below, which is 14.87 s of a 30.45 s
+   * session spent on segments shorter than a pixel.
+   *
+   * Points nearer than half a device pixel to the last EMITTED one are dropped -- not skipped in
+   * the walk: every point is still tested for a segment boundary below, and a boundary always
+   * emits, so the strokes still start and end exactly where the nodes are. */
+  const double min_step = dt_draw_min_emit_step(cr);
+  const double min_step2 = min_step * min_step;
+  double last_x = points[node_count * 6];
+  double last_y = points[node_count * 6 + 1];
+
   for(int point_index = node_count * 3; point_index < points_count; point_index++)
   {
     const int coord_index = point_index * 2;
@@ -3134,7 +3192,16 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
 
     const double coord_x = points[coord_index];
     const double coord_y = points[coord_index + 1];
-    cairo_line_to(cr, coord_x, coord_y);
+
+    const double step_x = coord_x - last_x;
+    const double step_y = coord_y - last_y;
+    const gboolean far_enough = (step_x * step_x + step_y * step_y) >= min_step2;
+    if(far_enough)
+    {
+      cairo_line_to(cr, coord_x, coord_y);
+      last_x = coord_x;
+      last_y = coord_y;
+    }
 
     const int segment_coord_index = show_segment_index * 6;
     if((segment_coord_index + 3) >= total_coords) continue;
@@ -3143,6 +3210,15 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
     const double segment_y = points[segment_coord_index + 3];
     if(coord_x == segment_x && coord_y == segment_y)
     {
+      // a segment ends exactly on a node: emit it even when it was too near to the last one,
+      // or the stroke would stop short of the handle it belongs to
+      if(!far_enough)
+      {
+        cairo_line_to(cr, coord_x, coord_y);
+        last_x = coord_x;
+        last_y = coord_y;
+      }
+
       const gboolean seg_is_selected = group_selected
                                        && (dt_masks_gui_selected_segment_index(mask_gui)
                                            == current_segment_index);
@@ -3158,6 +3234,9 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
 
       show_segment_index = (show_segment_index + 1) % node_count;
       current_segment_index++;
+
+      // dt_draw_stroke_line() consumed the path; the next one starts here
+      cairo_move_to(cr, coord_x, coord_y);
     }
 
     if(mask_gui->creation && current_segment_index >= node_count - 1) break;
@@ -3172,47 +3251,377 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
  * stored in creation_formids are therefore drawn explicitly here, so only the
  * shapes created in this session stay visible until creation mode is exited.
  */
+/* The creation session's own outline cache.
+ *
+ * GUI-thread state, like every other dt_masks_form_gui_t. It is static because the shapes it
+ * describes outlive a single expose and nothing else owns them: `creation_formids' is a list of
+ * ids, and the outlines built from them used to live in a STACK LOCAL that was initialised fresh
+ * every expose, with its cache key forced to zero after each shape. That defeated the cache by
+ * construction -- every shape drawn since creation mode was entered was re-derived and thrown away
+ * on every frame.
+ *
+ * Measured on #1158, with the list length as the variable: 0 shapes 0.0000 s, 1 shape 0.1141 s,
+ * 2 shapes 0.2431 s, 3 shapes 0.3189 s, 4 shapes 0.4444 s -- about 110 ms per shape per expose,
+ * while the mask GROUP, whose outlines ARE cached, drew all of its shapes in 0.0020 s. Everything
+ * else in that stage measured zero: the predicates, the preamble, the group push, the outline
+ * refresh, the composite, the hit test.
+ */
+static dt_masks_form_gui_t _session_gui = { 0 };
+static gboolean _session_gui_inited = FALSE;
+static uint64_t _session_gui_generation = 0;
+static int _session_gui_count = 0;
+
+/* The shapes already saved in this session, rendered.
+ *
+ * They do not change while a new stroke is being drawn -- that is what makes them "already saved"
+ * -- so re-stroking them on every frame is redrawing a still image. Measured: 8.8 ms per shape per
+ * frame with the outline cached and decimated, 15.9 ms of a 25.7 ms redraw, and it is rasterisation
+ * rather than geometry (only the path is stroked for these; borders, nodes and handles all sit
+ * behind `group_selected == index', which is never true here).
+ *
+ * A cairo pattern from cairo_pop_group() is that rendering, kept. Painting it costs one composite
+ * whatever the shape count, and cairo owns the surface behind it so there is nothing to size or
+ * free by hand.
+ *
+ * The key has to include the MATRIX: a group's pattern carries the transform in effect when it was
+ * pushed, so painting it under a different one would put the shapes somewhere else. Panning or
+ * zooming therefore re-renders, which is correct and is not a per-frame cost while drawing. */
+static cairo_pattern_t *_session_pattern = NULL;
+static uint64_t _session_pattern_key = 0;
+
+/* The area those shapes actually occupy, in the same coordinates they are drawn in.
+ *
+ * Both halves of this cost the whole window otherwise: the group is sized to the CLIP at push
+ * time, and painting its pattern fills the clip. Measured with no clip: a cache HIT still costs
+ * 7.5 ms -- compositing a device-scaled full-frame ARGB surface -- and a miss 19.3 ms, together
+ * 3.13 s of a 5.77 s redraw total. Shapes that cover a fifth of the frame should cost a fifth of
+ * that, and clipping to their union is what says so to cairo. */
+static gboolean _session_bbox_valid = FALSE;
+static double _session_bbox[4] = { 0.0, 0.0, 0.0, 0.0 };   /**< x0, y0, x1, y1 */
+
+/* Did the outlines actually move?
+ *
+ * The rendering is keyed on the geometry GENERATION, which is deliberately a version and not a
+ * content hash -- over-invalidating is the safe direction for the geometry service, whose consumers
+ * mostly recompute something cheap. Here it is not cheap: committing a stroke advances the
+ * generation, and re-rendering costs ~18 ms per shape in the session, 218 ms at twelve of them.
+ * That is the whole of the tail.
+ *
+ * But a generation bump does not mean the outlines moved. This asks whether they did, from the
+ * outlines themselves: the point count and the two endpoints of every shape. Anything that moves an
+ * outline -- a crop, a rotation, a scale, a keystone -- shifts every coordinate in it, endpoints
+ * included, and a shape edited into a different path changes its point count or its ends. What it
+ * cannot see is a change that preserves both endpoints AND the exact point count while moving
+ * points in between; no geometry module does that, and an edit that did would have committed a
+ * different point count on the way.
+ *
+ * Cheap on purpose: three numbers per shape, against hashing 89 000 points each. */
+typedef struct _session_outline_sig_t
+{
+  int points_count;
+  float first[2];
+  float last[2];
+} _session_outline_sig_t;
+
+static _session_outline_sig_t *_session_sigs = NULL;
+static int _session_sigs_count = 0;
+
+static void _session_sigs_reset(void)
+{
+  dt_free(_session_sigs);
+  _session_sigs = NULL;
+  _session_sigs_count = 0;
+}
+
+/** @brief Take the signature of every cached outline. @return the number taken. */
+static int _session_sigs_take(const dt_masks_form_gui_t *gui, _session_outline_sig_t *out, const int max)
+{
+  int taken = 0;
+  for(const GList *node = gui->points; node && taken < max; node = g_list_next(node))
+  {
+    const dt_masks_form_gui_points_t *const pts = (const dt_masks_form_gui_points_t *)node->data;
+    if(IS_NULL_PTR(pts)) continue;
+
+    out[taken].points_count = pts->points_count;
+    if(!IS_NULL_PTR(pts->points) && pts->points_count > 0)
+    {
+      out[taken].first[0] = pts->points[0];
+      out[taken].first[1] = pts->points[1];
+      out[taken].last[0] = pts->points[2 * (pts->points_count - 1)];
+      out[taken].last[1] = pts->points[2 * (pts->points_count - 1) + 1];
+    }
+    else
+      out[taken].first[0] = out[taken].first[1] = out[taken].last[0] = out[taken].last[1] = 0.0f;
+    taken++;
+  }
+  return taken;
+}
+
+/** @brief Union of the cached outlines, or FALSE when there is nothing to bound. */
+static gboolean _session_bbox_from_points(const dt_masks_form_gui_t *gui, double bbox[4])
+{
+  gboolean any = FALSE;
+  for(const GList *node = gui->points; node; node = g_list_next(node))
+  {
+    const dt_masks_form_gui_points_t *const pts = (const dt_masks_form_gui_points_t *)node->data;
+    if(IS_NULL_PTR(pts) || IS_NULL_PTR(pts->points) || pts->points_count <= 0) continue;
+
+    for(int i = 0; i < pts->points_count; i++)
+    {
+      const double x = pts->points[2 * i];
+      const double y = pts->points[2 * i + 1];
+      if(isnan(x) || isnan(y)) continue;
+
+      if(!any)
+      {
+        bbox[0] = bbox[2] = x;
+        bbox[1] = bbox[3] = y;
+        any = TRUE;
+      }
+      else
+      {
+        bbox[0] = fmin(bbox[0], x);
+        bbox[1] = fmin(bbox[1], y);
+        bbox[2] = fmax(bbox[2], x);
+        bbox[3] = fmax(bbox[3], y);
+      }
+    }
+  }
+  return any;
+}
+
+/** @brief Clip to the session's area, with room for the stroke's own width. */
+static gboolean _session_clip(cairo_t *cr, const float zoom_scale)
+{
+  if(!_session_bbox_valid) return FALSE;
+
+  const double margin = (zoom_scale > 1e-6f) ? (16.0 / zoom_scale) : 0.0;
+  cairo_save(cr);
+  cairo_rectangle(cr, _session_bbox[0] - margin, _session_bbox[1] - margin,
+                  (_session_bbox[2] - _session_bbox[0]) + 2.0 * margin,
+                  (_session_bbox[3] - _session_bbox[1]) + 2.0 * margin);
+  cairo_clip(cr);
+  cairo_new_path(cr);
+  return TRUE;
+}
+
+/** @brief Drop the session outlines. Safe to call when nothing is cached. */
+static void _session_pattern_reset(void)
+{
+  if(!IS_NULL_PTR(_session_pattern)) cairo_pattern_destroy(_session_pattern);
+  _session_pattern = NULL;
+  _session_pattern_key = 0;
+}
+
+static void _session_bbox_invalidate(void)
+{
+  _session_bbox_valid = FALSE;
+}
+
+/** @brief What the cached rendering is a rendering OF. */
+static uint64_t _session_pattern_hash(cairo_t *cr, const dt_masks_form_gui_t *creation_gui,
+                                      const uint64_t generation, const int count)
+{
+  cairo_matrix_t matrix;
+  cairo_get_matrix(cr, &matrix);
+
+  /* No generation here: whether the geometry MOVED is asked of the outlines themselves
+   * (_session_sigs_take), because the generation advances on every history commit -- including the
+   * one that saves the stroke being drawn -- without shifting any of these shapes. What remains in
+   * the key is what genuinely describes this rendering: where it was drawn, and which shapes. */
+  (void)generation;
+  uint64_t hash = 5381;
+  hash = dt_hash(hash, (const char *)&matrix, sizeof(matrix));
+  hash = dt_hash(hash, (const char *)&count, sizeof(count));
+  for(const GList *node = creation_gui->creation_formids; node; node = g_list_next(node))
+  {
+    const int formid = GPOINTER_TO_INT(node->data);
+    hash = dt_hash(hash, (const char *)&formid, sizeof(formid));
+  }
+  return hash ? hash : 1;
+}
+
+static void _session_gui_reset(void)
+{
+  _session_pattern_reset();
+  _session_bbox_invalidate();
+  _session_sigs_reset();
+  if(!_session_gui_inited) return;
+  g_list_free_full(_session_gui.points, dt_masks_form_gui_points_free);
+  _session_gui.points = NULL;
+  _session_gui_generation = 0;
+  _session_gui_count = 0;
+}
+
 static void _masks_draw_creation_session_forms(dt_develop_t *develop, dt_iop_module_t *module,
                                                cairo_t *cr, const float zoom_scale,
                                                const dt_masks_form_gui_t *creation_gui)
 {
-  if(!creation_gui->creation || IS_NULL_PTR(creation_gui->creation_formids)) return;
+  /* Nothing to draw and nothing to forget.
+   *
+   * `creation' goes false between strokes -- a shape is committed, then the next one begins -- and
+   * resetting on that threw the session's rendering away every time: 46 of 78 cache misses in one
+   * log had no reason to report beyond the pattern having been destroyed, at ~21 ms each. The
+   * shapes it describes are still there, and will be drawn again the moment creation resumes.
+   *
+   * What ends the session is the LIST emptying, which is the only thing reset on here now. */
+  if(IS_NULL_PTR(creation_gui->creation_formids))
+  {
+    _session_gui_reset();
+    return;
+  }
 
-  dt_masks_form_gui_t draw_gui;
-  dt_masks_init_form_gui(develop, &draw_gui);
-  draw_gui.edit_mode = creation_gui->edit_mode;
-  draw_gui.group_selected = -1;
-  draw_gui.pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
+  const int count = g_list_length(creation_gui->creation_formids);
+
+  if(!creation_gui->creation)
+  {
+    // Nothing to draw between strokes. Said out loud so a log reader does not count it as a cache
+    // miss: the outer timer around this call fires either way.
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      dt_print(DT_DEBUG_MASKS, "[masks] creation session idle (%d shapes kept)\n", count);
+    return;
+  }
+
+  const uint64_t live_generation = dt_geometry_chain_generation(develop->geometry_chain);
+
+  if(!_session_gui_inited)
+  {
+    dt_masks_init_form_gui(develop, &_session_gui);
+    _session_gui_inited = TRUE;
+    _session_gui_generation = 0;
+    _session_gui_count = 0;
+  }
+  _session_gui.dev = develop;
+  _session_gui.edit_mode = creation_gui->edit_mode;
+  _session_gui.group_selected = -1;
+
+  /* Rebuild only when the composed geometry moved or the session gained a shape -- the same rule
+   * the mask group's outlines follow. A shape's own content changing commits history, which
+   * rebuilds the chain, which advances the generation. */
+  const gboolean rebuild = (_session_gui_generation != live_generation) || (_session_gui_count != count);
+  if(rebuild)
+  {
+    g_list_free_full(_session_gui.points, dt_masks_form_gui_points_free);
+    _session_gui.points = NULL;
+  }
+
+  /* The outlines are current from here on. Ask whether they actually MOVED before deciding the
+   * rendering is stale: the generation advances when a stroke is committed, which does not shift a
+   * single point of the shapes already saved. */
+  gboolean outlines_moved = TRUE;
+  if(rebuild)
+  {
+    _session_outline_sig_t *const sigs
+        = (_session_outline_sig_t *)dt_alloc_align(sizeof(_session_outline_sig_t) * MAX(count, 1));
+    const int taken = IS_NULL_PTR(sigs) ? 0 : _session_sigs_take(&_session_gui, sigs, count);
+
+    outlines_moved = IS_NULL_PTR(_session_sigs) || taken != _session_sigs_count
+                     || IS_NULL_PTR(sigs)
+                     || memcmp(sigs, _session_sigs, sizeof(_session_outline_sig_t) * taken) != 0;
+
+    if(!IS_NULL_PTR(sigs))
+    {
+      dt_free(_session_sigs);
+      _session_sigs = sigs;
+      _session_sigs_count = taken;
+    }
+  }
+  else
+    outlines_moved = FALSE;
+
+  /* Nothing about these shapes changed: paint the rendering we already have. */
+  const uint64_t pattern_key = _session_pattern_hash(cr, creation_gui, live_generation, count);
+
+  if((dt_get_debug_flags() & DT_DEBUG_PERF) && (outlines_moved || pattern_key != _session_pattern_key))
+  {
+    cairo_matrix_t matrix;
+    cairo_get_matrix(cr, &matrix);
+    dt_print(DT_DEBUG_MASKS,
+             "[masks] session re-render: rebuild=%d moved=%d generation %lu->%lu count %d->%d"
+             " matrix (%.4f %.4f %.4f %.4f %.2f %.2f)\n",
+             rebuild, outlines_moved, (unsigned long)_session_gui_generation,
+             (unsigned long)live_generation, _session_gui_count, count, matrix.xx, matrix.yx,
+             matrix.xy, matrix.yy, matrix.x0, matrix.y0);
+  }
+  if(!outlines_moved && !IS_NULL_PTR(_session_pattern) && pattern_key == _session_pattern_key)
+  {
+    const gboolean clipped = _session_clip(cr, zoom_scale);
+    cairo_set_source(cr, _session_pattern);
+    cairo_paint(cr);
+    if(clipped) cairo_restore(cr);
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      dt_print(DT_DEBUG_MASKS, "[masks] creation session (%d shapes) painted from cache\n", count);
+    return;
+  }
+
+  _session_pattern_reset();
+
+  /* Bound the group to what the previous render occupied. The outlines are already built by the
+   * time this matters -- the very first render of a session has no bbox yet and takes the whole
+   * clip, once. */
+  const gboolean clipped = _session_clip(cr, zoom_scale);
+  cairo_push_group(cr);
 
   // Iterate over the ids saved in this creation session. Other masks stay
   // hidden while creation is active, even if they belong to the same module.
+  int index = 0;
   for(GList *formid_node = creation_gui->creation_formids; formid_node; formid_node = g_list_next(formid_node))
   {
     const int formid = GPOINTER_TO_INT(formid_node->data);
     dt_masks_form_t *session_form = dt_masks_get_from_id(develop, formid);
     if(IS_NULL_PTR(session_form)) continue;
 
-    dt_masks_gui_form_test_create(session_form, &draw_gui, module);
+    /* Built at `index', not at 0: one slot per shape, so they can all be kept. The old loop wrote
+     * every shape into slot 0 and freed it again, which is why none of them could be cached. */
+    const double shape_start = dt_get_wtime();
+    if(rebuild) dt_masks_gui_form_create(session_form, &_session_gui, index, module);
+    const double built = dt_get_wtime();
+
     if(session_form->functions && session_form->functions->post_expose)
     {
       const guint point_count = g_list_length(session_form->points);
-      draw_gui.type = session_form->type;
-      session_form->functions->post_expose(cr, zoom_scale, &draw_gui, 0, point_count);
+      _session_gui.type = session_form->type;
+      session_form->functions->post_expose(cr, zoom_scale, &_session_gui, index, point_count);
     }
+
+    /* Which half costs: rebuilding an outline, or stroking it. The session is 15.9 ms of a 25.7 ms
+     * redraw, about 5 ms per shape, while the shape being drawn -- same stroker, cached outline --
+     * costs 1.4 ms. Either the cache is not holding here or the draw is genuinely dearer, and
+     * those want opposite fixes. */
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      dt_print(DT_DEBUG_MASKS, "[masks] session shape %d: %s %0.04f sec, drawn %0.04f sec\n", index,
+               rebuild ? "rebuilt in" : "cached,", built - shape_start, dt_get_wtime() - built);
 
     // Keep the saved-session shape path from being connected to the active
     // creation cursor drawn right after this loop.
     cairo_new_path(cr);
-    g_list_free_full(draw_gui.points, dt_masks_form_gui_points_free);
-    draw_gui.points = NULL;
-    draw_gui.pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
-    draw_gui.formid = 0;
+    index++;
+  }
+
+  /* Keep the rendering, and paint it -- this frame included, so the first frame after a change
+   * costs the same as it did before and every later one costs a composite. */
+  _session_pattern = cairo_pop_group(cr);
+  _session_pattern_key = pattern_key;
+  cairo_set_source(cr, _session_pattern);
+  cairo_paint(cr);
+  if(clipped) cairo_restore(cr);
+
+  /* The bbox is a function of the OUTLINES, so it is recomputed when they are and not when the
+   * matrix moved under them -- walking every point of every shape is not free (measured: doing it
+   * on every render took the miss path from 19.3 ms to 25.1 ms, more than the clip saved). */
+  if(rebuild) _session_bbox_valid = _session_bbox_from_points(&_session_gui, _session_bbox);
+
+  if(rebuild)
+  {
+    _session_gui_generation = live_generation;
+    _session_gui_count = count;
   }
 }
 
 void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr, int32_t width, int32_t height,
                                  int32_t pointerx, int32_t pointery)
 {
+  const double post_expose_start = dt_get_wtime();
   dt_develop_t *develop = dev;
   if(IS_NULL_PTR(develop)) return;
   dt_masks_form_t *mask_form = dt_masks_get_visible_form(develop);
@@ -3227,17 +3636,27 @@ void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *modu
   if(buffer_width < 1.0 || buffer_height < 1.0) return;
   const float zoom_scale = dt_dev_get_zoom_level(develop);
 
-  // Create a surface to draw the mask, so that we can apply
-  // operation that does not affect the main context
-  cairo_surface_t *overlay = NULL;
-  cairo_t *mask_draw = NULL;
-  cairo_surface_t *target = cairo_get_target(cr);
-  double sx = 1.0, sy = 1.0;
-  cairo_surface_get_device_scale(target, &sx, &sy);
-  overlay = cairo_surface_create_similar(target, CAIRO_CONTENT_COLOR_ALPHA, (int)ceil(width * sx),
-                                         (int)ceil(height * sy));
-  cairo_surface_set_device_scale(overlay, sx, sy);
-  mask_draw = cairo_create(overlay);
+  /* Draw into an isolated group, so that overlapping shapes composite once against the view
+   * instead of once each.
+   *
+   * This used to allocate a full-window ARGB surface with cairo_surface_create_similar() on EVERY
+   * expose and destroy it again at the end -- at ppd 2 that is a four-byte-per-pixel buffer of
+   * four times the window's area, created, cleared, composited and freed per frame, and on an
+   * X11 or GL target it is a server-side pixmap each time. Measured on #1158: the expose stage
+   * that contains it costs 0.44 s while the mask drawing inside it costs 0.0014 s, and it grows
+   * across a session -- 11 ms, 137, 221, 310 -- which is what repeated large allocation and
+   * release looks like.
+   *
+   * cairo_push_group() is the same isolation with none of that: cairo sizes the group to the
+   * current CLIP rather than the window, and takes it from its own scratch pool instead of
+   * allocating. Every path out of here must pop what it pushed. */
+  const double group_start = dt_get_wtime();
+  if(dt_get_debug_flags() & DT_DEBUG_PERF)
+    dt_print(DT_DEBUG_MASKS, "[masks] overlay preamble took %0.04f sec\n", group_start - post_expose_start);
+  cairo_push_group(cr);
+  cairo_t *const mask_draw = cr;
+  if(dt_get_debug_flags() & DT_DEBUG_PERF)
+    dt_print(DT_DEBUG_MASKS, "[masks] overlay group pushed in %0.04f sec\n", dt_get_wtime() - group_start);
 
   // Apply the same transformation to the mask drawing context
   /*cairo_matrix_t m;
@@ -3250,19 +3669,31 @@ void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *modu
   if(dt_dev_rescale_roi_to_input(develop, mask_draw, width, height))
   {
     cairo_restore(mask_draw);
-    cairo_destroy(mask_draw);
-    cairo_surface_destroy(overlay);
+    cairo_pattern_destroy(cairo_pop_group(cr));   // discard: nothing was drawn
     return;
   }
 
   // We update the form if needed
   // Add preview when creating a circle, ellipse and gradient
+  const dt_times_t rebuild_start = { 0 };
+  dt_get_times((dt_times_t *)&rebuild_start);
+
   if(!((mask_form->type & DT_MASKS_IS_PRIMITIVE_SHAPE) && mask_gui->creation))
     dt_masks_gui_form_test_create(mask_form, mask_gui, module);
 
+  if(dt_get_debug_flags() & DT_DEBUG_MASKS)
+    dt_show_times(&rebuild_start, "[masks] overlay outline refresh");
+
+  const double session_start = dt_get_wtime();
   _masks_draw_creation_session_forms(develop, module, mask_draw, zoom_scale, mask_gui);
+  if(dt_get_debug_flags() & DT_DEBUG_PERF)
+    dt_print(DT_DEBUG_MASKS, "[masks] creation session (%d shapes) drawn in %0.04f sec\n",
+             g_list_length(mask_gui->creation_formids), dt_get_wtime() - session_start);
 
   // Draw form
+  const dt_times_t draw_start = { 0 };
+  dt_get_times((dt_times_t *)&draw_start);
+
   if(mask_form->type & DT_MASKS_GROUP)
     dt_group_events_post_expose(mask_draw, zoom_scale, mask_form, mask_gui);
   else if(mask_form->functions && mask_form->functions->post_expose)
@@ -3273,19 +3704,35 @@ void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *modu
   }
   cairo_restore(mask_draw);
 
-  // Draw the overlay with the same transformation as the main context
-  cairo_save(cr);
-  cairo_identity_matrix(cr);
-  cairo_set_source_surface(cr, overlay, 0.0, 0.0);
-  cairo_paint(cr);
-  cairo_restore(cr);
+  if(dt_get_debug_flags() & DT_DEBUG_MASKS)
+    dt_show_times(&draw_start, "[masks] overlay drawn");
 
-  cairo_destroy(mask_draw);
-  cairo_surface_destroy(overlay);
+  /* Composite the group. pop_group_to_source() hands back a pattern already carrying the matrix
+   * that was in effect at push time, so a plain paint reproduces exactly what the explicit
+   * full-window surface did -- the save/restore pair above balances the one taken after the
+   * push. */
+  const double composite_start = dt_get_wtime();
+  cairo_pop_group_to_source(cr);
+  cairo_paint(cr);
+  if(dt_get_debug_flags() & DT_DEBUG_PERF)
+    dt_print(DT_DEBUG_MASKS, "[masks] overlay composited in %0.04f sec\n", dt_get_wtime() - composite_start);
 }
 
 void dt_masks_clear_form_gui(dt_develop_t *develop)
 {
+  /* Deliberately NOT resetting the creation session's cache here.
+   *
+   * dt_masks_change_form_gui() calls this every time the visible form changes, which during a
+   * creation session is once per stroke -- and the shapes already saved in that session are
+   * unaffected by which form is currently being edited. Tying the two together threw away their
+   * rendering AND their outlines on every stroke: 37 of 77 cache misses in one log came from the
+   * pattern having been destroyed rather than from anything about the shapes changing, each
+   * costing a 20 ms re-render.
+   *
+   * What ends the session cache is the session ending, which
+   * _masks_draw_creation_session_forms() handles at its top, and any change to what it describes,
+   * which its key covers: the geometry generation, the shape count, the shape ids and the
+   * matrix. */
   if(IS_NULL_PTR(develop->form_gui)) return;
   g_list_free_full(develop->form_gui->points, dt_masks_form_gui_points_free);
   develop->form_gui->points = NULL;
@@ -3294,7 +3741,7 @@ void dt_masks_clear_form_gui(dt_develop_t *develop)
   dt_masks_dynbuf_free(develop->form_gui->guipoints_payload);
   develop->form_gui->guipoints_payload = NULL;
   develop->form_gui->guipoints_count = 0;
-  develop->form_gui->pipe_hash = DT_PIXELPIPE_CACHE_HASH_INVALID;
+  develop->form_gui->geometry_generation = 0;
   develop->form_gui->formid = 0;
   develop->form_gui->delta[0] = develop->form_gui->delta[1] = 0.0f;
   develop->form_gui->scrollx = develop->form_gui->scrolly = 0.0f;
