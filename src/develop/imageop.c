@@ -432,12 +432,34 @@ int default_iop_focus(dt_gui_module_t *m, gboolean toggle)
   return 1;
 }
 
-int dt_iop_load_module_so(void *m, const char *libname, const char *module_name)
+/**
+ * @brief Bind one statically-linked IOP module into its @ref dt_iop_module_so_t.
+ *
+ * @details IOP modules are compiled into lib_ansel, not dlopen'd: the set of them is fixed
+ * at build time, and both develop/iop_order.c's order tables and develop/geometry's roster
+ * are written against that same fixed set, so a module discovered on disk could never be
+ * anything but a disagreement with them -- which is exactly what
+ * dt_ioppr_check_so_iop_order() used to abort startup over. See doc/static-iop.md.
+ *
+ * This replaces the g_module_symbol() sweep. Two halves, and they cannot be merged:
+ * @p entry->fill_so() runs in the MODULE's translation unit, where the plain API names
+ * resolve to that module's own asm-labelled symbols, and stores NULL for every entry point
+ * it does not define; the DEFAULT fallbacks are applied here instead, because default_<fn>
+ * is static to this file.
+ *
+ * @param module Zeroed module descriptor to fill.
+ * @param entry Registry entry naming the module and its generated binder.
+ * @return 0 on success, 1 if the module must not be used.
+ */
+static int _iop_load_module_static(dt_iop_module_so_t *module,
+                                   const dt_iop_module_static_entry_t *const entry)
 {
-  dt_iop_module_so_t *module = (dt_iop_module_so_t *)m;
+  const char *const module_name = entry->op;
   g_strlcpy(module->op, module_name, sizeof(module->op));
 
-#define INCLUDE_API_FROM_MODULE_LOAD "iop_load_module"
+  entry->fill_so(module);
+
+#define INCLUDE_API_FROM_MODULE_STATIC_DEFAULTS
 #include "iop/iop_api.h"
 
   if(IS_NULL_PTR(module->init)) module->init = dt_iop_default_init;
@@ -467,7 +489,12 @@ int dt_iop_load_module_so(void *m, const char *libname, const char *module_name)
          module->get_f == default_get_f ||
          module->get_introspection_linear == default_get_introspection_linear ||
          module->get_introspection == default_get_introspection)
-        goto api_h_error;
+      {
+        fprintf(stderr,
+                "[iop_load_module] `%s' claims introspection but did not replace the default"
+                " accessors\n", module_name);
+        return 1;
+      }
     }
     else
       fprintf(stderr, "[iop_load_module] failed to initialize introspection for operation `%s'\n", module_name);
@@ -511,8 +538,6 @@ int dt_iop_load_module_by_so(dt_iop_module_t *module, dt_iop_module_so_t *so, dt
   module->raster_mask.sink.source = NULL;
   module->raster_mask.sink.id = 0;
 
-  // only reference cached results of dlopen:
-  module->module = so->module;
   module->so = so;
 
 #define INCLUDE_API_FROM_MODULE_LOAD_BY_SO
@@ -568,11 +593,38 @@ int dt_iop_load_module_by_so(dt_iop_module_t *module, dt_iop_module_so_t *so, dt
   return 0;
 }
 
+/**
+ * @brief Build one pixelpipe node's module-owned storage.
+ *
+ * @details Establishes what _iop_piece_is_committable() later relies on. init_pipe is OPTIONAL
+ * in the module API, so a module that allocates nothing is legitimate and leaves data NULL with
+ * data_size 0; what is never legitimate is claiming a size without the storage, which is how a
+ * failed allocation would otherwise reach 61 modules that dereference piece->data unchecked.
+ */
 void dt_iop_init_pipe(struct dt_iop_module_t *module, struct dt_dev_pixelpipe_t *pipe,
                       struct dt_dev_pixelpipe_iop_t *piece)
 {
-  module->init_pipe(module, pipe, piece);
+  if(IS_NULL_PTR(module) || IS_NULL_PTR(piece)) return;
+
+  if(!IS_NULL_PTR(module->init_pipe)) module->init_pipe(module, pipe, piece);
+
+  if(piece->data_size > 0 && IS_NULL_PTR(piece->data))
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_iop_init_pipe] `%s' could not allocate its %" G_GSIZE_FORMAT
+             " bytes of node storage; the node stays disabled\n", module->op, piece->data_size);
+    piece->data_size = 0;
+    piece->enabled = 0;
+  }
+
   piece->blendop_data = dt_calloc_align(sizeof(dt_develop_blend_params_t));
+  if(IS_NULL_PTR(piece->blendop_data))
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_iop_init_pipe] `%s' could not allocate blend storage; the node stays disabled\n",
+             module->op);
+    piece->enabled = 0;
+  }
 }
 
 /**
@@ -920,8 +972,28 @@ void dt_iop_load_modules_so(void)
 {
   // Batch presets initialization in a single transaction to avoid per-module BEGIN/COMMIT overhead.
   dt_database_begin_transaction_batch();
-  darktable.iop = dt_module_load_modules("/plugins", sizeof(dt_iop_module_so_t), dt_iop_load_module_so,
-                                         _init_module_so, NULL);
+
+  GList *modules = NULL;
+  for(int k = 0; k < dt_iop_static_modules_count; k++)
+  {
+    const dt_iop_module_static_entry_t *const entry = &dt_iop_static_modules[k];
+    dt_iop_module_so_t *module = (dt_iop_module_so_t *)calloc(1, sizeof(dt_iop_module_so_t));
+
+    if(_iop_load_module_static(module, entry))
+    {
+      dt_free(module);
+      continue;
+    }
+
+    modules = g_list_prepend(modules, module);
+    _init_module_so(module);
+  }
+
+  // The registry is emitted in a stable (alphabetical) order; keep it, rather than the
+  // arbitrary readdir() order the directory scan used to produce. Pipe order comes from
+  // iop_order and does not depend on this list's order at all.
+  darktable.iop = g_list_reverse(modules);
+
   dt_database_end_transaction_batch();
 }
 
@@ -992,7 +1064,6 @@ void dt_iop_unload_modules_so()
   {
     dt_iop_module_so_t *module = (dt_iop_module_so_t *)darktable.iop->data;
     if(module->cleanup_global) module->cleanup_global(module);
-    if(module->module) g_module_close(module->module);
     dt_free(darktable.iop->data);
     darktable.iop = g_list_delete_link(darktable.iop, darktable.iop);
   }
@@ -1310,10 +1381,103 @@ void dt_iop_compute_module_hash(dt_iop_module_t *module, GList *masks)
   module->hash = hash;
 }
 
+/**
+ * @brief Is this pipeline node safe to dispatch module code on?
+ *
+ * @details The mirror of the validation dt_iop_cleanup_pipe() already performs, and for the
+ * same reason it gives: a pipe can be walked while holding a node whose backing storage is no
+ * longer trustworthy, and "calling the descriptor callback with that same instance would only
+ * move the use-after-free into the module cleanup code". Commit is the other door into module
+ * code, and it was unguarded -- it memcpy'd into piece->blendop_data before reading anything,
+ * so a stale node corrupted memory before any callback could object.
+ *
+ * Every check here is an invariant the pipeline establishes itself, never a guess:
+ *
+ *  - dt_dev_pixelpipe_create_nodes() calloc's the node, sets piece->module, and calls
+ *    dt_iop_init_pipe(), which allocates piece->blendop_data. A node reaching commit without
+ *    those did not come from there.
+ *  - piece->module is the module the node was built for. Committing module A's params through
+ *    node B reinterprets B's private data_size bytes as A's parameter struct.
+ *  - All 89 modules that define init_pipe() set piece->data_size when they allocate
+ *    piece->data, so `data_size > 0 && data == NULL' is never a legitimate state -- it is
+ *    either a failed allocation or storage that has already been torn down. 61 modules
+ *    dereference piece->data in commit_params() without checking it, which is fine as long as
+ *    this holds, and a guaranteed SIGSEGV the moment it does not.
+ *
+ * @return TRUE when the node may be dispatched on. Reports and refuses otherwise.
+ */
+static gboolean _iop_piece_is_committable(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+                                          dt_dev_pixelpipe_iop_t *piece)
+{
+  if(IS_NULL_PTR(piece)) return FALSE;
+
+  if(IS_NULL_PTR(module))
+  {
+    dt_print(DT_DEBUG_ALWAYS, "[dt_iop_commit_params] missing module, skipping commit\n");
+    return FALSE;
+  }
+
+  if(IS_NULL_PTR(pipe))
+  {
+    dt_print(DT_DEBUG_ALWAYS, "[dt_iop_commit_params] missing pipe for `%s', skipping commit\n",
+             module->op);
+    return FALSE;
+  }
+
+  if(piece->module != module)
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_iop_commit_params] node belongs to `%s' but `%s' is committing, skipping\n",
+             IS_NULL_PTR(piece->module) ? "(none)" : piece->module->op, module->op);
+    return FALSE;
+  }
+
+  if(IS_NULL_PTR(piece->blendop_data))
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_iop_commit_params] `%s' node has no blend storage, skipping commit\n", module->op);
+    return FALSE;
+  }
+
+  if(piece->data_size > 0 && IS_NULL_PTR(piece->data))
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[dt_iop_commit_params] `%s' node claims %" G_GSIZE_FORMAT
+             " bytes of private data but has none, skipping commit\n", module->op, piece->data_size);
+    return FALSE;
+  }
+
+  if(IS_NULL_PTR(module->commit_params))
+  {
+    dt_print(DT_DEBUG_ALWAYS, "[dt_iop_commit_params] `%s' has no commit_params, skipping\n",
+             module->op);
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 void dt_iop_commit_params(dt_iop_module_t *module, dt_iop_params_t *params,
                           dt_develop_blend_params_t *blendop_params, dt_dev_pixelpipe_t *pipe,
                           dt_dev_pixelpipe_iop_t *piece)
 {
+  /* Before the memcpy below, not after: an untrustworthy node has already been written through
+   * by the time a callback could reject it. A refused node stays disabled rather than running
+   * with parameters that were never committed. */
+  if(!_iop_piece_is_committable(module, pipe, piece))
+  {
+    if(!IS_NULL_PTR(piece)) piece->enabled = 0;
+    return;
+  }
+
+  if(IS_NULL_PTR(params) || IS_NULL_PTR(blendop_params))
+  {
+    dt_print(DT_DEBUG_ALWAYS, "[dt_iop_commit_params] `%s' committed with no parameters,"
+             " skipping\n", module->op);
+    piece->enabled = 0;
+    return;
+  }
+
   // We need to commit also modules that are disabled because some of them
   // may self-enabled at commit time, depending on image input.
   // 1. commit params
