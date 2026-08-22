@@ -122,8 +122,6 @@ FILE(GLOB SOURCE_FILES
   "imageio/imageio_pnm.c"
   "imageio/imageio_rgbe.c"
   "imageio/imageio_tiff.c"
-  "imageio/imageio_im.c"
-  "imageio/imageio_gm.c"
   "gui/import.c"
   "pixel/interpolation.c"
   "pixel/locallaplacian.c"
@@ -158,8 +156,6 @@ FILE(GLOB SOURCE_FILES
   "metadata/notify.c"
   "metadata/ratings.c"
   "metadata/tags.c"
-  "common/pwstorage/backend_kwallet.c"
-  "common/pwstorage/pwstorage.c"
   "common/opencl.c"
   "system/dynload.c"
   "common/dlopencl.c"
@@ -517,27 +513,6 @@ else(IsoCodes_FOUND)
   message(STATUS "no suitable iso-codes, there will be no language names in the preferences")
 endif(IsoCodes_FOUND)
 
-#
-# Detect compile of optional pwstorage backends
-#
-if(USE_LIBSECRET)
-  find_package(Libsecret)
-  if(Libsecret_FOUND)
-    if(Libsecret_VERSION VERSION_LESS "0.18")
-      message(STATUS "Found libsecret unsupported version ${Libsecret_VERSION}. Please upgrade to version 0.18 or newer.")
-      set(Libsecret_FOUND FALSE)
-    else()
-      target_link_libraries(ansel_deps INTERFACE Libsecret::Libsecret)
-      set(SOURCES ${SOURCES} "common/pwstorage/backend_libsecret.c")
-      add_definitions(-DHAVE_LIBSECRET=1)
-    endif()
-  endif(Libsecret_FOUND)
-endif()
-
-if(USE_KWALLET)
-  add_definitions(-DHAVE_KWALLET=1)
-endif(USE_KWALLET)
-
 if(USE_MAC_INTEGRATION)
   find_package(MacIntegration)
   if(TARGET MacIntegration::MacIntegration)
@@ -551,59 +526,6 @@ if(USE_MAC_INTEGRATION)
   endif()
 endif()
 
-if(USE_GRAPHICSMAGICK)
-  find_package(GraphicsMagick)
-
-  if(TARGET GraphicsMagick::GraphicsMagick)
-    target_link_libraries(ansel_deps INTERFACE GraphicsMagick::GraphicsMagick)
-  else()
-    # pkg-config fallback
-    pkg_check_modules(GRAPHICSMAGICK QUIET IMPORTED_TARGET GraphicsMagick)
-
-    if(TARGET PkgConfig::GRAPHICSMAGICK)
-      target_link_libraries(ansel_deps INTERFACE PkgConfig::GRAPHICSMAGICK)
-    elseif(GraphicsMagick_FOUND)
-      # legacy fallback
-      target_include_directories(ansel_deps INTERFACE ${GraphicsMagick_INCLUDE_DIRS})
-      target_link_libraries(ansel_deps INTERFACE ${GraphicsMagick_LIBRARIES})
-    endif()
-  endif()
-
-  if(TARGET GraphicsMagick::GraphicsMagick OR TARGET PkgConfig::GRAPHICSMAGICK OR GraphicsMagick_FOUND)
-    set(DT_SUPPORTED_EXTENSIONS
-        ${DT_SUPPORTED_EXTENSIONS}
-        gif jpc jp2 bmp dcm jng miff mng pbm pnm ppm pgm webp
-        CACHE INTERNAL "")
-    add_definitions(-DHAVE_GRAPHICSMAGICK=1)
-  endif()
-endif()
-
-if(USE_IMAGEMAGICK AND NOT TARGET GraphicsMagick::GraphicsMagick AND NOT TARGET PkgConfig::GRAPHICSMAGICK)
-  pkg_check_modules(IMAGEMAGICK IMPORTED_TARGET MagickWand>=7)
-
-  if(TARGET PkgConfig::IMAGEMAGICK)
-    target_link_libraries(ansel_deps INTERFACE PkgConfig::IMAGEMAGICK)
-    add_definitions(-DHAVE_IMAGEMAGICK=1)
-
-    # pkg-config CFLAGS_OTHER (rare but needed for ImageMagick)
-    if(IMAGEMAGICK_CFLAGS_OTHER)
-      target_compile_options(ansel_deps INTERFACE ${IMAGEMAGICK_CFLAGS_OTHER})
-    endif()
-
-    set(DT_SUPPORTED_EXTENSIONS
-        ${DT_SUPPORTED_EXTENSIONS}
-        gif jpc jp2 bmp dcm jng miff mng pam webp
-        CACHE INTERNAL "")
-  endif()
-endif()
-
-if(USE_GMIC)
-  find_package(GMIC)
-  if(GMIC_FOUND)
-    add_definitions(-DHAVE_GMIC=1)
-    target_link_libraries(ansel_deps INTERFACE ${GMIC_LIBRARIES})
-  endif(GMIC_FOUND)
-endif(USE_GMIC)
 
 if(USE_ICU)
   find_package(ICU REQUIRED COMPONENTS uc i18n data)

@@ -118,7 +118,6 @@
 #include "metadata/exif.h"
 #include "history/history.h"
 #include "database/history_repository.h"
-#include "common/pwstorage/pwstorage.h"
 #include "common/selection.h"
 #include "gui/privacy_consent.h"
 #include "common/sentry.h"
@@ -195,11 +194,6 @@
 #include <xmmintrin.h>
 #endif
 
-#ifdef HAVE_GRAPHICSMAGICK
-#include <magick/api.h>
-#elif defined HAVE_IMAGEMAGICK
-#include <MagickWand/MagickWand.h>
-#endif
 
 #include "common/dbus.h"
 #include "common/utility.h"
@@ -275,7 +269,7 @@ static int usage(const char *argv0)
   printf("  --configdir <user config directory>\n");
   printf("  -d {all,cache,camctl,camsupport,colorprofile,control,demosaic,dev,gtk,history,imageio,import,\n");
   printf("      input,ioporder,lighttable,lua,masks,memory,nan,nocache_reuse,opencl,params,\n");
-  printf("      perf,pipe,pipecache,print,pwstorage,signal,sql,shortcuts,tiling,undo,verbose}\n");
+  printf("      perf,pipe,pipecache,print,signal,sql,shortcuts,tiling,undo,verbose}\n");
   printf("  --d-signal <signal> \n");
   printf("  --d-signal-act <all,raise,connect,disconnect");
   // clang-format on
@@ -670,11 +664,6 @@ struct dt_l10n_t *dt_l10n_get_global(void)
   return darktable.l10n;
 }
 
-const struct dt_pwstorage_t *dt_pwstorage_get_global(void)
-{
-  return darktable.pwstorage;
-}
-
 struct dt_dbus_t *dt_dbus_get_global(void)
 {
   return darktable.dbus;
@@ -987,18 +976,6 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
                "  Colord support disabled\n"
 #endif
 
-#ifdef HAVE_GRAPHICSMAGICK
-               "  GraphicsMagick support enabled\n"
-#else
-               "  GraphicsMagick support disabled\n"
-#endif
-
-#ifdef HAVE_IMAGEMAGICK
-               "  ImageMagick support enabled\n"
-#else
-               "  ImageMagick support disabled\n"
-#endif
-
 #ifdef HAVE_OPENEXR
                "  OpenEXR support enabled\n"
 #else
@@ -1077,8 +1054,6 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
           darktable.unmuted |= DT_DEBUG_PIPECACHE; // pipeline cache
         else if(!strcmp(argv[k + 1], "perf"))
           darktable.unmuted |= DT_DEBUG_PERF; // performance measurements
-        else if(!strcmp(argv[k + 1], "pwstorage"))
-          darktable.unmuted |= DT_DEBUG_PWSTORAGE; // pwstorage module
         else if(!strcmp(argv[k + 1], "opencl"))
           darktable.unmuted |= DT_DEBUG_OPENCL; // gpu accel via opencl
         else if(!strcmp(argv[k + 1], "sql"))
@@ -1593,23 +1568,31 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
   /* capabilities set to NULL */
   darktable.capabilities = NULL;
 
-  // Initialize the password storage engine
-  darktable.pwstorage = dt_pwstorage_new();
-
   darktable.guides = dt_guides_init();
 
-#ifdef HAVE_GRAPHICSMAGICK
-  /* GraphicsMagick init */
-  InitializeMagick(darktable.progname);
-
-  // *SIGH*
+  // Re-assert our handlers once the third-party libraries above are up. This used to compensate
+  // for GraphicsMagick's InitializeMagick(), which stole all of them; that library is gone, but
+  // the call is cheap and idempotent (system_signal_handling.c counts its invocations), and it
+  // keeps the guarantee that whatever init ran before this point cannot leave us without a
+  // SIGSEGV handler. Crash reporting is initialized after it, deliberately.
   dt_set_signal_handlers();
 
-#elif defined HAVE_IMAGEMAGICK
-
-  /* ImageMagick init */
-  MagickWandGenesis();
-
+#ifdef _OPENMP
+  // Re-assert our thread count last, after every library above has initialised.
+  //
+  // omp_set_num_threads() writes only the CALLING thread's ICV, and a library that sizes its own
+  // pool from omp_get_num_procs() publishes that by calling it -- a process-wide side effect on a
+  // library-local decision. GraphicsMagick's InitializeMagick() did exactly that from here, which
+  // silently overrode `-t N` and the "CPU cores" preference for every parallel region entered from
+  // this thread afterwards: invisible in the GUI, where pixel work runs on control worker threads
+  // that set their own count in dt_control_work(), and total in ansel-cli, where the export
+  // pipeline runs on this very thread.
+  //
+  // Both of the libraries known to have done it -- GraphicsMagick and G'MIC -- have since been
+  // removed, so nothing in the current dependency set is known to clobber the count. This stays
+  // anyway, and deliberately unconditional: it costs one call at startup, the failure mode is
+  // silent, and it took an LD_PRELOAD shim to find the last one. Keep it after every library init.
+  omp_set_num_threads(darktable.num_openmp_threads);
 #endif
 
   darktable.noiseprofile_parser = dt_noiseprofile_init(noiseprofiles_from_command);
@@ -1798,7 +1781,11 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
 
   if(init_gui)
   {
-    dt_accels_load_user_config(darktable.gui->accels);
+    // The user config is already loaded from gui/application.c, right after dt_accels_init()
+    // and before any widget/menu is built -- loading it again here would re-read the
+    // still-on-disk (unsaved) file and clobber any normalization dt_accels_connect_accels()
+    // already applied to the live GtkAccelMap in the meantime (e.g. an old Ctrl-flavored
+    // save recognized as today's platform-native default and resynced accordingly).
     dt_accels_connect_accels(darktable.gui->accels);
     //gtk_window_add_accel_group(GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)), darktable.gui->accels->global_accels);
 
@@ -1968,13 +1955,6 @@ void dt_cleanup()
   dt_supervisor_cleanup();
 
   dt_opencl_cleanup();
-  dt_pwstorage_destroy(darktable.pwstorage);
-
-#ifdef HAVE_GRAPHICSMAGICK
-  DestroyMagick();
-#elif defined HAVE_IMAGEMAGICK
-  MagickWandTerminus();
-#endif
 
   dt_guides_cleanup(darktable.guides);
 
