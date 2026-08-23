@@ -421,7 +421,9 @@ int dt_image_cache_seed(const dt_image_t *img)
   seeded.dng_gain_maps = NULL;
   seeded.cache_entry = NULL;
 
-  return dt_cache_seed(&cache->cache, (uint32_t)seeded.id, &seeded, sizeof(dt_image_t), sizeof(dt_image_t), FALSE);
+  // dt_image_cache_deallocate() frees entry->data with dt_free_align(); dt_cache_seed()
+  // allocates with dt_alloc_align() and no longer offers any other option.
+  return dt_cache_seed(&cache->cache, (uint32_t)seeded.id, &seeded, sizeof(dt_image_t), sizeof(dt_image_t));
 }
 
 // This callback must run before any other DT_SIGNAL_IMAGE_INFO_CHANGED handler.
