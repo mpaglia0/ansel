@@ -69,6 +69,7 @@ struct dt_colorspaces_color_profile_t;
 
 #include "common/paths.h"
 #include "pixel/format.h"
+#include "lensserious_vendor.h"
 #include <glib.h>
 #include <glib/gi18n.h>
 #include <inttypes.h>
@@ -249,6 +250,13 @@ typedef enum dt_image_usercrop_status_t
   DT_IMAGE_USERCROP_MALFORMED,   // tag present but violating the DNG type/count/bounds contract
   DT_IMAGE_USERCROP_CONFLICT     // two candidate IFDs hold valid but materially different values
 } dt_image_usercrop_status_t;
+
+/* Lens-correction data embedded in a raw file's own metadata (maker notes / DNG
+ * OpcodeList3), as opposed to a lens-database lookup. The per-vendor layouts and their
+ * decoding belong to LensSerious (lensserious_vendor.h) -- extraction fills the struct
+ * with the values exiv2 decoded, and iop/lens.c resolves it with ls_vendor_resolve()
+ * without knowing which maker wrote it. LS_VENDOR_NONE == 0, so a zero-initialised
+ * dt_image_t safely means "no data". */
 
 typedef enum dt_image_loader_t
 {
@@ -434,6 +442,11 @@ typedef struct dt_image_t
 
   /* GainMaps from DNG OpcodeList2 exif tag */
   GList *dng_gain_maps;
+
+  /* Lens correction embedded in the file's own metadata (DNG OpcodeList3, maker
+   * notes), as opposed to a Lensfun database lookup. Transient: re-derived on
+   * every decode, never persisted, excluded from _image_cache_self_hash(). */
+  ls_vendor_data_t exif_correction;
 
   /* Color labels */
   int color_labels;
@@ -644,13 +657,21 @@ gboolean dt_image_get_usercrop_oriented(const dt_image_t *img, const dt_image_or
                                         dt_boundingbox_t box);
 
 /** returns the orientation bits of the image from exif. */
+#ifdef __cplusplus
+static inline auto dt_image_orientation(const dt_image_t *img) -> dt_image_orientation_t
+#else
 static inline dt_image_orientation_t dt_image_orientation(const dt_image_t *img)
+#endif
 {
   return img->orientation != ORIENTATION_NULL ? img->orientation : ORIENTATION_NONE;
 }
 
 /** return the raw orientation, from jpg orientation. */
+#ifdef __cplusplus
+static inline auto dt_image_orientation_to_flip_bits(const int orient) -> dt_image_orientation_t
+#else
 static inline dt_image_orientation_t dt_image_orientation_to_flip_bits(const int orient)
+#endif
 {
   switch(orient)
   {

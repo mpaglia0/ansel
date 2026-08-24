@@ -1,3 +1,7 @@
+# The vendor-decoder test moved to LensSerious (tests/vendor.c) with the decoders
+# themselves; the library carries its own tests, and Ansel runs them via the submodule's
+# ctest when it needs to.
+
 add_cmocka_mock_test(test_filmicrgb
                      SOURCES test_filmicrgb.c ../util/testimg.c
                      COMPILE_OPTIONS -Wno-error=deprecated-declarations # cmocka >= 2 deprecates check_expected et al.

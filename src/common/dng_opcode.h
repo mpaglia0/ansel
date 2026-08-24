@@ -64,6 +64,11 @@ typedef struct dt_dng_gain_map_t
 
 void dt_dng_opcode_process_opcode_list_2(uint8_t *buf, uint32_t size, dt_image_t *img);
 
+/* OpcodeList3 (post-demosaic lens corrections) is NOT parsed here any more: its format is
+ * correction knowledge, so the parser lives with the correction model --
+ * ls_vendor_parse_dng_opcodelist3() in LensSerious (lensserious_vendor.h). This file keeps
+ * only the sensor-domain list: gain maps. */
+
 #ifdef __cplusplus
 }
 #endif
