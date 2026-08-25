@@ -306,6 +306,9 @@ if(WIN32)
   SET(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> -O coff <DEFINES> -i <SOURCE> -o <OBJECT>")
   set(RESOURCE_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/win/ansel.rc")
   configure_file("${CMAKE_CURRENT_SOURCE_DIR}/win/ansel.rc.in" "${CMAKE_CURRENT_BINARY_DIR}/win/ansel.rc")
+  # The .rc references the manifest by bare name, so it has to sit beside the generated
+  # .rc rather than beside its own source.
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/win/ansel.manifest" "${CMAKE_CURRENT_BINARY_DIR}/win/ansel.manifest" COPYONLY)
 endif(WIN32)
 
 set(SOURCES ${SOURCE_FILES} ${HEADER_FILES})
@@ -960,7 +963,28 @@ if(APPLE)
 endif(APPLE)
 
 if(WIN32)
-  set_target_properties(ansel PROPERTIES LINK_FLAGS "-mconsole -mwindows -Wl,-subsystem,console")
+  # GUI subsystem, so Windows never gives ansel.exe a console.
+  #
+  # It used to be linked as a console binary, which meant launching it from the Start menu
+  # popped a console window that main.c then destroyed with FreeConsole() a few lines into
+  # startup. That is a visible flash for every user, and "allocate a console, hide it
+  # immediately, redirect output to a file under %LOCALAPPDATA%" is also a textbook
+  # heuristic signature -- Defender has started acting on it.
+  #
+  # The output still reaches the caller when there is a caller: a GUI-subsystem process
+  # launched from cmd or PowerShell inherits their console and their standard handles, so
+  # `ansel.exe -d common' from a terminal still prints, and `ansel.exe > log.txt' still
+  # redirects (main.c checks GetFileType and leaves those alone). Started from Explorer,
+  # there are no handles to inherit and main.c writes to its log file, as before.
+  #
+  # -municode still selects the wide CRT startup here, and mingw-w64's crt2u.o calls
+  # wmain() for the GUI subsystem exactly as it does for the console one -- verified on the
+  # linked binary, whose startup calls wmain directly. So win/main_wrapper.h's UTF-8 argv
+  # wrapper stays the entry point; this is NOT the MSVC world, where GUI means wWinMain.
+  #
+  # ansel-cli and the other tools are untouched and stay console binaries: this property is
+  # set on the `ansel' target alone.
+  set_target_properties(ansel PROPERTIES LINK_FLAGS "-mwindows")
   # _detach_debuginfo(ansel bin)
   # _detach_debuginfo(lib_ansel bin)
 else()

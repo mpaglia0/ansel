@@ -72,6 +72,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "darktable.h"
+#include "common/paths.h"   // DT_PATH_MAX
 #include "metadata/colorlabels.h"   // DT_COLORLABELS_*
 #include "gui/screen_metrics.h"
 #include "widgets/widget_settings.h"
@@ -1023,10 +1024,9 @@ static void _gui_startup_progress(const char *message)
   dt_gui_splash_updatef("%s", message);
 }
 
-/* common/ announces that an image's thumbnail is stale; this turns that into the two
- * widget refreshes. Registered at the end of dt_gui_gtk_init(), so headless runs never
- * have a handler and the notification is a no-op there. */
-static void _gui_refresh_thumbnail(int32_t imgid, gboolean refresh_filmstrip)
+/* GUI-thread half of _gui_refresh_thumbnail(). Ends in gtk_widget_queue_draw(), so it must
+ * not run anywhere else. */
+static void _refresh_thumbnail_widgets(int32_t imgid, gboolean refresh_filmstrip)
 {
   struct dt_ui_t *ui = dt_gui_get_ui();
   if(IS_NULL_PTR(ui)) return;
@@ -1037,6 +1037,52 @@ static void _gui_refresh_thumbnail(int32_t imgid, gboolean refresh_filmstrip)
   // realtime darkroom main preview, so darkroom write paths ask for it to be skipped.
   if(refresh_filmstrip)
     dt_thumbtable_refresh_thumbnail(ui->thumbtable_filmstrip, imgid, TRUE);
+}
+
+/* What crosses the thread boundary: two values, and deliberately nothing else. A request
+ * carrying a dt_thumbnail_t* or a GtkWidget* would need that object refcounted, because the
+ * GUI thread can destroy it between the worker posting the request and the main loop running
+ * it -- the hazard libs/backgroundjobs.c already pays a refcount for. An image id cannot go
+ * stale; the widget lookup happens on the GUI thread, where the answer is valid or absent. */
+typedef struct _thumbnail_refresh_request_t
+{
+  int32_t imgid;
+  gboolean refresh_filmstrip;
+} _thumbnail_refresh_request_t;
+
+static gboolean _refresh_thumbnail_on_gui_thread(gpointer user_data)
+{
+  const _thumbnail_refresh_request_t *request = (const _thumbnail_refresh_request_t *)user_data;
+  _refresh_thumbnail_widgets(request->imgid, request->refresh_filmstrip);
+  return G_SOURCE_REMOVE;
+}
+
+/* common/ announces that an image's thumbnail is stale; this turns that into the two
+ * widget refreshes. Registered at the end of dt_gui_gtk_init(), so headless runs never
+ * have a handler and the notification is a no-op there.
+ *
+ * The announcement arrives on whatever thread changed the image, and most of them are not
+ * this one: dt_image_history_changed() is reached from the flip/rotate job, from the import
+ * job and from style application, all of which run in the job queue. The refresh ends in
+ * gtk_widget_queue_draw(), which walks the widget hierarchy and edits the toplevel's
+ * invalidation region -- structures the GUI thread is reading at the same time. That is
+ * Sentry 142561119: an access violation inside GTK's own memmove, on the job thread, with
+ * dt_control_work() still on the stack underneath it.
+ *
+ * So the work is marshalled onto the main loop unless we are already on it. Running inline
+ * when we are keeps the ordering every existing GUI-thread caller already relies on. */
+static void _gui_refresh_thumbnail(int32_t imgid, gboolean refresh_filmstrip)
+{
+  if(dt_widget_on_gui_thread())
+  {
+    _refresh_thumbnail_widgets(imgid, refresh_filmstrip);
+    return;
+  }
+
+  _thumbnail_refresh_request_t *request = g_malloc(sizeof(_thumbnail_refresh_request_t));
+  request->imgid = imgid;
+  request->refresh_filmstrip = refresh_filmstrip;
+  g_main_context_invoke_full(NULL, G_PRIORITY_DEFAULT, _refresh_thumbnail_on_gui_thread, request, g_free);
 }
 
 int dt_gui_gtk_init(dt_gui_gtk_t *gui)
@@ -1055,7 +1101,7 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
   g_setenv("LIBOVERLAY_SCROLLBAR", "0", 0);
 
   // unset gtk rc from kde:
-  char path[PATH_MAX] = { 0 }, datadir[PATH_MAX] = { 0 }, sharedir[PATH_MAX] = { 0 }, configdir[PATH_MAX] = { 0 };
+  char path[DT_PATH_MAX] = { 0 }, datadir[DT_PATH_MAX] = { 0 }, sharedir[DT_PATH_MAX] = { 0 }, configdir[DT_PATH_MAX] = { 0 };
   dt_loc_get_datadir(datadir, sizeof(datadir));
   dt_loc_get_sharedir(sharedir, sizeof(sharedir));
   dt_loc_get_user_config_dir(configdir, sizeof(configdir));
@@ -1779,7 +1825,7 @@ void dt_gui_add_help_link(GtkWidget *widget, char *link)
 // load a CSS theme
 void dt_gui_load_theme(const char *theme)
 {
-  char theme_css[PATH_MAX] = { 0 };
+  char theme_css[DT_PATH_MAX] = { 0 };
   g_snprintf(theme_css, sizeof(theme_css), "%s.css", theme);
 
   if(!dt_conf_key_exists("use_system_font"))
@@ -1802,7 +1848,7 @@ void dt_gui_load_theme(const char *theme)
   }
 
   gchar *path, *usercsspath;
-  char datadir[PATH_MAX] = { 0 }, configdir[PATH_MAX] = { 0 };
+  char datadir[DT_PATH_MAX] = { 0 }, configdir[DT_PATH_MAX] = { 0 };
   dt_loc_get_datadir(datadir, sizeof(datadir));
   dt_loc_get_user_config_dir(configdir, sizeof(configdir));
 
