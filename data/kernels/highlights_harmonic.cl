@@ -24,6 +24,29 @@
 
 #include "common.h"
 
+// Double precision: where it is available, and what happens where it is not.
+//
+// Four stage-2 reduction finalizers below accumulate their partials in double, to match the
+// host arithmetic they replaced bit for bit. cl_khr_fp64 is an OPTIONAL OpenCL extension and
+// Apple's implementation does not have it, so naming `double` unguarded does not merely make
+// those four kernels unavailable -- it fails the build of THIS ENTIRE PROGRAM, taking the
+// sixty-odd single-precision kernels in it down as well. That is what the file header above
+// means by "must not require the fp64 extension on every device", and it is what silently
+// happened when these finalizers arrived.
+//
+// So they are compiled only where the extension exists. Where it does not, dt_opencl_create_kernel()
+// returns -1 for each of them and the host stages that use them bail out to their CPU twins --
+// the same arrangement highlights_sparse.cl and the PDE/aniso solvers already use. See
+// _region_guided_filter_cl(), _selfdome_stage_cl(), _chromaticity_gradient_stage_cl() and
+// _aniso_pyramid_cl().
+#if defined(cl_khr_fp64)
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#define HL_HARMONIC_FP64 1
+#elif defined(cl_amd_fp64)
+#pragma OPENCL EXTENSION cl_amd_fp64 : enable
+#define HL_HARMONIC_FP64 1
+#endif
+
 // ===== harmonic-fill kernels (highlights harmonic transposition) ============================
 // "Harmonic fill" = repeatedly replace every hole pixel by the average of its four neighbours
 // (Jacobi relaxation) until the surface is smooth -- like letting heat diffuse from the
@@ -1070,6 +1093,80 @@ hl_hf_damp(global float *estimate, global const float *valid, global const float
 // How much the joint floor's chromaticity rescue is worth at this pixel, in [0,1]. Mirrors the CPU
 // _hl_floor_worth (highlights/common.h) -- any change here must be mirrored there. CF_JOINT_TAU
 // arrives as an argument rather than a #define so the two cannot drift apart silently.
+// Region-level worth of the joint floor, stage 1: per-workgroup partial sums of BOTH floor
+// candidates' per-channel totals over the clipped pixels, replicating the CPU _cf_reconstruct
+// pass 1 (soft-floor candidate math) exactly. Stage 2 (hl_region_worth_finalize) turns the
+// partials into ONE scalar the floor kernels read -- nothing crosses the bus.
+kernel void
+hl_region_benefit(global const float *estimate, global const float *valid, global const float *clip0,
+                  global float *partial, const int n_pixels, local float *scratch)
+{
+  const int gid = get_global_id(0), gsz = get_global_size(0);
+  const int lid = get_local_id(0), lsz = get_local_size(0);
+  float acc[6] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f };
+  for(int i = gid; i < n_pixels; i += gsz)
+  {
+    const int nc = (valid[i * 4 + 0] < 0.5f) + (valid[i * 4 + 1] < 0.5f) + (valid[i * 4 + 2] < 0.5f);
+    if(nc == 0) continue;
+    float lift = 1.f;
+    for(int c = 0; c < 3; c++)
+      if(valid[i * 4 + c] < 0.5f)
+      {
+        const float e = fmax(estimate[i * 4 + c], 1e-6f);
+        const float c0 = clip0[i * 4 + c];
+        const float d = e - c0, wd = 0.02f * fmax(c0, 1e-6f);
+        const float tgt = c0 + 0.5f * (d + sqrt(d * d + wd * wd));
+        lift = fmax(lift, fmin(tgt / e, 8.f));
+      }
+    for(int c = 0; c < 3; c++)
+    {
+      float pc = estimate[i * 4 + c], jt = estimate[i * 4 + c];
+      if(valid[i * 4 + c] < 0.5f)
+      {
+        const float c0 = clip0[i * 4 + c], wd = 0.02f * fmax(c0, 1e-6f);
+        const float d = estimate[i * 4 + c] - c0;
+        pc = c0 + 0.5f * (d + sqrt(d * d + wd * wd));
+        const float lf = fmax(estimate[i * 4 + c], 1e-6f) * lift, dj = lf - c0;
+        jt = c0 + 0.5f * (dj + sqrt(dj * dj + wd * wd));
+      }
+      acc[c] += pc;
+      acc[3 + c] += jt;
+    }
+  }
+  for(int k = 0; k < 6; k++) scratch[lid * 6 + k] = acc[k];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for(int off = lsz / 2; off > 0; off /= 2)
+  {
+    if(lid < off)
+      for(int k = 0; k < 6; k++) scratch[lid * 6 + k] += scratch[(lid + off) * 6 + k];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if(lid == 0)
+    for(int k = 0; k < 6; k++) partial[get_group_id(0) * 6 + k] = scratch[k];
+}
+
+#ifdef HL_HARMONIC_FP64
+// Stage 2: one thread folds the partials into region_worth. Mirrors the CPU _hl_region_worth
+// (highlights/common.h) -- the LO/HI thresholds arrive as arguments so the two cannot drift.
+kernel void
+hl_region_worth_finalize(global const float *partial, global float *worth, const int n_groups,
+                         const float lo, const float hi)
+{
+  if(get_global_id(0) != 0) return;
+  double sp0 = 0.0, sp1 = 0.0, sp2 = 0.0, sj0 = 0.0, sj1 = 0.0, sj2 = 0.0;
+  for(int g = 0; g < n_groups; g++)
+  {
+    sp0 += partial[g * 6 + 0]; sp1 += partial[g * 6 + 1]; sp2 += partial[g * 6 + 2];
+    sj0 += partial[g * 6 + 3]; sj1 += partial[g * 6 + 4]; sj2 += partial[g * 6 + 5];
+  }
+  const float tp = fmax((float)(sp0 + sp1 + sp2), 1e-9f), tj = fmax((float)(sj0 + sj1 + sj2), 1e-9f);
+  const float benefit = fabs((float)sj0 / tj - (float)sp0 / tp) + fabs((float)sj1 / tj - (float)sp1 / tp)
+                        + fabs((float)sj2 / tj - (float)sp2 / tp);
+  const float t = clamp((benefit - lo) / (hi - lo), 0.f, 1.f);
+  worth[0] = t * t * (3.f - 2.f * t);
+}
+#endif // HL_HARMONIC_FP64
+
 static float hl_floor_worth(const float chroma_gain, const float joint_tau)
 {
   const float t = clamp(chroma_gain / joint_tau, 0.f, 1.f);
@@ -1078,7 +1175,8 @@ static float hl_floor_worth(const float chroma_gain, const float joint_tau)
 
 kernel void
 hl_soft_floor(global float *estimate, global const float *valid, global const float *clip0,
-              const int width, const int height, const float floor_gate, const float joint_tau)
+              global const float *region_worth, const int width, const int height, const float floor_gate,
+              const float joint_tau)
 {
   const int x = get_global_id(0);
   const int y = get_global_id(1);
@@ -1127,7 +1225,7 @@ hl_soft_floor(global float *estimate, global const float *valid, global const fl
   sum_j = fmax(sum_j, 1e-9f);
   float chroma_gain = 0.f;
   for(int c = 0; c < 3; c++) chroma_gain += fabs(joint_v[c] / sum_j - per_chan_v[c] / sum_p);
-  const float w = floor_gate * hl_floor_worth(chroma_gain, joint_tau);
+  const float w = floor_gate * region_worth[0] * hl_floor_worth(chroma_gain, joint_tau);
   for(int c = 0; c < 3; c++)
     if(valid[i * 4 + c] < 0.5f)
       estimate[i * 4 + c] = per_chan_v[c] + w * (joint_v[c] - per_chan_v[c]);
@@ -1138,7 +1236,8 @@ hl_soft_floor(global float *estimate, global const float *valid, global const fl
 // floor. JOINT form (see hl_soft_floor / the CPU Step-5 floor for the rationale).
 kernel void
 hl_hard_floor(global float *estimate, global const float *valid, global const float *clip0,
-              const int width, const int height, const float floor_gate, const float joint_tau)
+              global const float *region_worth, const int width, const int height, const float floor_gate,
+              const float joint_tau)
 {
   const int x = get_global_id(0);
   const int y = get_global_id(1);
@@ -1177,7 +1276,7 @@ hl_hard_floor(global float *estimate, global const float *valid, global const fl
   sum_j = fmax(sum_j, 1e-9f);
   float chroma_gain = 0.f;
   for(int c = 0; c < 3; c++) chroma_gain += fabs(joint_v[c] / sum_j - per_chan_v[c] / sum_p);
-  const float w = floor_gate * hl_floor_worth(chroma_gain, joint_tau);
+  const float w = floor_gate * region_worth[0] * hl_floor_worth(chroma_gain, joint_tau);
   for(int c = 0; c < 3; c++)
     if(valid[i * 4 + c] < 0.5f)
       estimate[i * 4 + c] = per_chan_v[c] + w * (joint_v[c] - per_chan_v[c]);
@@ -1233,15 +1332,17 @@ hl_ratio_plane(global const float *estimate, global const float *luminance, glob
 // biased toward the fence band's chromaticity; the flat mean lifts it toward the true surround.
 // Only enqueued when the clip-asymmetry gate is open (beta > 0).
 kernel void
-hl_ratio_cmean_blend(global float *ratio, global const uchar *hole,
-                     const int width, const int height, const float cmeanc, const float beta)
+hl_ratio_cmean_blend(global float *ratio, global const uchar *hole, global const float *cmean,
+                     global const float *refine, const int width, const int height, const int c)
 {
   const int x = get_global_id(0);
   const int y = get_global_id(1);
   if(x >= width || y >= height) return;
+  const float beta = refine[1]; // ratio_beta, device-resident: the launch is unconditional and the
+  if(beta <= 0.f) return;       // kernel no-ops, so no host round-trip decides whether to run
   const int i = y * width + x;
   if(!hole[i]) return;
-  ratio[i] = (1.f - beta) * fmax(ratio[i], 0.f) + beta * cmeanc;
+  ratio[i] = (1.f - beta) * fmax(ratio[i], 0.f) + beta * cmean[c];
 }
 
 kernel void
@@ -1291,8 +1392,9 @@ hl_dome_blend(global float *estimate, global const float *valid, global const fl
               global const float *clip_depth, global const float *dome_lum,
               global const float *ratio0, global const float *ratio1, global const float *ratio2,
               global const uchar *hole, const int width, const int height,
-              const float cf_sigma, const float epsilon, const float floor_gate)
+              const float cf_sigma, const float epsilon, global const float *refine)
 {
+  const float floor_gate = refine[0]; // refine_gate, device-resident
   const int x = get_global_id(0);
   const int y = get_global_id(1);
   if(x >= width || y >= height) return;
@@ -1380,8 +1482,8 @@ hl_core_floor(global float *dome_lum, global const uchar *hole, global const flo
 // flat-colour solver target).
 kernel void
 hl_cmean_reduce(global const float *estimate, global const float *valid, global const float *luminance,
-                global float4 *partial, const int n_pixels, const float epsilon, const float lum_min,
-                local float4 *scratch)
+                global float4 *partial, const int n_pixels, const float epsilon,
+                global const float *lum_min_buf, local float4 *scratch)
 {
   const int global_id = get_global_id(0);
   const int global_size = get_global_size(0);
@@ -1391,7 +1493,7 @@ hl_cmean_reduce(global const float *estimate, global const float *valid, global 
   float4 accum = (float4)(0.f);
   for(int i = global_id; i < n_pixels; i += global_size)
     if(valid[i * 4 + 0] >= 0.5f && valid[i * 4 + 1] >= 0.5f && valid[i * 4 + 2] >= 0.5f
-       && luminance[i] >= lum_min)
+       && luminance[i] >= lum_min_buf[0])
     {
       const float inv_lum = 1.f / fmax(luminance[i], epsilon);
       accum += (float4)(estimate[i * 4 + 0] * inv_lum, estimate[i * 4 + 1] * inv_lum, estimate[i * 4 + 2] * inv_lum, 1.f);
@@ -1462,16 +1564,17 @@ hl_ring_vote(global const float *estimate, global const float *valid, global flo
 // construction) while the obstacle/floor now enforces the surround chromaticity. Only enqueued
 // when the gate is open (untouched clip0 = approved behavior on equal clips).
 kernel void
-hl_clip0_rehue(global float *clip0, global const uchar *hole, const int width, const int height,
-               const float cmean0, const float cmean1, const float cmean2, const float gate)
+hl_clip0_rehue(global float *clip0, global const uchar *hole, global const float *cmean,
+               global const float *refine, const int width, const int height)
 {
   const int x = get_global_id(0);
   const int y = get_global_id(1);
   if(x >= width || y >= height) return;
+  const float gate = refine[0]; // rehue_gate, device-resident: unconditional launch, kernel no-ops
+  if(gate <= 1e-6f) return;
   const int i = y * width + x;
   if(!hole[i]) return;
   const float lsat = clip0[i * 4 + 0] + clip0[i * 4 + 1] + clip0[i * 4 + 2];
-  const float cmean[3] = { cmean0, cmean1, cmean2 };
   for(int c = 0; c < 3; c++)
     clip0[i * 4 + c] = gate * (lsat * cmean[c]) + (1.f - gate) * clip0[i * 4 + c];
 }
@@ -1658,8 +1761,9 @@ hl_grad_reduce(global const float *blur, global float *grad_x, global float *gra
 kernel void
 hl_aniso_tensor(global const float *grad_x, global const float *grad_y,
                 global float *tensor_xx, global float *tensor_xy, global float *tensor_yy,
-                const int width, const int height, const float gnorm)
+                const int width, const int height, global const float *gnorm_buf)
 {
+  const float gnorm = gnorm_buf[0]; // gradient-mean normaliser, device-resident
   const int x = get_global_id(0);
   const int y = get_global_id(1);
   if(x >= width || y >= height) return;
@@ -1793,8 +1897,137 @@ hl_aniso_reassemble(global float *estimate, global const float *valid_anchor, gl
 // hue trend and is smooth across occluders by construction. Mirrors the CPU _chromaticity_gradient
 // (core.c) -- any change here must be mirrored there and re-validated with HL_CGRADCL_TEST.
 
-// Reduction: per-workgroup partial sums of {luminance, count} over any-clip pixels -- the host
-// turns them into the plateau luminance that gates the anchors.
+// Publish a host-known constant into a device scalar buffer. The value travels as a kernel
+// ARGUMENT (part of the command packet), not as a memory copy, so the GPU path stays transfer-free.
+__kernel void
+hl_set_scalar(global float *out, const float value)
+{
+  if(get_global_id(0) != 0) return;
+  out[0] = value;
+}
+
+// Region-level ring vote, on the device: per-workgroup {weight, mass} partials over the two gate
+// planes. Paired with hl_reduce_finalize (stride 2, mode 1, scale 1) this replaces reading both
+// full planes back to the host just to divide two sums.
+__kernel void
+hl_vote_reduce(read_only image2d_t gate_src, read_only image2d_t gate_msk, global float *partial,
+               const int width, const int height, local float *scratch)
+{
+  const int gid = get_global_id(0), gsz = get_global_size(0);
+  const int lid = get_local_id(0), lsz = get_local_size(0);
+  const int n = width * height;
+  float wsum = 0.f, msum = 0.f;
+  for(int i = gid; i < n; i += gsz)
+  {
+    const int2 p = (int2)(i % width, i / width);
+    wsum += read_imagef(gate_src, sampleri, p).x;
+    msum += read_imagef(gate_msk, sampleri, p).x;
+  }
+  scratch[lid * 2 + 0] = wsum;
+  scratch[lid * 2 + 1] = msum;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for(int off = lsz / 2; off > 0; off /= 2)
+  {
+    if(lid < off)
+    {
+      scratch[lid * 2 + 0] += scratch[(lid + off) * 2 + 0];
+      scratch[lid * 2 + 1] += scratch[(lid + off) * 2 + 1];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if(lid == 0)
+  {
+    partial[get_group_id(0) * 2 + 0] = scratch[0];
+    partial[get_group_id(0) * 2 + 1] = scratch[1];
+  }
+}
+
+#ifdef HL_HARMONIC_FP64
+// Stage-2 for the chromaticity mean: fold hl_cmean_reduce's float4 partials into the region's
+// mean chromaticity, published as {cmean.r, cmean.g, cmean.b, count} in device memory. Mirrors the
+// host arithmetic it replaces exactly (sum/count in double, zero when the count is zero).
+__kernel void
+hl_cmean_finalize(global const float *partial, global float *cmean, const int n_groups)
+{
+  if(get_global_id(0) != 0) return;
+  double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+  for(int g = 0; g < n_groups; g++)
+  {
+    a0 += partial[g * 4 + 0]; a1 += partial[g * 4 + 1];
+    a2 += partial[g * 4 + 2]; a3 += partial[g * 4 + 3];
+  }
+  cmean[3] = (float)a3;
+  if(a3 > 0.0)
+  {
+    cmean[0] = (float)(a0 / a3); cmean[1] = (float)(a1 / a3); cmean[2] = (float)(a2 / a3);
+  }
+  else
+  {
+    cmean[0] = 0.f; cmean[1] = 0.f; cmean[2] = 0.f;
+  }
+}
+
+// Stage-2 for the trusted-ring vote: fold hl_ring_vote's stride-8 partials {share_sum[3], count,
+// share_sq[3]} into refine_gate = floor_gate x exp(-(t/5)^2), t = bias / max(dispersion, 0.02).
+// Publishes {refine_gate, ratio_beta = 0.5 x refine_gate} so both consumers read device memory.
+// Mirror of the CPU _hl_ring_flat_mean_vote tail -- any change here must be mirrored there.
+__kernel void
+hl_ring_vote_finalize(global const float *partial, global const float *cmean, global float *out,
+                      const int n_groups, const float floor_gate)
+{
+  if(get_global_id(0) != 0) return;
+  double ss[3] = { 0.0, 0.0, 0.0 }, sq[3] = { 0.0, 0.0, 0.0 }, cnt = 0.0;
+  for(int g = 0; g < n_groups; g++)
+  {
+    for(int c = 0; c < 3; c++)
+    {
+      ss[c] += partial[g * 8 + c];
+      sq[c] += partial[g * 8 + 4 + c];
+    }
+    cnt += partial[g * 8 + 3];
+  }
+  float ring_vote = 0.f;
+  const float csum = fmax(cmean[0] + cmean[1] + cmean[2], 1e-9f);
+  if(cnt > 0.0)
+  {
+    float bias = 0.f, dispersion = 0.f;
+    for(int c = 0; c < 3; c++)
+    {
+      const double mean = ss[c] / cnt;
+      bias += fabs((float)mean - cmean[c] / csum);
+      dispersion += sqrt(fmax((float)(sq[c] / cnt - mean * mean), 0.f));
+    }
+    const float arg = (bias / fmax(dispersion, 0.02f)) / 5.f;
+    ring_vote = exp(-arg * arg);
+  }
+  out[0] = floor_gate * ring_vote;   // refine_gate
+  out[1] = 0.5f * out[0];            // ratio_beta
+}
+
+// Stage-2 of a two-stage reduction: sum `n_groups` stride-`stride` partials and publish ONE scalar
+// to device memory, so the value never crosses the bus. `mode` 0 = plain sum of lane 0; 1 = mean of
+// lane 0 over lane 1 (sum/count) scaled by `scale`, 0 when the count is 0.
+__kernel void
+hl_reduce_finalize(global const float *partial, global float *result, const int n_groups,
+                   const int stride, const int mode, const float scale)
+{
+  if(get_global_id(0) != 0) return;
+  double a = 0.0, b = 0.0;
+  for(int g = 0; g < n_groups; g++)
+  {
+    a += (double)partial[g * stride + 0];
+    if(stride > 1) b += (double)partial[g * stride + 1];
+  }
+  // mode 0: plain sum of lane 0. mode 1: scale x mean of lane 0 over lane 1, 0 when the count is 0.
+  // mode 2: scale x sum of lane 0, floored at 1e-9 (the gradient-mean normaliser: scale = 1/N).
+  result[0] = (mode == 0)   ? (float)a
+              : (mode == 2) ? fmax((float)(scale * a), 1e-9f)
+                            : ((b > 0.0) ? (float)(scale * a / b) : 0.f);
+}
+#endif // HL_HARMONIC_FP64
+
+// Reduction: per-workgroup partial sums of {luminance, count} over any-clip pixels; the stage-2
+// finalizer below turns them into the plateau luminance that gates the anchors, on the device.
 kernel void
 hl_cgrad_plateau(global const float *estimate, global const float *valid, global float *partial,
                const int n_pixels, local float *scratch)
@@ -1886,31 +2119,25 @@ hl_cgrad_store(global const float *field, global float *shares, const int width,
 // skies) or the blown object is self-coloured and keeps the solver (coloured emitters).
 kernel void
 hl_cgrad_gate(global const float *estimate, global const float *valid, global const float *shares,
-              global const float *clip0, write_only image2d_t gate_src, write_only image2d_t gate_msk,
-              const int width, const int height, const float epsilon, const float gate_tau,
-              const float floor_gate)
+              write_only image2d_t gate_src, write_only image2d_t gate_msk,
+              const int width, const int height, const float epsilon, const float gate_tau)
 {
   const int x = get_global_id(0), y = get_global_id(1);
   if(x >= width || y >= height) return;
   const int i = y * width + x;
   const int n_clip = (valid[i * 4 + 0] < 0.5f) + (valid[i * 4 + 1] < 0.5f) + (valid[i * 4 + 2] < 0.5f);
   float weight_src = 0.f, mask_src = 0.f;
-  // floor-authored 1-clip pixels are not evidence (see the CPU stage): ring votes only where the
-  // fit genuinely spoke
-  int floor_authored = 0;
-  if(n_clip == 1 && floor_gate > 1e-6f) // WB'd clips only (see the CPU stage)
+  // The field is validated against the pixel's MEASURED channels, never against the solver -- see
+  // the CPU stage for the rationale and measurements. Mirror of _chromaticity_gradient's gate;
+  // any change here must be mirrored there and re-validated with HL_CGRADCL_TEST.
+  if(n_clip == 1)
   {
     const int cc = (valid[i * 4 + 0] < 0.5f) ? 0 : ((valid[i * 4 + 1] < 0.5f) ? 1 : 2);
-    floor_authored = estimate[i * 4 + cc] <= 1.03f * fmax(clip0[i * 4 + cc], 1e-9f);
-  }
-  if(n_clip == 1 && !floor_authored)
-  {
-    const float lum = fmax(estimate[i * 4 + 0] + estimate[i * 4 + 1] + estimate[i * 4 + 2], epsilon);
-    const float share_sum = fmax(shares[i * 4 + 0] + shares[i * 4 + 1] + shares[i * 4 + 2], epsilon);
-    float err = 0.f;
-    for(int c = 0; c < 3; c++)
-      err += fabs(shares[i * 4 + c] / share_sum - estimate[i * 4 + c] / lum);
-    const float t = err / gate_tau;
+    const int m1 = (cc == 0) ? 1 : 0, m2 = (cc == 2) ? 1 : 2;
+    const float msum = estimate[i * 4 + m1] + estimate[i * 4 + m2];
+    const float meas = estimate[i * 4 + m1] / fmax(msum, epsilon);
+    const float fld = shares[i * 4 + m1] / fmax(shares[i * 4 + m1] + shares[i * 4 + m2], epsilon);
+    const float t = (meas - fld) / (0.5f * gate_tau); // 2-channel share: half the 3-channel scale
     weight_src = exp(-t * t);
     mask_src = 1.f;
   }
@@ -1927,8 +2154,8 @@ hl_cgrad_gate(global const float *estimate, global const float *valid, global co
 kernel void
 hl_cgrad_reproject(global float *estimate, global const float *valid, global const float *clip0,
              global const float *shares, read_only image2d_t gate_wgt, read_only image2d_t gate_nrm,
-             const int width, const int height, const float epsilon, const float gate_vote,
-             const float authored_ramp, const float floor_gate)
+             const int width, const int height, const float epsilon,
+             global const float *gate_vote_buf, const float authored_ramp, const float floor_gate)
 {
   const int x = get_global_id(0), y = get_global_id(1);
   if(x >= width || y >= height) return;
@@ -1956,7 +2183,7 @@ hl_cgrad_reproject(global float *estimate, global const float *valid, global con
 
   // diffused agreement weight, shrunk toward the region-level ring vote as local evidence thins
   const float gate_lambda = 0.05f;
-  const float gate_w = clamp((read_imagef(gate_wgt, sampleri, (int2)(x, y)).x + gate_lambda * gate_vote)
+  const float gate_w = clamp((read_imagef(gate_wgt, sampleri, (int2)(x, y)).x + gate_lambda * gate_vote_buf[0])
                                  / (read_imagef(gate_nrm, sampleri, (int2)(x, y)).x + gate_lambda),
                              0.f, 1.f);
   if(gate_w <= 1e-4f) return;
@@ -2581,13 +2808,14 @@ hl_cg_r0(global float *residual, global const float *laplacian_term, global cons
 // (beta is computed on the host from the partial dot-product sums).
 kernel void
 hl_cg_beta(global float *search_dir, global const float *residual, global const uchar *hole,
-           const int width, const int height, const float beta)
+           const int width, const int height, global const float *cg_state)
 {
+  if(cg_state[5] < 0.5f) return; // HL_CG_ACTIVE: converged/stalled -> no-op
   const int x = get_global_id(0);
   const int y = get_global_id(1);
   if(x >= width || y >= height) return;
   const int i = y * width + x;
-  if(hole[i]) search_dir[i] = residual[i] + beta * search_dir[i];
+  if(hole[i]) search_dir[i] = residual[i] + cg_state[4] /* HL_CG_BETA */ * search_dir[i];
 }
 
 // Copy with a clamp at zero (the diffused chroma ratios are stored non-negative).

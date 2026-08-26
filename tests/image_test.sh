@@ -19,7 +19,7 @@
 #   update-baseline  Add missing baseline entries from the current run (always exported
 #                     at a fixed 1024x1024, --width/--height ignored); never overwrites
 #                     an existing entry -- delete it first to force a refresh. Shared
-#                     team bank -> baseline lives in the samples submodule (reviewed/
+#                     team bank -> baseline lives in the samples clone (reviewed/
 #                     committed there); personal bank -> local
 #                     tests/image_test/baseline/ (gitignored).
 #
@@ -79,7 +79,7 @@ OPENCL_CACHE_DIR="$STATE_DIR/opencl_cache"
 RAW_EXTENSIONS=(3fr ari arw bay cr2 cr3 crw dc2 dcr dng erf fff ia iiq k25 kc2
                 kdc mdc mef mos mrw nef nrw orf pef raf raw rw2 rwl sr2 srf
                 srw sti x3f)
-SUBMODULE_BANK_DIR="$STATE_DIR/samples"
+TEAM_BANK_DIR="$STATE_DIR/samples"
 DELTAE_SCRIPT="$STATE_DIR/deltae"
 # Fixed export size for the shared baseline (tests/image_test/samples/baseline/): everyone
 # comparing against it must use the same dimensions, or delta-E sees a size mismatch that
@@ -134,6 +134,12 @@ COMMAND=run
 log() { [ "$QUIET" = yes ] || echo "$*"; }
 err() { echo "$*" >&2; }
 
+# Every option below that takes a value reads $2, and `set -u` turns a missing one into
+# bash's own "unbound variable" naming a line number -- which says neither which option
+# was wrong nor that it wanted a value. Call as `need_arg "$@"` from the case branch, so
+# the remaining arguments are counted without expanding $2 first.
+need_arg() { [ $# -ge 2 ] || { err "option $1 needs a value"; usage; exit 2; }; }
+
 usage() { sed -n '2,61p' "$0" | sed 's/^#$//; s/^# //'; }
 
 if [ -t 1 ]; then
@@ -170,15 +176,15 @@ fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --bank) BANK_DIR="$2"; shift 2 ;;
-    --cli) CLI_BIN="$2"; shift 2 ;;
-    --baseline) BASELINE_DIR="$2"; BASELINE_DIR_SET=yes; shift 2 ;;
-    --jobs) JOBS="$2"; shift 2 ;;
-    --threads) THREADS="$2"; shift 2 ;;
-    --timeout) TIMEOUT="$2"; shift 2 ;;
-    --width) WIDTH="$2"; shift 2 ;;
-    --height) HEIGHT="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
+    --bank) need_arg "$@"; BANK_DIR="$2"; shift 2 ;;
+    --cli) need_arg "$@"; CLI_BIN="$2"; shift 2 ;;
+    --baseline) need_arg "$@"; BASELINE_DIR="$2"; BASELINE_DIR_SET=yes; shift 2 ;;
+    --jobs) need_arg "$@"; JOBS="$2"; shift 2 ;;
+    --threads) need_arg "$@"; THREADS="$2"; shift 2 ;;
+    --timeout) need_arg "$@"; TIMEOUT="$2"; shift 2 ;;
+    --width) need_arg "$@"; WIDTH="$2"; shift 2 ;;
+    --height) need_arg "$@"; HEIGHT="$2"; shift 2 ;;
+    --limit) need_arg "$@"; LIMIT="$2"; shift 2 ;;
     --strict) STRICT_CPU=yes; STRICT_OPENCL=yes; shift ;;
     --strict-cpu) STRICT_CPU=yes; shift ;;
     --strict-opencl) STRICT_OPENCL=yes; shift ;;
@@ -203,11 +209,13 @@ if [ -z "$BANK_DIR" ] && [ -f "$BANK_PATH_FILE" ]; then
   BANK_DIR="$(cat "$BANK_PATH_FILE")"
 fi
 
-# Fall back to the shared team bank (git submodule at tests/image_test/samples,
-# see tests/image_test/README.md) if nothing more specific was given and it has
-# actually been checked out (submodules aren't populated by a plain git clone).
-if [ -z "$BANK_DIR" ] && dir_has_raws "$SUBMODULE_BANK_DIR"; then
-  BANK_DIR="$SUBMODULE_BANK_DIR"
+# Fall back to the shared team bank if nothing more specific was given and it has
+# actually been cloned there. It is a plain (gitignored) clone of the private ansel-test
+# repo, NOT a submodule -- the superproject is public, so a submodule would make every
+# outside contributor's `git pull --recurse-submodules` fail on authentication. Presence
+# is therefore decided by what is on disk, not by any git registration.
+if [ -z "$BANK_DIR" ] && dir_has_raws "$TEAM_BANK_DIR"; then
+  BANK_DIR="$TEAM_BANK_DIR"
 fi
 
 if [ "$COMMAND" = configure ]; then
@@ -224,24 +232,22 @@ fi
 if [ -z "$BANK_DIR" ]; then
   [ "$IF_CONFIGURED" = yes ] && exit 0
   err "No image test bank configured."
-  if git -C "$REPO_ROOT" config -f .gitmodules --get-regexp '\.path$' 2>/dev/null \
-       | grep -q "tests/image_test/samples\$"; then
-    err "The shared team bank is registered but not checked out yet:"
-    err "  git submodule update --init --checkout tests/image_test/samples"
-  else
-    err "Point one with --bank <dir>, \$ANSEL_IMAGE_TEST, or: $0 configure <dir>"
-  fi
+  err "If you are on the team, clone the shared bank (needs git-lfs, and access to the"
+  err "private repo -- see tests/image_test/README.md):"
+  err "  git clone https://github.com/aurelienpierreeng/ansel-test.git tests/image_test/samples"
+  err "Otherwise point at your own raws with --bank <dir>, \$ANSEL_IMAGE_TEST, or:"
+  err "  $0 configure <dir>"
   exit 1
 fi
 [ -d "$BANK_DIR" ] || { err "image test bank directory not found: $BANK_DIR"; exit 1; }
 BANK_DIR="$(cd "$BANK_DIR" && pwd)"
 
 # Default baseline location follows where the bank came from: the shared, reviewed
-# baseline lives inside the samples submodule; a personal/local bank gets its own
+# baseline lives inside the samples clone; a personal/local bank gets its own
 # local (gitignored) baseline instead. An explicit --baseline always wins.
 if [ "$BASELINE_DIR_SET" = no ]; then
-  if [ "$BANK_DIR" = "$SUBMODULE_BANK_DIR" ]; then
-    BASELINE_DIR="$SUBMODULE_BANK_DIR/baseline"
+  if [ "$BANK_DIR" = "$TEAM_BANK_DIR" ]; then
+    BASELINE_DIR="$TEAM_BANK_DIR/baseline"
   else
     BASELINE_DIR="$STATE_DIR/baseline"
   fi

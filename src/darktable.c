@@ -142,8 +142,6 @@
 #include "common/l10n.h"
 #include "metadata/metadata.h"
 #include "common/image_notify.h"
-#include "develop/dev_history_gui.h"
-#include "gui/import.h"
 #include "develop/pipeline_notify.h"
 #include "history/notify.h"
 #include "history/presets.h"
@@ -163,10 +161,13 @@
 #include "control/jobs/film_jobs.h"
 #include "control/signal.h"
 #include "develop/dev_pixelpipe.h"
+#include "develop/develop.h"      // dt_dev_get_global(), dev->iop
 #include "develop/imageop.h"
+#include "develop/imageop_gui.h"  // module->gui->expander
 #include "develop/supervisor.h"
 
 #include "gui/application.h"
+#include "gui/actions/doc_screenshot.h"
 #include "develop/gui_throttle.h"
 #include "gui/guides.h"
 #include "gui/presets.h"
@@ -282,6 +283,7 @@ static int usage(const char *argv0)
 #ifdef HAVE_OPENCL
   printf("  --disable-opencl\n");
 #endif
+  printf("  --doc [documentation directory]\n");
   printf("  -h, --help");
 #ifdef _WIN32
   printf(", /?");
@@ -540,16 +542,6 @@ void dt_dev_set_global(struct dt_develop_t *dev)
   darktable.develop = dev;
 }
 
-GList *dt_guides_get_list(void)
-{
-  return darktable.guides;
-}
-
-GList **dt_guides_get_list_ref(void)
-{
-  return &darktable.guides;
-}
-
 GList *dt_gui_get_themes(void)
 {
   return darktable.themes;
@@ -625,19 +617,9 @@ dt_pthread_mutex_t *dt_readfile_mutex(void)
 
 
 
-struct dt_selection_t *dt_selection_get_global(void)
-{
-  return darktable.selection;
-}
-
 struct dt_undo_t *dt_undo_get_global(void)
 {
   return darktable.undo;
-}
-
-struct dt_collection_t *dt_collection_get_global(void)
-{
-  return darktable.collection;
 }
 
 struct dt_control_signal_t *dt_control_signal_get_global(void)
@@ -668,11 +650,6 @@ struct dt_l10n_t *dt_l10n_get_global(void)
 struct dt_dbus_t *dt_dbus_get_global(void)
 {
   return darktable.dbus;
-}
-
-JsonParser *dt_noiseprofile_get_parser_global(void)
-{
-  return darktable.noiseprofile_parser;
 }
 
 struct dt_bauhaus_t *dt_bauhaus_get_global(void)
@@ -857,6 +834,47 @@ static void _preferences_changed(gpointer instance, gpointer user_data)
 /* Same "read at startup, re-read on change, never anywhere else" lifecycle as the mipmap cache
  * settings above, for the "write_sidecar_files" preference: dt_image_get_xmp_mode() is on the
  * per-image hot path and reads a cache instead of conf directly. */
+/* Module inventories for the documentation capture panel (gui/actions/doc_screenshot.h).
+ *
+ * They live HERE, and that is deliberate. The panel lists tool modules and darkroom modules,
+ * which are dt_lib_module_t and dt_iop_module_t -- two and three layers above gui/, where the
+ * panel is. Reading them from there inverted the include graph four times over. The
+ * orchestrator is the one place that sits above every module by construction, so it is the
+ * only place that may legally see both lists; the panel asks for (widget, name) pairs and
+ * these hand them over.
+ *
+ * Called on every refresh of the panel, so they read the live lists rather than a snapshot.
+ */
+static void _doc_screenshot_lib_modules(void *inventory)
+{
+  // Tool modules of every view: the ones belonging to the view we are not in are unmapped,
+  // so they show up greyed out instead of disappearing from the inventory.
+  for(GList *item = dt_lib_get_global()->plugins; item; item = g_list_next(item))
+  {
+    dt_lib_module_t *module = (dt_lib_module_t *)item->data;
+    GtkWidget *target = IS_NULL_PTR(module->expander) ? module->widget : module->expander;
+    dt_gui_doc_screenshot_add_target(inventory, target, module->common_fields.name);
+  }
+}
+
+static void _doc_screenshot_iop_modules(void *inventory)
+{
+  // This list is only populated while an image is open in darkroom.
+  for(GList *item = dt_dev_get_global()->iop; item; item = g_list_next(item))
+  {
+    dt_iop_module_t *module = (dt_iop_module_t *)item->data;
+    if(IS_NULL_PTR(module->gui) || IS_NULL_PTR(module->gui->expander)) continue;
+
+    // Several instances of the same module share a name: keep them apart in the tree, and
+    // therefore in the file names too.
+    gchar *label = (module->multi_name[0] != '\0')
+                       ? g_strdup_printf("%s (%s)", module->common_fields.name, module->multi_name)
+                       : g_strdup(module->common_fields.name);
+    dt_gui_doc_screenshot_add_target(inventory, module->gui->expander, label);
+    dt_free(label);
+  }
+}
+
 static void _xmp_mode_preferences_changed(gpointer instance, gpointer user_data)
 {
   (void)instance;
@@ -1235,6 +1253,24 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
 #endif
         argv[k] = NULL;
       }
+      else if(!strcmp(argv[k], "--doc"))
+      {
+        // Documentation mode: unlocks the widget-screenshot panel in the "Run" menu. Both
+        // the flag and the directory belong to that module, the only thing that reads them
+        // back. The optional directory is the root of the documentation tree to write into.
+        //
+        // It is consumed only when it really is an existing directory, so that
+        // `ansel --doc IMG_1234.RAW` still opens the raw file rather than swallowing it.
+        argv[k] = NULL;
+        if(argc > k + 1 && !IS_NULL_PTR(argv[k + 1]) && g_file_test(argv[k + 1], G_FILE_TEST_IS_DIR))
+        {
+          dt_gui_doc_screenshot_set_directory(argv[++k]);
+          argv[k] = NULL;
+        }
+        dt_gui_doc_screenshot_enable();
+        dt_gui_doc_screenshot_register_source(_("Tool modules"), _doc_screenshot_lib_modules);
+        dt_gui_doc_screenshot_register_source(_("Darkroom modules"), _doc_screenshot_iop_modules);
+      }
       else if(!strcmp(argv[k], "--debug"))
       {
         argv[k] = NULL;
@@ -1508,16 +1544,17 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
   // init darktable tags table
   dt_set_darktable_tags();
 
-  // Initialize the signal system
-  darktable.signals = dt_control_signal_init();
+  // The signal system exists to tell GUI widgets about backend events -- every raise is
+  // already dead in a GUI-less process (dt_control_signal_raise() bails when the control
+  // system is not running, and only the GUI starts it), so only the GUI gets the machinery.
+  // The connect/raise surface treats a NULL system as "not in this process" and no-ops.
+  darktable.signals = init_gui ? dt_control_signal_init() : NULL;
 
   /* src/metadata reports that the tag vocabulary changed; turning that into the GTK signal
    * its consumers already listen for is ours. Installed HERE, not with the other handlers
    * further up: the signal system does not exist until the line above, and nothing can
    * edit a tag before it does. */
   dt_metadata_set_tags_changed_handler(_metadata_tags_changed);
-  dt_dev_history_gui_init();
-  dt_gui_import_init_handlers();
   dt_metadata_set_geotags_changed_handler(_metadata_geotags_changed);
   dt_image_notify_set_imported_handler(_image_imported);
   dt_pipeline_set_message_handler(_pipeline_message);
@@ -1560,16 +1597,13 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
     dt_film_set_folder_status();
   }
 
-  // initialize collection query
-  darktable.collection = dt_collection_new();
-
-  /* initialize selection */
-  darktable.selection = dt_selection_new();
+  // The collection and selection are lighttable state: dt_gui_gtk_init() creates them.
+  // A GUI-less process (ansel-cli) runs without either -- their modules' public entry
+  // points treat "not created" as a no-op, so shared code needs no guards.
 
   /* capabilities set to NULL */
   darktable.capabilities = NULL;
 
-  darktable.guides = dt_guides_init();
 
   // Re-assert our handlers once the third-party libraries above are up. This used to compensate
   // for GraphicsMagick's InitializeMagick(), which stole all of them; that library is gone, but
@@ -1596,7 +1630,9 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
   omp_set_num_threads(darktable.num_openmp_threads);
 #endif
 
-  darktable.noiseprofile_parser = dt_noiseprofile_init(noiseprofiles_from_command);
+  // noiseprofiles.json is parsed lazily by common/noiseprofiles.c on first lookup;
+  // only the --noiseprofiles override needs to reach it now.
+  if(noiseprofiles_from_command) dt_noiseprofile_set_path(noiseprofiles_from_command);
 
   // The GUI must be initialized before the views, because the init()
   // functions of the views depend on darktable.control->accels_* to register
@@ -1924,8 +1960,8 @@ void dt_cleanup()
   dt_tags_cleanup();
   dt_styles_cleanup();
 
-  dt_collection_free(darktable.collection);
-  dt_selection_free(darktable.selection);
+  dt_collection_cleanup_global(); // no-ops in a GUI-less process: never created there
+  dt_selection_cleanup_global();
 
   // Mipmap cleanup may still consult the image cache for paths.
   dt_mipmap_cache_cleanup();
@@ -1957,7 +1993,7 @@ void dt_cleanup()
 
   dt_opencl_cleanup();
 
-  dt_guides_cleanup(darktable.guides);
+  dt_guides_cleanup(); // module-private list: a no-op when the GUI never registered any
 
   if(perform_maintenance)
   {
@@ -1993,11 +2029,7 @@ void dt_cleanup()
     dt_bauhaus_cleanup(darktable.bauhaus);
   }
 
-  if (darktable.noiseprofile_parser)
-  {
-    g_object_unref(darktable.noiseprofile_parser);
-    darktable.noiseprofile_parser = NULL;
-  }
+  dt_noiseprofile_cleanup();
 
   if(init_gui)
   {

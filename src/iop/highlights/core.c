@@ -254,7 +254,7 @@ void _selfdome(_hl_region_ctx_t *const ctx)
         sum_j = fmaxf(sum_j, 1e-9f);
         float chroma_gain = 0.f;
         for(int c = 0; c < 3; c++) chroma_gain += fabsf(joint_v[c] / sum_j - per_chan_v[c] / sum_p);
-        const float w = floor_gate * _hl_floor_worth(chroma_gain);
+        const float w = floor_gate * ctx->region_worth * _hl_floor_worth(chroma_gain);
         for(int c = 0; c < 3; c++)
           if(valid[i * 4 + c] < 0.5f)
             estimate[i * 4 + c] = per_chan_v[c] + w * (joint_v[c] - per_chan_v[c]);
@@ -600,24 +600,25 @@ void _chromaticity_gradient(_hl_region_ctx_t *const ctx)
   {
     const int n_clip = (valid[i * 4 + 0] < 0.5f) + (valid[i * 4 + 1] < 0.5f) + (valid[i * 4 + 2] < 0.5f);
     float weight_src = 0.f, mask_src = 0.f;
-    // floor-authored 1-clip pixels are NOT evidence: the fit landed at/below the pixel's own
-    // saturation floor (measured on the flare-veiled sunrise: 92.5% of the 1-clip zone, mean fit
-    // lift +0.9%), so their chromaticity is the floor's, not the solver's -- the ring votes only
-    // on 1-clip pixels whose fit genuinely spoke, and the authored ones get reprojected below.
-    int floor_authored = 0;
-    if(n_clip == 1 && ctx->floor_gate > 1e-6f) // WB'd clips only: at unit WB the floor imprint is
-    {                                          // neutral ~ truth (approved bench behavior)
-      const int cc = (valid[i * 4 + 0] < 0.5f) ? 0 : ((valid[i * 4 + 1] < 0.5f) ? 1 : 2);
-      floor_authored = estimate[i * 4 + cc] <= 1.03f * fmaxf(clip0[i * 4 + cc], 1e-9f);
-    }
-    if(n_clip == 1 && !floor_authored)
+    // The gate validates the field against the pixel's MEASURED channels, never against the
+    // solver. The old form compared field shares to the 1-clip SOLVER's shares -- but a
+    // fence-contaminated solver and a self-coloured emitter produce the SAME disagreement, so that
+    // vote cannot tell who is wrong (measured on PK1_3540: vote 0.195, the correct field voted
+    // down by the very solver it exists to correct). At a 1-clip pixel TWO channels are measured,
+    // and the ratio between them is data: a self-coloured emitter's skirt carries the emitter's
+    // measured ratio and disagrees with the surround-extended field, a genuine sky agrees. With
+    // the solver out of the jury the floor-authored exclusion is unnecessary -- a floored pixel's
+    // measured channels are untainted, so it may vote. Measured: PK1 vote 0.195 -> 0.335 (ring
+    // reprojection engages), magentasun 0.3316 -> 0.3294 RMSE with SSIM 0.929 -> 0.941 (the
+    // protected case improves), occluded pays +3.9% -- the accepted trade of this change.
+    if(n_clip == 1)
     {
-      const float lum = fmaxf(estimate[i * 4 + 0] + estimate[i * 4 + 1] + estimate[i * 4 + 2], epsilon);
-      const float share_sum = fmaxf(plane2[i * 4 + 0] + plane2[i * 4 + 1] + plane2[i * 4 + 2], epsilon);
-      float err = 0.f;
-      for(int c = 0; c < 3; c++)
-        err += fabsf(plane2[i * 4 + c] / share_sum - estimate[i * 4 + c] / lum);
-      const float t = err / gate_tau;
+      const int cc = (valid[i * 4 + 0] < 0.5f) ? 0 : ((valid[i * 4 + 1] < 0.5f) ? 1 : 2);
+      const int m1 = (cc == 0) ? 1 : 0, m2 = (cc == 2) ? 1 : 2;
+      const float msum = estimate[i * 4 + m1] + estimate[i * 4 + m2];
+      const float meas = estimate[i * 4 + m1] / fmaxf(msum, epsilon);
+      const float fld = plane2[i * 4 + m1] / fmaxf(plane2[i * 4 + m1] + plane2[i * 4 + m2], epsilon);
+      const float t = (meas - fld) / (0.5f * gate_tau); // 2-channel share: half the 3-channel scale
       weight_src = expf(-t * t);
       mask_src = 1.f;
     }
@@ -807,15 +808,22 @@ void _chromaticity_gradient(_hl_region_ctx_t *const ctx)
 
 #if defined(HAVE_OPENCL) && DT_HL_SPARSE_SOLVE
 cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_mem valid, cl_mem model_quality,
-                          cl_mem clip0, cl_mem depth, const int region_w, const int region_h, const float cf_sigma,
-                          const float reg_radius, const int ds_shared, const float floor_gate,
-                          const dt_dev_pixelpipe_t *pipe)
+                          cl_mem clip0, cl_mem depth, cl_mem region_worth, const int region_w, const int region_h,
+                          const float cf_sigma, const float reg_radius, const int ds_shared,
+                          const float floor_gate, const dt_dev_pixelpipe_t *pipe)
 {
   dt_iop_highlights_global_data_t *global_data = (dt_iop_highlights_global_data_t *)gd_void;
   const size_t region_pixels = (size_t)region_w * region_h;
   cl_int cl_err = DT_OPENCL_DEFAULT_ERROR;
   size_t size[3] = { ROUNDUPDWD(region_w, devid), ROUNDUPDHT(region_h, devid), 1 };
   const float epsilon = 1e-6f;
+
+  // The stage-2 reduction finalizers this needs are compiled only where the fp64 extension
+  // is (data/kernels/highlights_harmonic.cl). Without them the caller falls back to the CPU
+  // twin, the same way the sparse solver and the PDE/aniso stages already do.
+  if(global_data->kernel_hl_reduce_finalize < 0 || global_data->kernel_hl_cmean_finalize < 0
+     || global_data->kernel_hl_ring_vote_finalize < 0)
+    return cl_err; // no fp64 device
 
   cl_mem luminance = dt_opencl_alloc_device_buffer(devid, sizeof(float) * region_pixels);
   cl_mem hole = dt_opencl_alloc_device_buffer(devid, region_pixels);
@@ -828,6 +836,9 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
   ratios[1] = ratio1;
   ratios[2] = ratio2;
   cl_mem partial_sums = NULL; // mean-chromaticity partial sums (gate > 0 only)
+  cl_mem lum_min_dev = NULL;  // bright-valid luminance gate, device-resident
+  cl_mem cmean_dev = NULL;    // {cmean.rgb, count}, device-resident (never read back)
+  cl_mem refine_dev = NULL;   // {refine_gate, ratio_beta}, device-resident
   if(!luminance || !hole || !dome_lum || !ratio0 || !ratio1 || !ratio2) goto out;
 
   // soft floor first (production order: floor -> dome gate -> self dome)
@@ -836,11 +847,12 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
     dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), &estimate);
     dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), &valid);
     dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &clip0);
-    dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), &region_w);
-    dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &region_h);
-    dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(float), &floor_gate);
+    dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &region_worth);
+    dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &region_w);
+    dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(int), &region_h);
+    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &floor_gate);
     const float joint_tau = CF_JOINT_TAU;
-    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &joint_tau);
+    dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(float), &joint_tau);
     cl_err = dt_opencl_enqueue_kernel_2d(devid, kernel, size);
     if(cl_err != CL_SUCCESS) goto out;
   }
@@ -863,28 +875,29 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
   // Mean valid chromaticity (gate > 0 only): the flat target the hole-interior dome chroma is
   // pulled toward, mirroring the CPU _selfdome cmean pull (fully-valid == !hole here, so the
   // joint-core reduction kernel serves unchanged). ratio_beta stays 0 when no valid pixel exists.
-  float cmean[3] = { 0.f, 0.f, 0.f };
-  float ratio_beta = 0.f;
-  float refine_gate = 0.f; // floor_gate x trusted-ring vote (set with the cmean below)
+  // cmean, refine_gate and ratio_beta all live in device buffers (cmean_dev / refine_dev): the
+  // chain is computed by hl_cmean_finalize + hl_ring_vote_finalize and consumed by the kernels
+  // below without ever reaching the host.
   if(floor_gate > 1e-6f)
   {
     const int local_size = 64, n_groups = 256;
     const int n_pixels = (int)region_pixels;
     partial_sums = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 8 * n_groups);
-    if(!partial_sums)
+    lum_min_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float));
+    cmean_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 4);
+    refine_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 2);
+    if(!partial_sums || !lum_min_dev || !cmean_dev || !refine_dev)
     {
       cl_err = DT_OPENCL_DEFAULT_ERROR;
       goto out;
     }
     size_t sizes[3] = { (size_t)n_groups * local_size, 1, 1 };
     size_t local[3] = { local_size, 1, 1 };
-    float partial_host[8 * 256];
 
     // blown-zone plateau -> bright-valid gate for the refinements' surround mean: the
     // whole-window mean is contaminated by dark, unrelated content (the cgrad anchors learned
     // the same lesson) -- measured on MAC/sunrise, the ring vote against the all-valid mean
     // stays closed on exactly the scenes the refinements are for.
-    float lum_min = 0.f;
     {
       const int plateau_kernel = global_data->kernel_hl_cgrad_plateau;
       dt_opencl_set_kernel_arg(devid, plateau_kernel, 0, sizeof(cl_mem), &estimate);
@@ -894,16 +907,18 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
       dt_opencl_set_kernel_arg(devid, plateau_kernel, 4, sizeof(float) * 2 * local_size, NULL);
       cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, plateau_kernel, sizes, local);
       if(cl_err != CL_SUCCESS) goto out;
-      cl_err = dt_opencl_read_buffer_from_device(devid, partial_host, partial_sums, 0,
-                                                 sizeof(float) * 2 * n_groups, CL_TRUE);
+      const int fin = global_data->kernel_hl_reduce_finalize;
+      const int fin_stride = 2, fin_mode = 1;
+      const float fin_scale = 0.35f;
+      dt_opencl_set_kernel_arg(devid, fin, 0, sizeof(cl_mem), &partial_sums);
+      dt_opencl_set_kernel_arg(devid, fin, 1, sizeof(cl_mem), &lum_min_dev);
+      dt_opencl_set_kernel_arg(devid, fin, 2, sizeof(int), &n_groups);
+      dt_opencl_set_kernel_arg(devid, fin, 3, sizeof(int), &fin_stride);
+      dt_opencl_set_kernel_arg(devid, fin, 4, sizeof(int), &fin_mode);
+      dt_opencl_set_kernel_arg(devid, fin, 5, sizeof(float), &fin_scale);
+      size_t fin_size[3] = { 1, 1, 1 };
+      cl_err = dt_opencl_enqueue_kernel_2d(devid, fin, fin_size);
       if(cl_err != CL_SUCCESS) goto out;
-      double plateau_sum = 0.0, plateau_count = 0.0;
-      for(int group = 0; group < n_groups; group++)
-      {
-        plateau_sum += (double)partial_host[group * 2 + 0];
-        plateau_count += (double)partial_host[group * 2 + 1];
-      }
-      if(plateau_count > 0.0) lum_min = 0.35f * (float)(plateau_sum / plateau_count);
     }
 
     const int kernel = global_data->kernel_hl_cmean_reduce;
@@ -913,27 +928,24 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
     dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &partial_sums);
     dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &n_pixels);
     dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(float), &epsilon);
-    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &lum_min);
+    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(cl_mem), &lum_min_dev);
     dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(float) * 4 * local_size, NULL);
     cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, kernel, sizes, local);
     if(cl_err != CL_SUCCESS) goto out;
 
-    cl_err = dt_opencl_read_buffer_from_device(devid, partial_host, partial_sums, 0, sizeof(float) * 4 * n_groups,
-                                               CL_TRUE);
-    if(cl_err != CL_SUCCESS) goto out;
-    double accum[4] = { 0.0, 0.0, 0.0, 0.0 };
-    for(int group = 0; group < n_groups; group++)
-      for(int k = 0; k < 4; k++) accum[k] += (double)partial_host[group * 4 + k];
-    if(accum[3] > 0.0)
+    // Fold the chromaticity mean on the DEVICE (hl_cmean_finalize), run the trusted-ring vote,
+    // and fold that on the device too (hl_ring_vote_finalize -> {refine_gate, ratio_beta}). Both
+    // consumers below read those buffers, so the whole cmean -> vote -> refine chain stays on the
+    // GPU: no scalar crosses the bus and no host branch decides whether a kernel runs.
     {
-      for(int c = 0; c < 3; c++) cmean[c] = (float)(accum[c] / accum[3]);
+      const int fin = global_data->kernel_hl_cmean_finalize;
+      dt_opencl_set_kernel_arg(devid, fin, 0, sizeof(cl_mem), &partial_sums);
+      dt_opencl_set_kernel_arg(devid, fin, 1, sizeof(cl_mem), &cmean_dev);
+      dt_opencl_set_kernel_arg(devid, fin, 2, sizeof(int), &n_groups);
+      size_t one[3] = { 1, 1, 1 };
+      cl_err = dt_opencl_enqueue_kernel_2d(devid, fin, one);
+      if(cl_err != CL_SUCCESS) goto out;
 
-      // trusted-ring vote on the flat-mean prior (CPU _hl_ring_flat_mean_vote mirror): the
-      // refinements (ratio pull + decoupled recombine) engage only where the 1-clip ring
-      // confirms the region mean describes the blown core
-      const float cmean_sum = fmaxf(cmean[0] + cmean[1] + cmean[2], 1e-9f);
-      const float cmean_share[3]
-          = { cmean[0] / cmean_sum, cmean[1] / cmean_sum, cmean[2] / cmean_sum };
       const int vote_kernel = global_data->kernel_hl_ring_vote;
       dt_opencl_set_kernel_arg(devid, vote_kernel, 0, sizeof(cl_mem), &estimate);
       dt_opencl_set_kernel_arg(devid, vote_kernel, 1, sizeof(cl_mem), &valid);
@@ -942,38 +954,15 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
       dt_opencl_set_kernel_arg(devid, vote_kernel, 4, sizeof(float) * 8 * local_size, NULL);
       cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, vote_kernel, sizes, local);
       if(cl_err != CL_SUCCESS) goto out;
-      cl_err = dt_opencl_read_buffer_from_device(devid, partial_host, partial_sums, 0,
-                                                 sizeof(float) * 8 * n_groups, CL_TRUE);
+
+      const int vfin = global_data->kernel_hl_ring_vote_finalize;
+      dt_opencl_set_kernel_arg(devid, vfin, 0, sizeof(cl_mem), &partial_sums);
+      dt_opencl_set_kernel_arg(devid, vfin, 1, sizeof(cl_mem), &cmean_dev);
+      dt_opencl_set_kernel_arg(devid, vfin, 2, sizeof(cl_mem), &refine_dev);
+      dt_opencl_set_kernel_arg(devid, vfin, 3, sizeof(int), &n_groups);
+      dt_opencl_set_kernel_arg(devid, vfin, 4, sizeof(float), &floor_gate);
+      cl_err = dt_opencl_enqueue_kernel_2d(devid, vfin, one);
       if(cl_err != CL_SUCCESS) goto out;
-      double share_sum[3] = { 0.0, 0.0, 0.0 };
-      double share_sq[3] = { 0.0, 0.0, 0.0 };
-      double ring_count = 0.0;
-      for(int group = 0; group < n_groups; group++)
-      {
-        for(int c = 0; c < 3; c++)
-        {
-          share_sum[c] += (double)partial_host[group * 8 + c];
-          share_sq[c] += (double)partial_host[group * 8 + 4 + c];
-        }
-        ring_count += (double)partial_host[group * 8 + 3];
-      }
-      float ring_vote = 0.f;
-      if(ring_count > 0.0)
-      {
-        float bias = 0.f;
-        float dispersion = 0.f;
-        for(int c = 0; c < 3; c++)
-        {
-          const double mean = share_sum[c] / ring_count;
-          bias += fabsf((float)mean - cmean_share[c]);
-          dispersion += sqrtf(fmaxf((float)(share_sq[c] / ring_count - mean * mean), 0.f));
-        }
-        const float t_stat = bias / fmaxf(dispersion, 0.02f);
-        const float arg = t_stat / 5.f;
-        ring_vote = expf(-arg * arg);
-      }
-      refine_gate = floor_gate * ring_vote;
-      ratio_beta = 0.5f * refine_gate;
     }
   }
 
@@ -1028,16 +1017,19 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
       cl_err = dt_opencl_enqueue_kernel_2d(devid, kernel, size);
       if(cl_err == CL_SUCCESS)
         cl_err = _cf_harmonic_fill_cl(devid, gd_void, ratios[c], hole, region_w, region_h, cf_base, 1, NULL);
-      if(cl_err == CL_SUCCESS && ratio_beta > 0.f)
+      if(cl_err == CL_SUCCESS && floor_gate > 1e-6f)
       {
-        // pull the filled ratio toward the mean valid chromaticity (CPU cmean pull mirror)
+        // pull the filled ratio toward the mean valid chromaticity (CPU cmean pull mirror). The
+        // launch is unconditional: the kernel reads ratio_beta from refine_dev and no-ops at 0,
+        // so no host round-trip decides whether it runs.
         const int blend_kernel = global_data->kernel_hl_ratio_cmean_blend;
         dt_opencl_set_kernel_arg(devid, blend_kernel, 0, sizeof(cl_mem), &ratios[c]);
         dt_opencl_set_kernel_arg(devid, blend_kernel, 1, sizeof(cl_mem), &hole);
-        dt_opencl_set_kernel_arg(devid, blend_kernel, 2, sizeof(int), &region_w);
-        dt_opencl_set_kernel_arg(devid, blend_kernel, 3, sizeof(int), &region_h);
-        dt_opencl_set_kernel_arg(devid, blend_kernel, 4, sizeof(float), &cmean[c]);
-        dt_opencl_set_kernel_arg(devid, blend_kernel, 5, sizeof(float), &ratio_beta);
+        dt_opencl_set_kernel_arg(devid, blend_kernel, 2, sizeof(cl_mem), &cmean_dev);
+        dt_opencl_set_kernel_arg(devid, blend_kernel, 3, sizeof(cl_mem), &refine_dev);
+        dt_opencl_set_kernel_arg(devid, blend_kernel, 4, sizeof(int), &region_w);
+        dt_opencl_set_kernel_arg(devid, blend_kernel, 5, sizeof(int), &region_h);
+        dt_opencl_set_kernel_arg(devid, blend_kernel, 6, sizeof(int), &c);
         cl_err = dt_opencl_enqueue_kernel_2d(devid, blend_kernel, size);
       }
     }
@@ -1061,7 +1053,7 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
     dt_opencl_set_kernel_arg(devid, kernel, 10, sizeof(int), &region_h);
     dt_opencl_set_kernel_arg(devid, kernel, 11, sizeof(float), &cf_sigma);
     dt_opencl_set_kernel_arg(devid, kernel, 12, sizeof(float), &epsilon);
-    dt_opencl_set_kernel_arg(devid, kernel, 13, sizeof(float), &refine_gate);
+    dt_opencl_set_kernel_arg(devid, kernel, 13, sizeof(cl_mem), &refine_dev);
     cl_err = dt_opencl_enqueue_kernel_2d(devid, kernel, size);
     if(cl_err != CL_SUCCESS) goto out;
   }
@@ -1072,11 +1064,12 @@ cl_int _selfdome_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_me
     dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), &estimate);
     dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), &valid);
     dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &clip0);
-    dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(int), &region_w);
-    dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &region_h);
-    dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(float), &floor_gate);
+    dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &region_worth);
+    dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &region_w);
+    dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(int), &region_h);
+    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &floor_gate);
     const float joint_tau = CF_JOINT_TAU;
-    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &joint_tau);
+    dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(float), &joint_tau);
     cl_err = dt_opencl_enqueue_kernel_2d(devid, kernel, size);
   }
 
@@ -1088,6 +1081,9 @@ out:
   dt_opencl_release_mem_object(ratio1);
   dt_opencl_release_mem_object(ratio2);
   dt_opencl_release_mem_object(partial_sums);
+  dt_opencl_release_mem_object(lum_min_dev);
+  dt_opencl_release_mem_object(cmean_dev);
+  dt_opencl_release_mem_object(refine_dev);
   return cl_err;
 }
 
@@ -1126,6 +1122,8 @@ cl_int _joint_core_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_
   ratios[1] = ratio1;
   ratios[2] = ratio2;
   cl_mem partial_sums = NULL, perm_grid_dev = NULL, rhs_dev = NULL, mask_img = NULL, mask_blur = NULL;
+  cl_mem lum_min_dev2 = NULL, zero_dev = NULL; // device-resident scalars (never read back)
+  cl_mem bright_dev = NULL, rehue_dev = NULL; // bright cmean + {rehue_gate, beta}, device-resident
   uint8_t *hole_mask = (uint8_t *)dt_pixelpipe_cache_alloc_align(region_pixels, pipe);
   int *matrix_col_ptr = NULL, *matrix_row_index = NULL, *perm_grid = NULL;
   double *matrix_values = NULL;
@@ -1186,22 +1184,36 @@ cl_int _joint_core_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_
     const int local_size = 64, n_groups = 256;
     const int n_pixels = (int)region_pixels;
     partial_sums = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 8 * n_groups);
-    if(!partial_sums)
+    lum_min_dev2 = dt_opencl_alloc_device_buffer(devid, sizeof(float));
+    zero_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float));
+    bright_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 4);
+    rehue_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 2);
+    if(!partial_sums || !lum_min_dev2 || !zero_dev || !bright_dev || !rehue_dev)
     {
       cl_err = DT_OPENCL_DEFAULT_ERROR;
       goto out;
     }
+    {
+      // zero_dev is written by a kernel, not memset from the host: the value rides in the
+      // command packet as a kernel argument, so no buffer crosses the bus.
+      const int setk = global_data->kernel_hl_set_scalar;
+      const float zero = 0.f;
+      dt_opencl_set_kernel_arg(devid, setk, 0, sizeof(cl_mem), &zero_dev);
+      dt_opencl_set_kernel_arg(devid, setk, 1, sizeof(float), &zero);
+      size_t one[3] = { 1, 1, 1 };
+      cl_err = dt_opencl_enqueue_kernel_2d(devid, setk, one);
+      if(cl_err != CL_SUCCESS) goto out;
+    }
     const int kernel = global_data->kernel_hl_cmean_reduce;
     size_t sizes[3] = { (size_t)n_groups * local_size, 1, 1 };
     size_t local[3] = { local_size, 1, 1 };
-    const float lum_min_all = 0.f; // APPROVED flat-colour solver target: every valid pixel
     dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), &estimate);
     dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), &valid);
     dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &luminance);
     dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &partial_sums);
     dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &n_pixels);
     dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(float), &epsilon);
-    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &lum_min_all);
+    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(cl_mem), &zero_dev);
     dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(float) * 4 * local_size, NULL);
     cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, kernel, sizes, local);
     if(cl_err != CL_SUCCESS) goto out;
@@ -1226,7 +1238,6 @@ cl_int _joint_core_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_
     {
       // BRIGHT surround mean for the rehue + its vote (chroma_mean above stays the approved
       // all-valid solver target; see the CPU counterpart for the rationale)
-      float lum_min = 0.f;
       {
         const int plateau_kernel = global_data->kernel_hl_cgrad_plateau;
         dt_opencl_set_kernel_arg(devid, plateau_kernel, 0, sizeof(cl_mem), &estimate);
@@ -1236,99 +1247,97 @@ cl_int _joint_core_stage_cl(const int devid, void *gd_void, cl_mem estimate, cl_
         dt_opencl_set_kernel_arg(devid, plateau_kernel, 4, sizeof(float) * 2 * local_size, NULL);
         cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, plateau_kernel, sizes, local);
         if(cl_err != CL_SUCCESS) goto out;
-        cl_err = dt_opencl_read_buffer_from_device(devid, partial_host, partial_sums, 0,
-                                                   sizeof(float) * 2 * n_groups, CL_TRUE);
+        const int fin = global_data->kernel_hl_reduce_finalize;
+        const int fin_stride = 2, fin_mode = 1;
+        const float fin_scale = 0.35f;
+        dt_opencl_set_kernel_arg(devid, fin, 0, sizeof(cl_mem), &partial_sums);
+        dt_opencl_set_kernel_arg(devid, fin, 1, sizeof(cl_mem), &lum_min_dev2);
+        dt_opencl_set_kernel_arg(devid, fin, 2, sizeof(int), &n_groups);
+        dt_opencl_set_kernel_arg(devid, fin, 3, sizeof(int), &fin_stride);
+        dt_opencl_set_kernel_arg(devid, fin, 4, sizeof(int), &fin_mode);
+        dt_opencl_set_kernel_arg(devid, fin, 5, sizeof(float), &fin_scale);
+        size_t fin_size[3] = { 1, 1, 1 };
+        cl_err = dt_opencl_enqueue_kernel_2d(devid, fin, fin_size);
         if(cl_err != CL_SUCCESS) goto out;
-        double plateau_sum = 0.0, plateau_count = 0.0;
-        for(int group = 0; group < n_groups; group++)
-        {
-          plateau_sum += (double)partial_host[group * 2 + 0];
-          plateau_count += (double)partial_host[group * 2 + 1];
-        }
-        if(plateau_count > 0.0) lum_min = 0.35f * (float)(plateau_sum / plateau_count);
       }
-      float cmean_bright[3] = { 0.f, 0.f, 0.f };
-      double bright_count = 0.0;
+      // BRIGHT surround mean for the rehue + its vote, all device-resident: the plateau gate
+      // (hl_cgrad_plateau -> hl_reduce_finalize), the bright chromaticity mean
+      // (hl_cmean_reduce -> hl_cmean_finalize) and the trusted-ring vote (hl_ring_vote ->
+      // hl_ring_vote_finalize). chroma_mean above stays the approved all-valid solver target;
+      // see the CPU counterpart for why the rehue needs the BRIGHT mean instead.
       {
+        const int plateau_kernel = global_data->kernel_hl_cgrad_plateau;
+        dt_opencl_set_kernel_arg(devid, plateau_kernel, 0, sizeof(cl_mem), &estimate);
+        dt_opencl_set_kernel_arg(devid, plateau_kernel, 1, sizeof(cl_mem), &valid);
+        dt_opencl_set_kernel_arg(devid, plateau_kernel, 2, sizeof(cl_mem), &partial_sums);
+        dt_opencl_set_kernel_arg(devid, plateau_kernel, 3, sizeof(int), &n_pixels);
+        dt_opencl_set_kernel_arg(devid, plateau_kernel, 4, sizeof(float) * 2 * local_size, NULL);
+        cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, plateau_kernel, sizes, local);
+        if(cl_err != CL_SUCCESS) goto out;
+
+        const int fin = global_data->kernel_hl_reduce_finalize;
+        const int fin_stride = 2, fin_mode = 1;
+        const float fin_scale = 0.35f;
+        size_t one[3] = { 1, 1, 1 };
+        dt_opencl_set_kernel_arg(devid, fin, 0, sizeof(cl_mem), &partial_sums);
+        dt_opencl_set_kernel_arg(devid, fin, 1, sizeof(cl_mem), &lum_min_dev2);
+        dt_opencl_set_kernel_arg(devid, fin, 2, sizeof(int), &n_groups);
+        dt_opencl_set_kernel_arg(devid, fin, 3, sizeof(int), &fin_stride);
+        dt_opencl_set_kernel_arg(devid, fin, 4, sizeof(int), &fin_mode);
+        dt_opencl_set_kernel_arg(devid, fin, 5, sizeof(float), &fin_scale);
+        cl_err = dt_opencl_enqueue_kernel_2d(devid, fin, one);
+        if(cl_err != CL_SUCCESS) goto out;
+
+        const int kernel = global_data->kernel_hl_cmean_reduce;
         dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), &estimate);
         dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), &valid);
         dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &luminance);
         dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &partial_sums);
         dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(int), &n_pixels);
         dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(float), &epsilon);
-        dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(float), &lum_min);
+        dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(cl_mem), &lum_min_dev2);
         dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(float) * 4 * local_size, NULL);
         cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, kernel, sizes, local);
         if(cl_err != CL_SUCCESS) goto out;
-        cl_err = dt_opencl_read_buffer_from_device(devid, partial_host, partial_sums, 0,
-                                                   sizeof(float) * 4 * n_groups, CL_TRUE);
-        if(cl_err != CL_SUCCESS) goto out;
-        double bright_accum[4] = { 0.0, 0.0, 0.0, 0.0 };
-        for(int group = 0; group < n_groups; group++)
-          for(int k = 0; k < 4; k++) bright_accum[k] += (double)partial_host[group * 4 + k];
-        bright_count = bright_accum[3];
-        if(bright_count > 0.0)
-          for(int c = 0; c < 3; c++) cmean_bright[c] = (float)(bright_accum[c] / bright_count);
-      }
-      if(bright_count > 0.0)
-      {
-      const float cmean_sum = fmaxf(cmean_bright[0] + cmean_bright[1] + cmean_bright[2], 1e-9f);
-      const float cmean_share[3] = { cmean_bright[0] / cmean_sum, cmean_bright[1] / cmean_sum,
-                                     cmean_bright[2] / cmean_sum };
-      const int vote_kernel = global_data->kernel_hl_ring_vote;
-      dt_opencl_set_kernel_arg(devid, vote_kernel, 0, sizeof(cl_mem), &estimate);
-      dt_opencl_set_kernel_arg(devid, vote_kernel, 1, sizeof(cl_mem), &valid);
-      dt_opencl_set_kernel_arg(devid, vote_kernel, 2, sizeof(cl_mem), &partial_sums);
-      dt_opencl_set_kernel_arg(devid, vote_kernel, 3, sizeof(int), &n_pixels);
-      dt_opencl_set_kernel_arg(devid, vote_kernel, 4, sizeof(float) * 8 * local_size, NULL);
-      cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, vote_kernel, sizes, local);
-      if(cl_err != CL_SUCCESS) goto out;
-      cl_err = dt_opencl_read_buffer_from_device(devid, partial_host, partial_sums, 0,
-                                                 sizeof(float) * 8 * n_groups, CL_TRUE);
-      if(cl_err != CL_SUCCESS) goto out;
-      double share_sum[3] = { 0.0, 0.0, 0.0 };
-      double share_sq[3] = { 0.0, 0.0, 0.0 };
-      double ring_count = 0.0;
-      for(int group = 0; group < n_groups; group++)
-      {
-        for(int c = 0; c < 3; c++)
-        {
-          share_sum[c] += (double)partial_host[group * 8 + c];
-          share_sq[c] += (double)partial_host[group * 8 + 4 + c];
-        }
-        ring_count += (double)partial_host[group * 8 + 3];
-      }
-      float ring_vote = 0.f;
-      if(ring_count > 0.0)
-      {
-        float bias = 0.f;
-        float dispersion = 0.f;
-        for(int c = 0; c < 3; c++)
-        {
-          const double mean = share_sum[c] / ring_count;
-          bias += fabsf((float)mean - cmean_share[c]);
-          dispersion += sqrtf(fmaxf((float)(share_sq[c] / ring_count - mean * mean), 0.f));
-        }
-        const float t_stat = bias / fmaxf(dispersion, 0.02f);
-        const float arg = t_stat / 5.f;
-        ring_vote = expf(-arg * arg);
-      }
-      const float rehue_gate = floor_gate * ring_vote;
 
-      if(rehue_gate > 1e-6f)
+        const int cfin = global_data->kernel_hl_cmean_finalize;
+        dt_opencl_set_kernel_arg(devid, cfin, 0, sizeof(cl_mem), &partial_sums);
+        dt_opencl_set_kernel_arg(devid, cfin, 1, sizeof(cl_mem), &bright_dev);
+        dt_opencl_set_kernel_arg(devid, cfin, 2, sizeof(int), &n_groups);
+        cl_err = dt_opencl_enqueue_kernel_2d(devid, cfin, one);
+        if(cl_err != CL_SUCCESS) goto out;
+
+        const int vote_kernel = global_data->kernel_hl_ring_vote;
+        dt_opencl_set_kernel_arg(devid, vote_kernel, 0, sizeof(cl_mem), &estimate);
+        dt_opencl_set_kernel_arg(devid, vote_kernel, 1, sizeof(cl_mem), &valid);
+        dt_opencl_set_kernel_arg(devid, vote_kernel, 2, sizeof(cl_mem), &partial_sums);
+        dt_opencl_set_kernel_arg(devid, vote_kernel, 3, sizeof(int), &n_pixels);
+        dt_opencl_set_kernel_arg(devid, vote_kernel, 4, sizeof(float) * 8 * local_size, NULL);
+        cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, vote_kernel, sizes, local);
+        if(cl_err != CL_SUCCESS) goto out;
+
+        const int vfin = global_data->kernel_hl_ring_vote_finalize;
+        dt_opencl_set_kernel_arg(devid, vfin, 0, sizeof(cl_mem), &partial_sums);
+        dt_opencl_set_kernel_arg(devid, vfin, 1, sizeof(cl_mem), &bright_dev);
+        dt_opencl_set_kernel_arg(devid, vfin, 2, sizeof(cl_mem), &rehue_dev);
+        dt_opencl_set_kernel_arg(devid, vfin, 3, sizeof(int), &n_groups);
+        dt_opencl_set_kernel_arg(devid, vfin, 4, sizeof(float), &floor_gate);
+        cl_err = dt_opencl_enqueue_kernel_2d(devid, vfin, one);
+        if(cl_err != CL_SUCCESS) goto out;
+      }
+
       {
+        // unconditional launch: hl_clip0_rehue reads {rehue_gate, beta} from rehue_dev and no-ops
+        // at 0, so no host round-trip decides whether the rehue runs
         const int rehue_kernel = global_data->kernel_hl_clip0_rehue;
         dt_opencl_set_kernel_arg(devid, rehue_kernel, 0, sizeof(cl_mem), &clip0);
         dt_opencl_set_kernel_arg(devid, rehue_kernel, 1, sizeof(cl_mem), &hole);
-        dt_opencl_set_kernel_arg(devid, rehue_kernel, 2, sizeof(int), &region_w);
-        dt_opencl_set_kernel_arg(devid, rehue_kernel, 3, sizeof(int), &region_h);
-        dt_opencl_set_kernel_arg(devid, rehue_kernel, 4, sizeof(float), &cmean_bright[0]);
-        dt_opencl_set_kernel_arg(devid, rehue_kernel, 5, sizeof(float), &cmean_bright[1]);
-        dt_opencl_set_kernel_arg(devid, rehue_kernel, 6, sizeof(float), &cmean_bright[2]);
-        dt_opencl_set_kernel_arg(devid, rehue_kernel, 7, sizeof(float), &rehue_gate);
+        dt_opencl_set_kernel_arg(devid, rehue_kernel, 2, sizeof(cl_mem), &bright_dev);
+        dt_opencl_set_kernel_arg(devid, rehue_kernel, 3, sizeof(cl_mem), &rehue_dev);
+        dt_opencl_set_kernel_arg(devid, rehue_kernel, 4, sizeof(int), &region_w);
+        dt_opencl_set_kernel_arg(devid, rehue_kernel, 5, sizeof(int), &region_h);
         cl_err = dt_opencl_enqueue_kernel_2d(devid, rehue_kernel, size);
         if(cl_err != CL_SUCCESS) goto out;
-      }
       }
     }
   }
@@ -1501,6 +1510,10 @@ out:
   dt_opencl_release_mem_object(ratio2);
   dt_opencl_release_mem_object(cg_field);
   dt_opencl_release_mem_object(partial_sums);
+  dt_opencl_release_mem_object(lum_min_dev2);
+  dt_opencl_release_mem_object(bright_dev);
+  dt_opencl_release_mem_object(rehue_dev);
+  dt_opencl_release_mem_object(zero_dev);
   dt_opencl_release_mem_object(perm_grid_dev);
   dt_opencl_release_mem_object(rhs_dev);
   dt_opencl_release_mem_object(mask_img);
@@ -1529,6 +1542,13 @@ cl_int _chromaticity_gradient_stage_cl(const int devid, void *gd_void, cl_mem es
   size_t size[3] = { ROUNDUPDWD(region_w, devid), ROUNDUPDHT(region_h, devid), 1 };
   const float epsilon = 1e-6f;
 
+  // The stage-2 reduction finalizers this needs are compiled only where the fp64 extension
+  // is (data/kernels/highlights_harmonic.cl). Without them the caller falls back to the CPU
+  // twin, the same way the sparse solver and the PDE/aniso stages already do.
+  if(global_data->kernel_hl_reduce_finalize < 0 || global_data->kernel_hl_cmean_finalize < 0
+     || global_data->kernel_hl_ring_vote_finalize < 0)
+    return cl_err; // no fp64 device
+
   cl_mem guard_src = dt_opencl_alloc_device(devid, region_w, region_h, sizeof(float));  // image (gaussian)
   cl_mem guard_blur = dt_opencl_alloc_device(devid, region_w, region_h, sizeof(float)); // image (gaussian)
   cl_mem gate_src = dt_opencl_alloc_device(devid, region_w, region_h, sizeof(float));   // image (gaussian)
@@ -1540,7 +1560,7 @@ cl_int _chromaticity_gradient_stage_cl(const int devid, void *gd_void, cl_mem es
   cl_mem authored = dt_opencl_alloc_device_buffer(devid, region_pixels);
   cl_mem field = dt_opencl_alloc_device_buffer(devid, sizeof(float) * region_pixels);
   cl_mem shares = dt_opencl_alloc_device_buffer(devid, sizeof(float) * region_pixels * 4);
-  cl_mem partial_sums = NULL;
+  cl_mem partial_sums = NULL, gate_vote_dev = NULL; // ring vote, device-resident
   uint8_t *hole_host = (uint8_t *)dt_pixelpipe_cache_alloc_align(region_pixels, pipe);
   if(!guard_src || !guard_blur || !gate_src || !gate_msk || !gate_wgt || !gate_nrm || !hole || !authored
      || !field || !shares || !hole_host)
@@ -1655,14 +1675,12 @@ cl_int _chromaticity_gradient_stage_cl(const int devid, void *gd_void, cl_mem es
     dt_opencl_set_kernel_arg(devid, kernel, 0, sizeof(cl_mem), &estimate);
     dt_opencl_set_kernel_arg(devid, kernel, 1, sizeof(cl_mem), &valid);
     dt_opencl_set_kernel_arg(devid, kernel, 2, sizeof(cl_mem), &shares);
-    dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &clip0);
-    dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(cl_mem), &gate_src);
-    dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(cl_mem), &gate_msk);
-    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(int), &region_w);
-    dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(int), &region_h);
-    dt_opencl_set_kernel_arg(devid, kernel, 8, sizeof(float), &epsilon);
-    dt_opencl_set_kernel_arg(devid, kernel, 9, sizeof(float), &gate_tau);
-    dt_opencl_set_kernel_arg(devid, kernel, 10, sizeof(float), &floor_gate);
+    dt_opencl_set_kernel_arg(devid, kernel, 3, sizeof(cl_mem), &gate_src);
+    dt_opencl_set_kernel_arg(devid, kernel, 4, sizeof(cl_mem), &gate_msk);
+    dt_opencl_set_kernel_arg(devid, kernel, 5, sizeof(int), &region_w);
+    dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(int), &region_h);
+    dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(float), &epsilon);
+    dt_opencl_set_kernel_arg(devid, kernel, 8, sizeof(float), &gate_tau);
     cl_err = dt_opencl_enqueue_kernel_2d(devid, kernel, size);
     if(cl_err != CL_SUCCESS) goto out;
     const float gate_sigma = CLAMP(reg_radius / 4.f, 8.f, 96.f);
@@ -1672,34 +1690,44 @@ cl_int _chromaticity_gradient_stage_cl(const int devid, void *gd_void, cl_mem es
     if(cl_err != CL_SUCCESS) goto out;
   }
 
-  // region-level ring vote (see the CPU stage): read the source images back once and sum on the
-  // host -- the mirrors must agree exactly, and the gate sources are a single float plane each
-  float gate_vote = 0.f;
+  // region-level ring vote (see the CPU stage), entirely on the device: a two-stage reduction over
+  // the two gate planes publishes the scalar into gate_vote_dev, which the reprojection kernel reads
+  // directly. Reading both full planes back just to divide two sums is what this replaces.
   {
-    float *vote_host = dt_pixelpipe_cache_alloc_align_float(region_pixels * 2, pipe);
-    if(!vote_host)
+    const int vote_local = 64, vote_groups = 256;
+    cl_mem vote_partial = dt_opencl_alloc_device_buffer(devid, sizeof(float) * 2 * vote_groups);
+    gate_vote_dev = dt_opencl_alloc_device_buffer(devid, sizeof(float));
+    if(!vote_partial || !gate_vote_dev)
     {
+      dt_opencl_release_mem_object(vote_partial);
       cl_err = DT_OPENCL_DEFAULT_ERROR;
       goto out;
     }
-    const size_t origin[3] = { 0, 0, 0 };
-    const size_t reg[3] = { (size_t)region_w, (size_t)region_h, 1 };
-    cl_err = dt_opencl_read_host_from_device_raw(devid, vote_host, gate_src, origin, reg,
-                                                 region_w * sizeof(float), CL_TRUE);
-    if(cl_err == CL_SUCCESS)
-      cl_err = dt_opencl_read_host_from_device_raw(devid, vote_host + region_pixels, gate_msk, origin, reg,
-                                                   region_w * sizeof(float), CL_TRUE);
+    const int vk = global_data->kernel_hl_vote_reduce;
+    dt_opencl_set_kernel_arg(devid, vk, 0, sizeof(cl_mem), &gate_src);
+    dt_opencl_set_kernel_arg(devid, vk, 1, sizeof(cl_mem), &gate_msk);
+    dt_opencl_set_kernel_arg(devid, vk, 2, sizeof(cl_mem), &vote_partial);
+    dt_opencl_set_kernel_arg(devid, vk, 3, sizeof(int), &region_w);
+    dt_opencl_set_kernel_arg(devid, vk, 4, sizeof(int), &region_h);
+    dt_opencl_set_kernel_arg(devid, vk, 5, sizeof(float) * 2 * vote_local, NULL);
+    size_t vs[3] = { (size_t)vote_groups * vote_local, 1, 1 };
+    size_t vl[3] = { vote_local, 1, 1 };
+    cl_err = dt_opencl_enqueue_kernel_2d_with_local(devid, vk, vs, vl);
     if(cl_err == CL_SUCCESS)
     {
-      double wsum = 0.0, msum = 0.0;
-      for(size_t i = 0; i < region_pixels; i++)
-      {
-        wsum += (double)vote_host[i];
-        msum += (double)vote_host[region_pixels + i];
-      }
-      gate_vote = (msum > 0.0) ? (float)(wsum / msum) : 0.f;
+      const int fin = global_data->kernel_hl_reduce_finalize;
+      const int stride = 2, mode = 1;
+      const float scale = 1.f;
+      dt_opencl_set_kernel_arg(devid, fin, 0, sizeof(cl_mem), &vote_partial);
+      dt_opencl_set_kernel_arg(devid, fin, 1, sizeof(cl_mem), &gate_vote_dev);
+      dt_opencl_set_kernel_arg(devid, fin, 2, sizeof(int), &vote_groups);
+      dt_opencl_set_kernel_arg(devid, fin, 3, sizeof(int), &stride);
+      dt_opencl_set_kernel_arg(devid, fin, 4, sizeof(int), &mode);
+      dt_opencl_set_kernel_arg(devid, fin, 5, sizeof(float), &scale);
+      size_t one[3] = { 1, 1, 1 };
+      cl_err = dt_opencl_enqueue_kernel_2d(devid, fin, one);
     }
-    dt_pixelpipe_cache_free_align(vote_host);
+    dt_opencl_release_mem_object(vote_partial);
     if(cl_err != CL_SUCCESS) goto out;
   }
 
@@ -1715,7 +1743,7 @@ cl_int _chromaticity_gradient_stage_cl(const int devid, void *gd_void, cl_mem es
     dt_opencl_set_kernel_arg(devid, kernel, 6, sizeof(int), &region_w);
     dt_opencl_set_kernel_arg(devid, kernel, 7, sizeof(int), &region_h);
     dt_opencl_set_kernel_arg(devid, kernel, 8, sizeof(float), &epsilon);
-    dt_opencl_set_kernel_arg(devid, kernel, 9, sizeof(float), &gate_vote);
+    dt_opencl_set_kernel_arg(devid, kernel, 9, sizeof(cl_mem), &gate_vote_dev);
     const float authored_ramp = CF_AUTHORED_RAMP;
     dt_opencl_set_kernel_arg(devid, kernel, 10, sizeof(float), &authored_ramp);
     dt_opencl_set_kernel_arg(devid, kernel, 11, sizeof(float), &floor_gate);
@@ -1793,6 +1821,7 @@ out:
   dt_opencl_release_mem_object(field);
   dt_opencl_release_mem_object(shares);
   dt_opencl_release_mem_object(partial_sums);
+  dt_opencl_release_mem_object(gate_vote_dev);
   dt_pixelpipe_cache_free_align(hole_host);
   return cl_err;
 }
