@@ -33,7 +33,6 @@
 #ifndef DT_METADATA_EXIF_INTERNAL_H
 #define DT_METADATA_EXIF_INTERNAL_H
 
-#include "common/global_mutexes.h"
 #include "common/image.h"
 
 #include <exiv2/exiv2.hpp>
@@ -78,28 +77,15 @@ std::wstring dt_exiv2_widen_path(const char *utf8_path);
 
 #endif
 
-/**
- * @brief RAII guard over the process-wide exiv2 lock.
+/* There used to be a read_metadata_threadsafe() macro here, wrapping readMetadata() in a
+ * process-wide lock. The lock is gone -- exiv2 0.27.7's Exif and IPTC code is reentrant and
+ * its XMP path serializes itself, so the only entry points that are not thread-safe are
+ * XmpParser::initialize() and XmpProperties::registerNs(), which Ansel calls exclusively
+ * from dt_exif_init() before any thread exists. See doc/lock-audit.md.
  *
- * @details exiv2's readMetadata() is not thread safe in 0.26, and it throws, so the unlock
- * has to survive an exception -- hence a destructor rather than a matched pair of calls.
- * FIXME: check again once we rely on 0.27.
- *
- * The mutex itself is reached through dt_exiv2_threadsafe_mutex() rather than named
- * directly, so this header needs no `darktable.h` -- which it could not have anyway.
- */
-class Lock
-{
-public:
-  Lock() { dt_pthread_mutex_lock(dt_exiv2_threadsafe_mutex()); }
-  ~Lock() { dt_pthread_mutex_unlock(dt_exiv2_threadsafe_mutex()); }
-};
-
-#define read_metadata_threadsafe(image)                       \
-{                                                             \
-  Lock exiv2_lock;                                            \
-  image->readMetadata();                                      \
-}
+ * The macro is gone with it rather than left as a no-op: a wrapper called "threadsafe" that
+ * does nothing is worse than no wrapper, because it reads like a guarantee. Call
+ * image->readMetadata() directly. */
 
 /** @brief Strip the given EXIF keys from @p exif, ignoring any that are absent. */
 void dt_remove_exif_keys(Exiv2::ExifData &exif, const char *keys[], unsigned int n_keys);

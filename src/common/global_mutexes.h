@@ -27,9 +27,14 @@
  * here, not a stepping stone: see doc/globals-migration.md, category "process-wide
  * buses".
  *
- * Declared here so that the modules which need them (iop/lens.cc, iop/watermark.c,
+ * Declared here so that the modules which need them (iop/watermark.c,
  * imageio/storage/disk.c, imageio/imageio_rawspeed.cc, ...) do not have to include
- * darktable.h, and therefore the whole application, to take a lock. */
+ * darktable.h, and therefore the whole application, to take a lock.
+ *
+ * Audited 2026-08-27; see doc/lock-audit.md for what each one protects and what was
+ * removed. The list is deliberately short and getting shorter: a lock belongs to the module
+ * whose invariant it defends, not to the application struct. What remains here is
+ * process-wide because the thing it serializes genuinely is. */
 
 #include "system/dtpthread.h"
 
@@ -37,20 +42,10 @@
 extern "C" {
 #endif
 
-/** Serializes plugin calls that are not thread-safe, notably at export time when
- *  several pipelines would otherwise enter the same library concurrently. */
-dt_pthread_mutex_t *dt_plugin_threadsafe_mutex(void);
-
 /** Prevents concurrent export/thumbnail pipelines from running at the same time.
  *  This buys no throughput -- the CPU is the bottleneck and the pixel code is already
  *  multi-threaded internally through OpenMP -- it bounds peak memory instead. */
 dt_pthread_mutex_t *dt_pipeline_threadsafe_mutex(void);
-
-/** Exiv2 readMetadata() was not thread-safe prior to 0.27. */
-dt_pthread_mutex_t *dt_exiv2_threadsafe_mutex(void);
-
-/** RawSpeed readFile() is apparently not thread-safe. */
-dt_pthread_mutex_t *dt_readfile_mutex(void);
 
 /** Serializes SQL transactions and image metadata/history reads and writes across all
  *  pipeline jobs and threads: sqlite refuses to start a transaction within a

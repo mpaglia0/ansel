@@ -275,7 +275,7 @@ int dt_exif_read_blob(uint8_t **buf, const char *path, const int32_t imgid, cons
   {
     std::unique_ptr<Exiv2::Image> image(Exiv2::ImageFactory::open(WIDEN(path)));
     if(!image.get()) return 1;
-    read_metadata_threadsafe(image);
+    image->readMetadata();
     Exiv2::ExifData &exifData = image->exifData();
 
     // get rid of thumbnails
@@ -1250,7 +1250,7 @@ int dt_exif_xmp_read(dt_image_t *img, const char *filename, const int history_on
     // read xmp sidecar
     std::unique_ptr<Exiv2::Image> image(Exiv2::ImageFactory::open(WIDEN(filename)));
     if(!image.get()) return 1;
-    read_metadata_threadsafe(image);
+    image->readMetadata();
     Exiv2::XmpData &xmpData = image->xmpData();
 
     Exiv2::XmpData::iterator pos;
@@ -2214,10 +2214,6 @@ char *dt_exif_xmp_read_string(const int32_t imgid)
 {
   try
   {
-    // Serialize the non-thread-safe exiv2/XMP toolkit (XmpParser::decode()/encode() below) against
-    // all other exiv2 work. Recursive mutex, so nested helpers re-lock harmlessly.
-    Lock lock;
-
     char input_filename[DT_PATH_MAX] = { 0 };
     gboolean from_cache = FALSE;
     dt_image_full_path(imgid,  input_filename,  sizeof(input_filename),  &from_cache, __FUNCTION__);
@@ -2338,13 +2334,6 @@ int dt_exif_xmp_attach_export(const int32_t imgid, const char *filename, void *m
   dt_export_metadata_t *m = (dt_export_metadata_t *)metadata;
   try
   {
-    // Serialize the whole exiv2 region: this function mixes readMetadata(), XmpParser::decode() and
-    // writeMetadata(), all of which touch the non-thread-safe exiv2/XMP toolkit and must not run
-    // concurrently with other exiv2 work. The mutex is recursive, so the nested
-    // read_metadata_threadsafe() calls (and any metadata read during variable expansion) re-lock
-    // harmlessly.
-    Lock lock;
-
     char input_filename[DT_PATH_MAX] = { 0 };
     gboolean from_cache = TRUE;
     dt_image_full_path(imgid,  input_filename,  sizeof(input_filename),  &from_cache, __FUNCTION__);
@@ -2353,7 +2342,7 @@ int dt_exif_xmp_attach_export(const int32_t imgid, const char *filename, void *m
     // unfortunately it seems we have to read the metadata, to not erase the exif (which we just wrote).
     // will make export slightly slower, oh well.
     // img->clearXmpPacket();
-    read_metadata_threadsafe(img);
+    img->readMetadata();
 
     try
     {
@@ -2361,7 +2350,7 @@ int dt_exif_xmp_attach_export(const int32_t imgid, const char *filename, void *m
       std::unique_ptr<Exiv2::Image> input_image(Exiv2::ImageFactory::open(WIDEN(input_filename)));
       if(input_image.get() != 0)
       {
-        read_metadata_threadsafe(input_image);
+        input_image->readMetadata();
         img->setIptcData(input_image->iptcData());
         img->setXmpData(input_image->xmpData());
       }
@@ -2598,13 +2587,6 @@ int dt_exif_xmp_write_with_imgpath(const dt_image_t *image, const char *filename
 
   try
   {
-    // The Adobe XMP toolkit behind Exiv2::XmpParser::decode()/encode() keeps process-global
-    // state and is NOT thread-safe. Sidecar writes run on the worker thread pool, so several
-    // imports/writes can hit dt_exif_xmp_write_with_imgpath() at once (and race the locked
-    // readMetadata() in dt_exif_read()), corrupting the heap -> SIGABRT in free(). Serialize the
-    // whole exiv2 region on the same (recursive) mutex read_metadata_threadsafe() uses.
-    Lock lock;
-
     Exiv2::XmpData xmpData;
     std::string xmpPacket;
     char *checksum_old = NULL;

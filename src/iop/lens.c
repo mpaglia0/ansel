@@ -1356,8 +1356,6 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
 
   const float orig_w = roi_in->scale * piece->buf_in.width, orig_h = roi_in->scale * piece->buf_in.height;
 
-  dt_pthread_mutex_lock(dt_plugin_threadsafe_mutex());
-
   int modflags;
   ls_modifier_t modifier;
   ls_modifier_t vig_modifier;
@@ -1367,8 +1365,6 @@ int process(dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, const dt_dev_
            d->ls_lens.n_dist, d->ls_lens.n_tca, d->ls_lens.n_vig, (double)d->crop,
            (double)d->focal);
 
-
-  dt_pthread_mutex_unlock(dt_plugin_threadsafe_mutex());
 
   const struct dt_interpolation *const interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
 
@@ -1849,15 +1845,12 @@ void distort_mask(struct dt_iop_module_t *self, const struct dt_dev_pixelpipe_t 
   }
 
   const float orig_w = roi_in->scale * piece->buf_in.width, orig_h = roi_in->scale * piece->buf_in.height;
-  dt_pthread_mutex_lock(dt_plugin_threadsafe_mutex());
   int modflags;
   ls_modifier_t modifier;
   get_modifier(&modflags, orig_w, orig_h, d,
                /*DT_LENS_MODIFY_TCA |*/ DT_LENS_MODIFY_DISTORTION | DT_LENS_MODIFY_GEOMETRY
                    | DT_LENS_MODIFY_SCALE,
                FALSE, &modifier, NULL);
-
-  dt_pthread_mutex_unlock(dt_plugin_threadsafe_mutex());
 
   if(!_lens_flags_move_pixels(modflags))
   {
