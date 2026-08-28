@@ -296,21 +296,59 @@ teardown. Any other GUI-thread code that tears down darkroom pipe state must wai
 same way — `dev->exit`/`pipe->shutdown` alone do not guarantee the worker has stopped touching a
 pipe.
 
-### History items are refcounted; `history_mutex` resync contention is a known issue
+### History items are refcounted; the pipe resyncs against a snapshot, not under `history_mutex`
 
-`dt_dev_history_item_t` now carries a `refcount` and must be constructed exclusively through
+`dt_dev_history_item_t` carries a `refcount` and must be constructed exclusively through
 `dt_dev_history_item_create()` — never a bare `calloc` (mirrors the masks-forms rule below;
 `dt_dev_history_cow_touch()` clones a shared item before an in-place mutation, mirroring
 `dt_masks_cow_touch()`).
 
-`dt_dev_pixelpipe_change()` (worker thread, called from `dt_dev_darkroom_pipeline()`) holds
-`dev->history_mutex` as **reader** for the entire O(nodes × history) pipe resync — measured over
-200ms under mask-heavy history during active editing — which starves the GUI-thread writer
-(`dt_dev_add_history_item_ext()`) for the same duration on every edit (a scroll on exposure, a
-mask drag). Still open. See `doc/reorganisation.md` ("History item refcounting and the
-`history_mutex` contention") for the full diagnosis and status, and the named-rwlock diagnostic
-in `common/dtpthread.h` (`dt_pthread_rwlock_set_name()`, opt-in per lock, combine with
-`-d history`) to reproduce the measurement.
+That refcount exists for one consumer: `dt_dev_pixelpipe_change()` (worker thread, called from
+`dt_dev_darkroom_pipeline()`) used to hold `dev->history_mutex` as **reader** for the entire
+O(nodes × history) pipe resync — every module's `commit_params()` — measured at **204–227 ms**
+on the load-time resync of a 47-item mask-heavy history, with no user input at all. The GUI
+thread needs the *writer* side of that lock on every commit (each slider tick, and each
+throttled mask-drag commit that `views/darkroom.c`'s `_queue_delayed_history_commit()` fires
+mid-drag), and glibc's writer-preferring rwlock policy then blocks every **new reader** behind
+the queued writer too — so one slow resync stalled the whole application until it finished.
+That is discussion #1098's "the shape moves in steps": each step is one lock acquisition.
+
+Fixed by resyncing against a **snapshot**. `dt_dev_history_snapshot_take()` (`dev_history.h`)
+copies the list cells and takes one reference per item under the read lock — microseconds —
+and `change()` releases the lock before any `commit_params()` runs. The same load-time resync
+now logs `resynced from snapshot in 174 ms, lock-free` with **no lock hold above the 1 ms print
+threshold**; the compute cost is unchanged, only the lock is gone. The three other sync entry
+points (`dt_dev_pixelpipe_synch_all`/`synch_top`, used by export, snapshots and the focus
+overlay on throwaway devs) take their own brief snapshot the same way. The writer's COW gate is
+the other half of the contract: a snapshotted item has refcount > 1, so `cow_touch` clones it
+and the snapshot never sees a half-rewritten item. `src/tests/unittests/test_history_snapshot.c`
+pins that contract; `-d history` shows the hold times.
+
+**Three things about this design that are not obvious from the code:**
+
+- **Capture `history_end` and the hash inside the same brief lock as the list.**
+  `dt_dev_set_history_end_ext()` writes both together under the write lock. Reading the atomic
+  hash *after* releasing lets a commit land in between and mark the pipe as synced to history it
+  never resynced against — a missed recompute, silently. The snapshot struct carries all three.
+- **`pipe->last_history_item` must hold a reference and be exchanged atomically.** It is the
+  identity marker `synch_top` uses to bound an in-place top-entry rewrite to one node instead of
+  a full resync. `cow_touch` re-points it at the clone from the GUI thread while the worker
+  writes it outside the lock, so it is a genuine cross-thread slot: `dt_atomic_exch_ptr` keeps
+  every interleaving refcount-honest (each side releases exactly what it displaced), and the
+  held reference means a compare against a possibly-departed item can never hit a **recycled
+  address** — a hazard the old under-the-lock raw pointer already had in principle. Do not
+  "simplify" it back to a plain assignment; the worst case of a lost exchange race is one full
+  resync, never a leak or a double free.
+- **The async DB write job (`_dt_dev_write_history_job_run`) is the *second* long reader** of
+  this lock — it holds it across the whole history+masks rewrite and is instrumented the same
+  way. It has the same disease and would take the same cure; it was left as is because it does
+  not sit on the interactive path the way the pipe resync did.
+
+The named-rwlock diagnostic lives in `system/dtpthread.h` (`dt_pthread_rwlock_set_name()`,
+opt-in per lock, combine with `-d history`); `dev->history_mutex` is named in `dt_dev_init()`.
+Drawn-mask geometry editing still commits history through the throttle on every drag motion
+rather than through the transient-params channel the drawlayer brush uses — that is the remaining
+follow-up for #1098, and it is a GUI-side routing change, not a locking one.
 
 ### `_insert_default_modules` must check `dev->history` in memory, not the DB row for `dev->image_storage.id`
 
@@ -891,6 +929,38 @@ check the early-out paths there before adding another branch to it.
 
 ## Masks / forms history
 
+### A brush point array records the centerline twice, and only the forward half is drawn
+
+`gui_points->points` for a brush holds, in this order: three header points per node (`ctrl1`,
+node, `ctrl2`), then the centerline sampled **forward** from the first node to the last, then the
+**same** centerline sampled backward. The border wraps around the stroke, so the line under it is
+walked there and back (`_brush_get_pts_border()`); the backward half is never drawn.
+
+The forward half ends at `_brush_centerline_end()` — `node_count * 3 + (points_count - node_count
+* 3) / 2`, i.e. half of the **samples**. Half of the whole array is a different number: the header
+belongs to neither pass, so counting it in falls one and a half points per node short, and the
+last node's own coordinate sits at the very end of the forward pass. Everything that walks the
+drawn centerline (the outline stroking, the source shape, the clone link's midpoint) uses that
+helper.
+
+### A drawing pass must not leave a path in the cairo context
+
+Cairo keeps the current path across calls, so a leftover is painted by the next `cairo_stroke()`
+**anywhere**, in that stroke's own style. `dt_masks_draw_path_seg_by_seg()` strokes one segment per
+node and stops on a node boundary, so it ends with `cairo_new_path()`; the creation session's
+per-shape loop (`masks_gui.c`) does the same between shapes.
+
+The symptom shape is a piece of one shape adopting another shape's style, or appearing only when
+something else happens to be drawn: a leftover tail comes out dashed when the shape's own dashed
+border is stroked next, comes out highlighted when another shape is hovered, and is invisible when
+nothing is drawn after it. That is a path leak, not a style or selection bug.
+
+Which segments exist at all is decided by the caller's shape: an open path (a brush — the only
+caller asking for round ends, since only an open path has two true ends) has `node_count - 1`
+segments, a closed one has one more, and a shape still being created has no closing segment yet.
+The walk stops once it has stroked them all, so it must be handed a point count that lets it
+**reach** the last node.
+
 ### Brush masks rasterize as radial spokes — wedge holes across the stroke (OPEN)
 
 Reported 2026-08-08 on `_DSC9410.NEF` (sidecar alongside it): a 57-node brush leaves four
@@ -1190,6 +1260,58 @@ Drag-and-drop of lighttable images onto tree rows was attempted and abandoned �
 with a manual `gtk_drag_dest_set` reliably receives motion but does not deliver the drop on tree
 models. DnD was removed entirely at the maintainer's request; do not re-add without a
 non-tree drop target or `tagging.c`-style full source+dest.
+
+### After an import: which image opens, and which folder the library shows
+
+`dt_collection_load_filmroll()` (`common/collection.c`) is what both import paths
+(`control/jobs/import_jobs.c`, `control/jobs/film_jobs.c`) call to make a freshly imported image
+visible. It runs on the **import job's thread**.
+
+**Whether the user is moved at all** is the caller's decision, expressed as a
+`dt_collection_import_view_t` policy (`common/collection.h`): `KEEP` (never move), `GRID`
+(lighttable), `IMAGE` (open that one image in the darkroom). Every **automatic** import passes
+`KEEP` — Studio Capture's folder survey (`data->folder_survey`, `common/folder_survey.c`) imports
+on its own schedule, in whatever view the user happens to be, and displays the capture itself
+from `DT_SIGNAL_IMAGE_IMPORT` without leaving its atelier. The policy has to come from what the
+import *is*, not from what is on screen when the job ends: the survey keeps running after the
+user leaves the Studio Capture atelier, so a capture landing mid-edit would otherwise throw them
+out of the darkroom (or into it).
+
+**Following the imported image's folder** asks two questions. Did the user ask for this import?
+An automatic one follows the folder in Studio Capture's own atelier, whose filmstrip tracks the
+shooting session, and nowhere else — the same reason `KEEP` does not switch views, applied to the
+collection. Then, may rule 0 be overwritten with a folder? That is the Collect module's persisted
+tab: legitimate on "Folders", destructive on "Collections" and "Queries" where the rules are the
+user's. That second question is deliberately NOT about the current atelier — the collection is
+global, so a manual import started from the darkroom must re-point it too, or the library still
+shows the previously browsed folder when the user goes back to the grid.
+`_collection_folder_ui_inactive()` is a different predicate for a different question (which
+folder the import dialog considers "currently browsed") and does gate on the atelier; do not
+merge the two.
+
+**The hovered image and the selection** follow the same rule: `dt_collection_load_filmroll()`
+points them at the imported image only for a user-requested import. Under `KEEP` it leaves both
+alone — Studio Capture sets them itself for the capture it displays (`_studio_set_image()`), and
+anywhere else adding an unrequested image to the selection also hands it to the next darkroom
+entry, whose `try_enter()` reads the mouse-over id first.
+
+**Opening a single imported image in the darkroom** goes through
+`dt_ctl_open_image_in_darkroom(imgid)` (`control/control.c`), never through a view switch alone.
+The darkroom's `try_enter()` picks its target from `dt_control_get_mouse_over_id()`, falling back
+on the selection, and both are volatile across the lighttable round-trip the switch performs: any
+pointer motion over the grid rewrites the mouse-over id, and the darkroom's own `leave()` calls
+`dt_selection_select_single(dt_view_active_images_get_first())`, i.e. restores the selection to
+the image it was editing. Publishing the target from the job thread and requesting the switch
+separately therefore re-opens the previous image about as often as the intended one, depending on
+where the pointer happens to sit. `dt_ctl_open_image_in_darkroom()` marshals the whole sequence
+into one GUI-thread callback — leave the darkroom via the lighttable, publish mouse-over id and
+selection, then enter the darkroom — so nothing can run in between. Any other worker-thread code
+that needs a specific image opened must use it rather than setting those globals itself.
+
+The import job only asks for `IMAGE` when it imported exactly one image *and* at most one XMP
+(`index == 1 && xmps <= 1`): two or more sidecars mean the file produced several DB images
+(duplicates) and none of them is the obvious one to open. Zero is the ordinary no-sidecar case
+and still opens.
 
 ---
 

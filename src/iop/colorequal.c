@@ -810,6 +810,12 @@ void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pi
   dt_iop_colorequal_data_t *d = dt_calloc_align(sizeof(dt_iop_colorequal_data_t));
   piece->data = d;
   piece->data_size = sizeof(dt_iop_colorequal_data_t);
+  // Checked AFTER both piece->data and piece->data_size are set, deliberately.
+  // dt_iop_init_pipe() disables the node for us when it sees data_size > 0 with a NULL
+  // data -- returning before data_size is assigned skips that and leaves the node enabled
+  // with no storage. dt_calloc_align() returns NULL on failure and pipe nodes are built
+  // exactly when memory is tightest (Sentry 134134395 faulted in atrous's init_pipe).
+  if(IS_NULL_PTR(piece->data)) return;
   d->clut = NULL;
   d->clut_level = 0;
   d->white_level = 1.f;
@@ -2241,6 +2247,10 @@ void gui_update(dt_iop_module_t *self)
 {
   const dt_iop_colorequal_params_t *p = (const dt_iop_colorequal_params_t *)self->params;
   dt_iop_colorequal_gui_data_t *g = (dt_iop_colorequal_gui_data_t *)dt_iop_gui_data(self);
+  // dt_iop_gui_data() returns NULL whenever module->gui is -- a hidden, not-yet-initialised
+  // or torn-down module. There is nothing to update in that case, and the memcpy below would
+  // write 1500 bytes through the NULL, which is what GCC reports as "a region of size 0".
+  if(IS_NULL_PTR(g)) return;
   memcpy(&g->gui_params, p, sizeof(dt_iop_colorequal_params_t));
   dt_bauhaus_slider_set(g->white_level, p->white_level);
   dt_bauhaus_slider_set(g->sigma_L, p->sigma_L);

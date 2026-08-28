@@ -205,6 +205,9 @@ typedef struct dt_opencl_device_t
   int maxeventslot;
   int nvidia_sm_20;
   const char *vendor;
+  /* Numeric CL_DEVICE_VENDOR_ID, kept alongside the name so a crash attributed to one
+   * vendor's driver can be matched back to the devices it actually ships. */
+  unsigned int vendor_id;
   const char *name;
   const char *cname;
   const char *options;
@@ -330,9 +333,34 @@ typedef struct dt_opencl_local_buffer_t
 
 
 /** inits the opencl subsystem. */
+/** @brief Tell the OpenCL module that the process crashed, and let it judge whether the
+ * crash was its driver's doing.
+ *
+ * @details Vendor OpenCL runtimes fault on their own threads, with no frame of ours on the
+ * stack, and no code here can prevent that. What this module can do is notice it happening
+ * repeatedly and stop enabling OpenCL on the next start. It recognises its own drivers by
+ * name in the backtrace; a crash anywhere else is recorded as nothing.
+ *
+ * Sentry captures the backtrace and knows nothing about GPUs; this module knows about GPUs
+ * and nothing about crash reporting. dt_init() connects the two, so neither has to include
+ * the other.
+ *
+ * @param backtrace NUL-terminated backtrace text, valid only for the duration of the call.
+ * @param backtrace_len its length in bytes.
+ *
+ * @warning Runs in a signal handler. Uses only open/write/close -- no allocation, no locks,
+ * no conf -- and does nothing at all before dt_opencl_init() has built the record's path.
+ */
+void dt_opencl_note_crash_backtrace(const char *backtrace, size_t backtrace_len);
+
 void dt_opencl_init(const gboolean exclude_opencl, const gboolean print_statistics);
 
-/** cleans up the opencl subsystem. */
+/** Clears the persisted driver-crash streak after a session in which OpenCL ran to a clean
+ * shutdown. Reads and writes conf: call it from the shutdown sequence BEFORE dt_conf_cleanup(),
+ * and before dt_opencl_cleanup(). */
+void dt_opencl_clear_driver_crash_streak(void);
+
+/** cleans up the opencl subsystem. Touches no conf: conf may already be gone. */
 void dt_opencl_cleanup(void);
 
 /** cleans up the i-th device in the cl->dev list */
@@ -685,6 +713,9 @@ static inline void dt_opencl_init(const gboolean exclude_opencl, const gboolean 
   /* There is no state to initialise in this build: the queries below are constants. */
   dt_conf_set_bool("opencl", FALSE);
   dt_print(DT_DEBUG_OPENCL, "[opencl_init] this version of darktable was built without opencl support\n");
+}
+static inline void dt_opencl_clear_driver_crash_streak(void)
+{
 }
 static inline void dt_opencl_cleanup(void)
 {

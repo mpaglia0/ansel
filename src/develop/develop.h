@@ -227,19 +227,23 @@ typedef struct dt_develop_t
   /* Protect read & write to dev->history and dev->forms
    * and other related stuff like history_end, hashes, etc.
    *
-   * The fields below carry GUARDED_BY(history_mutex), which turns that sentence into
-   * something the compiler checks: clang's -Wthread-safety refuses any access to them that
-   * is not demonstrably under this lock. It is the same rule CLAUDE.md states in prose --
-   * "the ONLY thread-safe interface between the pixel pipeline and an IOP module is
-   * history" -- enforced instead of described.
+   * The fields below deliberately carry NO GUARDED_BY. It cannot work for a lock that is a
+   * struct member in C: clang never rebinds the member name to the accessed object, so the
+   * requirement stays an unresolved identifier that no REQUIRES can satisfy, and every
+   * access warns forever. Measured, not assumed -- see external/ThreadSafetyAnalysis.h.
    *
-   * A function that legitimately runs with the lock already held by its caller says so with
-   * REQUIRES(history_mutex) rather than being exempted -- but on its DEFINITION, not its
-   * declaration. dev_history.h only forward-declares dt_develop_t, and an attribute naming
-   * dev->history_mutex needs the complete type; completing it there would mean including
-   * this header, which includes dev_history.h back. The cycle is not worth the annotation,
-   * and little is lost: GUARDED_BY on the fields below is what actually checks every access,
-   * in every translation unit, whether or not the enclosing function declares a contract. */
+   * What DOES check is REQUIRES/REQUIRES_SHARED on the functions themselves, against the
+   * ACQUIRE/RELEASE annotations on the dt_pthread_rwlock_t wrappers: a function that runs
+   * with the lock already held by its caller declares it, and clang then verifies the lock
+   * is actually held on every path that reaches it, and released on every path out. That
+   * catches the unbalanced and unheld-on-some-path cases, which is most of what goes wrong
+   * here. It does not catch a stray dev->history read in a function that declares nothing --
+   * that gap is the price of the C limitation above, not an oversight.
+   *
+   * Put those contracts on the DEFINITION, not the declaration: dev_history.h only
+   * forward-declares dt_develop_t, and an attribute naming dev->history_mutex needs the
+   * complete type; completing it there would mean including this header, which includes
+   * dev_history.h back. The cycle is not worth the annotation. */
   dt_pthread_rwlock_t history_mutex;
 
   // We don't always apply the full history to modules,
@@ -249,10 +253,10 @@ typedef struct dt_develop_t
   // (no IOP, no history entry, no item on the GList). 
   // So the index of the history
   // entry matching history_end is history_end - 1,
-  int32_t history_end GUARDED_BY(history_mutex);
+  int32_t history_end;
 
   // history stack
-  GList *history GUARDED_BY(history_mutex);
+  GList *history;
 
   // Set to 1 while a dt_dev_write_history() background job is queued or running for this
   // dev, 0 otherwise. Lets dt_dev_write_history() skip queuing a redundant full history+masks

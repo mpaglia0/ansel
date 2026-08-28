@@ -1725,6 +1725,11 @@ static gboolean _set_hinter_message(dt_masks_form_gui_t *mask_gui, const dt_mask
 {
   char message[256] = "";
 
+  // Checked before use, not after: this function tests IS_NULL_PTR(mask_form) further down
+  // and its own dt_print writes `mask_form ? mask_form->type : -1`, so a NULL was always
+  // considered possible here -- but form_type read it unconditionally first.
+  if(IS_NULL_PTR(mask_form)) return FALSE;
+
   const int form_type = mask_form->type;
 
   int opacity_percent = 100;
@@ -2712,7 +2717,17 @@ static int _dt_masks_events_mouse_moved(dt_develop_t *dev, struct dt_iop_module_
 
   if(!IS_NULL_PTR(mask_gui))
   {
-    _set_hinter_message(mask_gui, mask_form);
+    // Re-read the visible form. dt_masks_cow_touch() above may have cloned it, spliced the
+    // clone into dev->forms in place of the original, re-pointed form_gui->form_visible at
+    // the clone and dropped the original's last reference -- freeing it. mask_form was
+    // captured BEFORE that call, so it can be dangling here; form_visible is the pointer the
+    // COW maintains.
+    //
+    // Sentry 143237622: SIGSEGV inside g_list_length() walking the freed points list, via
+    // _set_hinter_message() -> _polygon_set_hint_message(), on an ordinary darkroom
+    // mouse-move over a polygon.
+    mask_form = dt_masks_get_visible_form(dev);
+    if(!IS_NULL_PTR(mask_form)) _set_hinter_message(mask_gui, mask_form);
     _set_cursor_shape(mask_gui);
   }
   return result;
@@ -2736,6 +2751,13 @@ int dt_masks_events_button_released(dt_develop_t *dev, struct dt_iop_module_t *m
   dt_masks_form_t *dispatch_form
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
   dispatch_form = dt_masks_cow_touch(dev, dispatch_form);
+
+  // dt_masks_cow_touch() above may have cloned the visible form, spliced the clone into
+  // dev->forms in place of the original, re-pointed form_gui->form_visible at it and
+  // dropped the original's last reference -- freeing it. mask_form was captured before
+  // that call, so re-read what form_visible points at now rather than using a pointer
+  // that may already be dangling. Same defect as Sentry 143237622 in mouse_moved.
+  mask_form = dt_masks_get_visible_form(dev);
 
   int result = 0;
   if(!IS_NULL_PTR(dispatch_form) && dispatch_form->functions && dispatch_form->functions->button_released)
@@ -2792,6 +2814,13 @@ int dt_masks_events_button_pressed(dt_develop_t *dev, struct dt_iop_module_t *mo
   dt_masks_form_t *dispatch_form
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
   dispatch_form = dt_masks_cow_touch(dev, dispatch_form);
+
+  // dt_masks_cow_touch() above may have cloned the visible form, spliced the clone into
+  // dev->forms in place of the original, re-pointed form_gui->form_visible at it and
+  // dropped the original's last reference -- freeing it. mask_form was captured before
+  // that call, so re-read what form_visible points at now rather than using a pointer
+  // that may already be dangling. Same defect as Sentry 143237622 in mouse_moved.
+  mask_form = dt_masks_get_visible_form(dev);
   _dt_masks_events_update_hover(dispatch_form, mask_gui, form_index);
 
   gboolean return_val = FALSE;
@@ -2854,6 +2883,13 @@ int dt_masks_events_key_pressed(dt_develop_t *dev, struct dt_iop_module_t *modul
     dt_masks_form_t *dispatch_form
         = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
     dispatch_form = dt_masks_cow_touch(dev, dispatch_form);
+
+    // dt_masks_cow_touch() above may have cloned the visible form, spliced the clone into
+    // dev->forms in place of the original, re-pointed form_gui->form_visible at it and
+    // dropped the original's last reference -- freeing it. mask_form was captured before
+    // that call, so re-read what form_visible points at now rather than using a pointer
+    // that may already be dangling. Same defect as Sentry 143237622 in mouse_moved.
+    mask_form = dt_masks_get_visible_form(dev);
     if(dispatch_form && dispatch_form->functions && dispatch_form->functions->key_pressed)
       return_value = dispatch_form->functions->key_pressed(module, event, dispatch_form,
                                                            parent_id, mask_gui, form_index);
@@ -2924,6 +2960,13 @@ int dt_masks_events_mouse_scrolled(dt_develop_t *dev, struct dt_iop_module_t *mo
   dt_masks_form_t *dispatch_form
       = _dt_masks_events_get_dispatch_form(mask_form, mask_gui, &group_entry, &parent_id, &form_index);
   dispatch_form = dt_masks_cow_touch(dev, dispatch_form);
+
+  // dt_masks_cow_touch() above may have cloned the visible form, spliced the clone into
+  // dev->forms in place of the original, re-pointed form_gui->form_visible at it and
+  // dropped the original's last reference -- freeing it. mask_form was captured before
+  // that call, so re-read what form_visible points at now rather than using a pointer
+  // that may already be dangling. Same defect as Sentry 143237622 in mouse_moved.
+  mask_form = dt_masks_get_visible_form(dev);
 
   if(!mask_gui->creation && !dt_masks_is_anything_selected(mask_gui))
     return 0;
@@ -3165,6 +3208,12 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
 
   const gboolean group_selected = (mask_gui->group_selected == form_index);
 
+  /* The last segment there is to draw. An OPEN path -- a brush, the only caller asking for round
+   * ends, since only an open path has two true ends -- has one segment fewer than it has nodes; a
+   * closed one also has the segment returning to node 0. A shape still being created has no
+   * closing segment either: the last one is the one the cursor is dragging. */
+  const int last_segment_index = (round_ends || mask_gui->creation) ? node_count - 2 : node_count - 1;
+
   /* Round only the OUTWARD side of the two true ends of the WHOLE path (e.g. a brush stroke), not
    * every segment's own two ends -- that would also round every interior node joint, which is a
    * line JOIN, not a cap, and looks like a bump at each node instead of the intended smooth stroke
@@ -3272,12 +3321,25 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *mask_gui, c
       show_segment_index = (show_segment_index + 1) % node_count;
       current_segment_index++;
 
+      /* Every segment has been stroked. What the array still holds past this node is not part of
+       * the outline: for a brush it is the same centerline recorded a second time in the opposite
+       * direction (the border wraps around the stroke, so the line under it is walked there and
+       * back -- see _brush_get_pts_border()), and for a shape being created it is the segment that
+       * will close it once it exists. Walking further only re-detects nodes in reverse order and
+       * strokes them again. */
+      if(current_segment_index > last_segment_index) break;
+
       // dt_draw_stroke_line() consumed the path; the next one starts here
       cairo_move_to(cr, coord_x, coord_y);
     }
-
-    if(mask_gui->creation && current_segment_index >= node_count - 1) break;
   }
+
+  /* Leave nothing behind. The walk above stops on a node boundary, so the points that follow it
+   * are still an un-stroked path in `cr', and cairo keeps a path across calls: the next stroke
+   * ANYWHERE picks it up and paints it in ITS own style -- this shape's own dashed border draws
+   * the leftover dashed, another shape's hover highlight draws it highlighted, and with nothing
+   * drawn after it at all it never appears. */
+  cairo_new_path(cr);
 }
 
 /**
@@ -3852,7 +3914,25 @@ void dt_masks_change_form_gui(dt_develop_t *dev, dt_masks_form_t *new_form)
 
     // Free only fully orphan temporary previews. Forms tracked in either list
     // are owned by develop and will be released by its teardown path.
-    if(!is_registered && !is_registered_for_cleanup) dt_masks_free_form(old_form);
+    //
+    // form_visible is cleared BEFORE the release, not after. old_form IS what it points at
+    // -- it came from dt_masks_get_visible_form(dev) at the top -- so releasing it first
+    // leaves the field holding freed memory until dt_masks_set_visible_form() below, and
+    // dt_masks_clear_form_gui() runs inside that window. Re-entering this function there
+    // reads the dangling form_visible as its own old_form, finds it in neither list because
+    // it is already gone, and releases it a second time (Sentry 140265757: SIGSEGV in
+    // dt_masks_change_form_gui, two frames of it, from the view-leave teardown path).
+    // The creation-exit path in this file already orders it this way.
+    //
+    // Released through unref rather than dt_masks_free_form(): forms are refcounted and
+    // free_form is the destructor unref calls at zero. Calling it directly frees the form
+    // even when a history snapshot still references it. An orphan preview holds the single
+    // reference it was created with, so this frees it exactly as before.
+    if(!is_registered && !is_registered_for_cleanup)
+    {
+      dt_masks_set_visible_form(dev, NULL);
+      dt_masks_form_unref(old_form);
+    }
   }
 
   dt_masks_clear_form_gui(dev);
