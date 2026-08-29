@@ -40,6 +40,7 @@
 #include "develop/masks.h"
 #include "develop/masks_gui.h"
 #include "develop/masks/masks_functions.h"
+#include "develop/masks/masks_touched.h"
 #include "math/openmp_maths.h"
 #include "widgets/accelerators.h"
 
@@ -532,27 +533,41 @@ static int _gradient_events_mouse_scrolled(struct dt_iop_module_t *module, doubl
   
   
   
+  /* `state` is the caller's raw key state, kept for the callback signature: the property to
+   * act on was already resolved from it by dt_masks_scroll_get_interaction(). A gradient
+   * spells the two shared properties its own way -- SIZE is the fade extent, HARDNESS is the
+   * curvature -- which is also how the context menu names them (masks_gui.c). */
   if(gui->creation)
   {
-    if(dt_modifier_is(state, GDK_SHIFT_MASK | DT_PRIMARY_MASK))
-      return _init_rotation(form, (up ? +0.2f : -0.2f), DT_MASKS_INCREMENT_OFFSET, flow);
-    else if(dt_modifier_is(state, DT_PRIMARY_MASK))
-      return _init_opacity(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
-    else if(dt_modifier_is(state, GDK_SHIFT_MASK))
-      return _init_curvature(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
-    else
-      return _init_extent(form, (up ? +1.02f : 0.98f), DT_MASKS_INCREMENT_SCALE, flow); // simple scroll to adjust curvature, calling func adjusts opacity with Ctrl
+    switch(interaction)
+    {
+      case DT_MASKS_INTERACTION_ROTATION:
+        return _init_rotation(form, (up ? +0.2f : -0.2f), DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_OPACITY:
+        return _init_opacity(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_HARDNESS:
+        return _init_curvature(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_SIZE:
+        return _init_extent(form, (up ? +1.02f : 0.98f), DT_MASKS_INCREMENT_SCALE, flow);
+      default:
+        return 0;
+    }
   }
-  else if(gui->form_selected  || gui->seg_selected || gui->pivot_selected)
+  else if(gui->form_selected || gui->seg_selected || gui->pivot_selected)
   {
-    if(dt_modifier_is(state, GDK_SHIFT_MASK | DT_PRIMARY_MASK))
-      return _change_rotation(form, gui, module, index, (up ? +0.2f : -0.2f), DT_MASKS_INCREMENT_OFFSET, flow);
-    else if(dt_modifier_is(state, DT_PRIMARY_MASK))
-      return dt_masks_form_change_opacity(gui->dev, form, parentid, up, flow);
-    else if(dt_modifier_is(state, GDK_SHIFT_MASK))
-      return _change_curvature(form, gui, module, index, (up ? +0.02f : -0.02f), DT_MASKS_INCREMENT_OFFSET, flow);
-    else
-      return _change_extent(form, gui, module, index, (up ? 1.02f : 0.98f), DT_MASKS_INCREMENT_SCALE, flow);
+    switch(interaction)
+    {
+      case DT_MASKS_INTERACTION_ROTATION:
+        return _change_rotation(form, gui, module, index, (up ? +0.2f : -0.2f), DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_OPACITY:
+        return dt_masks_form_change_opacity(gui->dev, form, parentid, up, flow);
+      case DT_MASKS_INTERACTION_HARDNESS:
+        return _change_curvature(form, gui, module, index, (up ? +0.02f : -0.02f), DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_SIZE:
+        return _change_extent(form, gui, module, index, (up ? 1.02f : 0.98f), DT_MASKS_INCREMENT_SCALE, flow);
+      default:
+        return 0;
+    }
   }
   return 0;
 }
@@ -970,6 +985,10 @@ static void _gradient_draw_shape(struct dt_develop_t *dev, cairo_t *cr, const fl
   const float wd = geometry.raw_width;
   const float ht = geometry.raw_height;
 
+  /* Decimate each segment to device resolution, as the brush does; see dt_draw_min_emit_step().
+   * The last point of a segment is always emitted so an open guide line keeps its true end. */
+  const double min_step = dt_draw_min_emit_step(cr);
+  const double min_step2 = min_step * min_step;
   int i = 0;
   while(i < points_count)
   {
@@ -983,15 +1002,21 @@ static void _gradient_draw_shape(struct dt_develop_t *dev, cairo_t *cr, const fl
     }
 
     cairo_move_to(cr, px, py);
+    double last_x = px, last_y = py;
     i++;
 
     // continue the current segment until a non-normal or out-of-range point
     while(i < points_count)
     {
-      const float qx = points[i * 2];
-      const float qy = points[i * 2 + 1];
-      if(!isnormal(qx) || !_gradient_is_canonical(qx, qy, wd, ht)) break;
+      const double qx = points[i * 2];
+      const double qy = points[i * 2 + 1];
+      if(!isnormal((float)qx) || !_gradient_is_canonical((float)qx, (float)qy, wd, ht)) break;
+      const double dx = qx - last_x, dy = qy - last_y;
+      const gboolean is_last = (i + 1 >= points_count) || !isnormal(points[(i + 1) * 2])
+                               || !_gradient_is_canonical(points[(i + 1) * 2], points[(i + 1) * 2 + 1], wd, ht);
+      if(!is_last && (dx * dx + dy * dy) < min_step2) { i++; continue; }
       cairo_line_to(cr, qx, qy);
+      last_x = qx; last_y = qy;
       i++;
     }
   }
@@ -1347,8 +1372,10 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
 
 static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                                   const dt_dev_pixelpipe_iop_t *const piece,
-                                  dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer)
+                                  dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer,
+                                  dt_iop_roi_t *touched)
 {
+  dt_masks_touched_none(touched);
   if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
   double start2 = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) start2 = dt_get_wtime();
@@ -1494,6 +1521,9 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pi
 
   dt_pixelpipe_cache_free_align(points);
 
+  // A gradient is non-zero over the whole ROI: there is no box smaller than the buffer.
+  dt_masks_touched_full(touched, w, h);
+
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
     dt_print(DT_DEBUG_MASKS, "[masks %s] gradient fill took %0.04f sec\n", form->name,
              dt_get_wtime() - start2);
@@ -1513,14 +1543,17 @@ static void _gradient_set_form_name(struct dt_masks_form_t *const form, const si
 }
 
 static void _gradient_set_hint_message(const dt_masks_form_gui_t *const gui, const dt_masks_form_t *const form,
-                                     const int opacity, char *const restrict msgbuf, const size_t msgbuf_len)
+                                       char *const restrict msgbuf, const size_t msgbuf_len)
 {
+  // Only gestures that cannot be discovered any other way. What the wheel does is the user's
+  // own mapping now (masks_gui.h), shown in the Drawn tab, so it is not repeated here.
   if(gui->creation)
-    g_snprintf(msgbuf, msgbuf_len, _("<b>Extent</b>: scroll, <b>Curvature</b>: shift+scroll\n"
-                                     "<b>Rotate</b>: shift+drag, <b>Opacity</b>: ctrl+scroll (%d%%)"), opacity);
-  else if(gui->form_selected || gui->seg_selected)
-    g_snprintf(msgbuf, msgbuf_len, _("<b>Extent</b>: scroll, <b>Curvature</b>: shift+scroll\n"
-                                     "<b>Reset curvature</b>: double-click, <b>Opacity</b>: ctrl+scroll (%d%%)"), opacity);
+    g_strlcat(msgbuf, _("<b>Linear/sigmoidal fade</b>: Shift+Click"), msgbuf_len);
+  // Hovering the fade lines arms the rotation pivot, so there dragging rotates instead of moving.
+  else if(gui->pivot_selected)
+    g_strlcat(msgbuf, _("<b>Rotate</b>: Drag"), msgbuf_len);
+  else if(gui->form_selected || gui->seg_selected || gui->seg_hovered >= 0)
+    g_strlcat(msgbuf, _("<b>Move</b>: Drag, <b>Reset curvature</b>: Double-click"), msgbuf_len);
 }
 
 static void _gradient_duplicate_points(dt_develop_t *dev, dt_masks_form_t *const base, dt_masks_form_t *const dest)

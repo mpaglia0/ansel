@@ -339,16 +339,57 @@ pins that contract; `-d history` shows the hold times.
   address** — a hazard the old under-the-lock raw pointer already had in principle. Do not
   "simplify" it back to a plain assignment; the worst case of a lost exchange race is one full
   resync, never a leak or a double free.
-- **The async DB write job (`_dt_dev_write_history_job_run`) is the *second* long reader** of
-  this lock — it holds it across the whole history+masks rewrite and is instrumented the same
-  way. It has the same disease and would take the same cure; it was left as is because it does
-  not sit on the interactive path the way the pipe resync did.
+- **The async DB write job (`_dt_dev_write_history_job_run`) was the *second* long reader** of
+  this lock, and it IS on the interactive path: it runs after every commit and held the read
+  lock across the whole history+masks rewrite (every row deleted and re-inserted), so the GUI
+  thread's *next* commit queued behind it — the wait `dt_dev_history_commit_item_now()` logs as
+  "blocked acquiring history_mutex". Same cure: `_history_write_state_take()` freezes the
+  snapshot **plus a deep copy of `dev->iop_order_list`** (the one other thing the rewrite reads
+  from `dev`) under a brief lock, and `_write_history_from_state()` writes lock-free. The trap
+  specific to this one: **`history_write_pending` must be cleared at snapshot time, under the
+  lock — not after the write.** `dt_dev_write_history()` skips queueing while that flag is set,
+  on the promise that the pending write will still pick the commit up; with a snapshot that is
+  true only for commits landing before the freeze. Clearing after the rewrite would silently
+  drop every commit made while the rewrite ran — the coalescing comment there spells out the
+  two cases. The seven other `dt_dev_write_history_ext()` callers hold the lock as writers
+  mid-commit and expect the write done on return; they keep that contract (state taken and
+  written under their lock) and were not touched.
 
 The named-rwlock diagnostic lives in `system/dtpthread.h` (`dt_pthread_rwlock_set_name()`,
 opt-in per lock, combine with `-d history`); `dev->history_mutex` is named in `dt_dev_init()`.
-Drawn-mask geometry editing still commits history through the throttle on every drag motion
-rather than through the transient-params channel the drawlayer brush uses — that is the remaining
-follow-up for #1098, and it is a GUI-side routing change, not a locking one.
+
+### Drawn-mask drags render from the transient slot; history is written once, on release
+
+The other half of #1098. `views/darkroom.c` used to make a mask drag visible by committing
+history on the GUI throttle — about once per pipe render, mid-drag: a history rewrite, a DB write
+job and a full `synch_top` per tick, with the shape's owner re-hashed against `dev->forms` only as
+a side effect. It now takes the drawlayer brush's route (`_publish_mask_edit_transient()`,
+mirroring `_publish_backend_progress()` in `iop/drawlayer/worker.c`): on every drag motion and
+every scroll step, publish the owner module's *own, unchanged* params through
+`dt_dev_transient_params_set()` and flag the main pipe `TOP_CHANGED`. That is only a ticket onto
+`_sync_focused_in_place()`, which re-commits the one focused piece against the **live**
+`dev->forms` — `dt_iop_compute_blendop_hash()` folds the group's geometry in, and
+`dt_dev_pixelpipe_process()` re-snapshots `pipe->forms` on every recompute — so the piece re-keys
+from the moved shape and only it and its downstream recompute. Nothing about the shape lives in
+params; the geometry is in `dev->forms`, which is why publishing unchanged params works.
+
+Three things a reviewer would otherwise "simplify" away:
+
+- **The throttled commit defers itself while `dt_masks_gui_is_dragging()`** by re-queueing, and
+  runs after the button comes up. It must not be suppressed outright: the release path only
+  *queues* the commit, it does not commit, so a suppressed callback would never write history.
+- **Flag with `dt_dev_pixelpipe_or_changed()`, not `_change_pipe()`.** The latter also raises the
+  killswitch; per-motion killswitches abort every in-flight render and a fast drag never gets a
+  frame. The drawlayer heartbeat makes the same choice for the same reason.
+- **Clear the transient slot before the commit, and even when nothing changed.** The commit's
+  resync must come from history, and a no-op drag must not leave the slot occupied. When the slot
+  was active but `forms_changed` is false, flag the main pipe once so it re-syncs from history
+  rather than keeping a render keyed to a slot that no longer exists.
+
+Scrolling (size / feather / opacity) has no release, so there the throttle marks the end of the
+burst: each step renders live, one commit lands after the last. The mask-manager path
+(`libs/masks.c`, no focused module) is unchanged and still commits directly; the focused-piece
+path needs `dev->gui_module` to be the shape's owner.
 
 ### `_insert_default_modules` must check `dev->history` in memory, not the DB row for `dev->image_storage.id`
 
@@ -998,6 +1039,49 @@ reading and died on the first measurement.
 Reproduce: export with `--export_masks 1`; page 1 of the TIFF is the mask. Flood-fill from the
 border and anything left unset is a hole.
 
+### The mouse wheel edits the property the user mapped it to; shapes never read modifiers
+
+Which property the wheel edits is resolved **once**, by `dt_masks_events_mouse_scrolled()`
+(`masks_gui.c`), and handed to the shape through the `interaction` parameter
+`dt_masks_functions_t.mouse_scrolled` already carried. Each shape's handler is a `switch` on
+`dt_masks_interaction_t`: it acts on the property it is given, ignores one it does not own (a
+circle has no rotation), and `DT_MASKS_INTERACTION_UNDEF` means "this combination is unmapped,
+do nothing". **No shape may go back to reading `state`** — the key state stays in the signature
+only because the callback is shared.
+
+The mapping is one conf key per wheel/modifier combination
+(`plugins/darkroom/masks/scroll/{plain,shift,primary,primary_shift}`, enum values `none` |
+`size` | `hardness` | `opacity` | `rotation`, declared in `data/anselconfig.xml.in`) behind
+`dt_masks_scroll_mapping_get/set()` and `dt_masks_scroll_get_interaction()` (`masks_gui.h`).
+Those enum values are a storage format: never translate them, never reorder them against
+`dt_masks_interaction_t`. The mapping is **application-wide** — which property the wheel edits
+is a user habit, not a property of a shape or of the module owning the mask — and its defaults
+reproduce the historical modifier behaviour, so a user who never opens the panel sees no change.
+
+A gradient spells the two shared properties its own way: `SIZE` is the fade extent, `HARDNESS`
+the curvature. That is also how the context-menu sliders name them, and why
+`dt_masks_interaction_alias_name()` exists.
+
+Scope is the selection's business, not the wheel's: `dt_masks_gui_change_affects_selected_node_or_all()`
+already restricts a size/hardness change to the selected node. A shape must not additionally
+*substitute* a property based on selection state — the polygon used to force hardness on a plain
+wheel whenever a node was selected, which made the mapping unreachable for that shape.
+
+The GUI is the "Mouse wheel" collapsible section of the Drawn tab (`blend_gui.c`), one radio
+group per row. It holds no state of its own and re-reads conf on `map`: every module's blending
+panel shows the same application-wide mapping, so a panel that becomes visible must display what
+is stored, not what it was built with. A display refresh must never write conf back, or a stale
+panel becomes the authority.
+
+Consequence for the on-canvas hints (`set_hint_message`, per shape): they document **gestures
+only** — drag, ctrl+click, right-click, Del, Enter, Esc — never the wheel, which the panel now
+shows. Their branches follow the hit-test order of `dt_masks_find_closest_handle_common()`
+(border handle, curve handle, node, segment, then the shape), because the innermost target under
+the cursor is what the next click acts on. Two traps when editing them: a node's Del and
+ctrl+click only work once that node is *selected* (a mere hover gets the shorter message), and
+`dt_hinter_set_message()` joins `\n` into `, `, so each line must read as a clause of one
+sentence.
+
 ### Forms are refcounted, not deep-copied
 
 `dev->forms` (`dt_develop_t`) is the live, mutable `GList` of every mask shape and group
@@ -1347,6 +1431,26 @@ policy must be `GTK_POLICY_EXTERNAL` + `set_min_content_height(1)` +
 `last_h_scrollbar_height/last_v_scrollbar_width` to -1 so the next `size-allocate` always
 reconfigures (the table persists across view enter/leave; the guard would otherwise skip the
 reconfigure on same-size re-entry).
+
+### A rotated GtkLabel sizes the column it sits in
+
+A `GtkLabel` with `gtk_label_set_angle()` requests the width of its *slanted* bounding box, so a
+diagonal column title makes its whole column that wide — measured on the masks wheel-mapping
+grid: 102 px for "Hardness/Curvature" at 45° against 24 px for the radio button underneath it.
+Zeroing `column-spacing` does not help, because the spacing was never what separated the cells.
+
+Two things fix it, and both are needed. Give the grid `GTK_ALIGN_START`: handed more width than
+it needs (`gtk_box_pack_start(..., TRUE, TRUE, 0)` does exactly that), `GtkGrid` spreads the
+surplus over its columns and re-centres every title in a cell wider than itself. Then attach each
+title **spanning the columns to its right** — the direction it leans into, whose header space is
+free — so its width constrains that sum rather than one column, with one extra `hexpand` column
+at the end to absorb the last title's overhang. Measured: 24 px columns at any spacing, so the
+panel's usual gutter can stay.
+
+Verify this class of layout by measuring, not by looking: build the widget in a
+`gtk_offscreen_window_new()`, pump `gtk_events_pending()`/`gtk_main_iteration()`, and print
+`gtk_widget_get_allocation()` for the cells. It answers in seconds what several rebuild-and-look
+round trips do not.
 
 ### Modal dialogs must explicitly refocus their parent on close
 

@@ -300,15 +300,15 @@ typedef struct dt_masks_form_group_t
 
 /*
 * Type of user interaction to map with internal properties of masks.
-* Those were initially handled implicitly by Shift/Ctrl/Shift+Ctrl + mouse scroll
-* at the scope of each mask type, which is a shitty design when using Wacom tablets.
-* This case is now covered by the DT_MASK_INTERACTION_UNDEF.
-* Otherwise, when calling the mouse_scroll callback from GUI, we set the case
-* explicitly, along with a value.
+* Those used to be deduced implicitly by each shape from Shift/Ctrl/Shift+Ctrl + mouse
+* scroll, which is a shitty design when using Wacom tablets. No shape reads key modifiers
+* any more: the wheel is resolved once, against the user's mapping, by
+* dt_masks_scroll_get_interaction() -- see masks_gui.h -- and every entry point
+* (mouse_scroll callback, context-menu sliders) names the property it acts on.
 */
 typedef enum dt_masks_interaction_t
 {
-  DT_MASKS_INTERACTION_UNDEF = 0,    // let it be deduced contextually from key modifiers, implicit
+  DT_MASKS_INTERACTION_UNDEF = 0,    // no property: an unmapped wheel combination does nothing
   DT_MASKS_INTERACTION_SIZE = 1,     // property of the form (shape), explicit
   DT_MASKS_INTERACTION_HARDNESS = 2, // property of the form (shape), explicit
   DT_MASKS_INTERACTION_OPACITY = 3,  // property of the group in which the form is included, explicit
@@ -432,9 +432,12 @@ int dt_masks_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *p
                       dt_masks_form_t *const form,
                       float **buffer, int *width, int *height, int *posx, int *posy);
 
+/** Rasterise `form` into the pre-zeroed ROI-sized `buffer`. `touched` (may be NULL) receives
+ * the buffer-relative rectangle enclosing every pixel written; empty when nothing was. */
 int dt_masks_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                           const dt_dev_pixelpipe_iop_t *const piece,
-                          dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer);
+                          dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer,
+                          dt_iop_roi_t *touched);
 
 
 int dt_masks_group_render_roi(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,

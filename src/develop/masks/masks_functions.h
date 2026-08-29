@@ -63,7 +63,7 @@ typedef struct dt_masks_functions_t
   void (*sanitize_config)(dt_masks_type_t type_flags);
   void (*set_form_name)(struct dt_masks_form_t *const form, const size_t nb);
   void (*set_hint_message)(const struct dt_masks_form_gui_t *const gui, const struct dt_masks_form_t *const form,
-                           const int opacity, char *const __restrict__ msgbuf, const size_t msgbuf_len);
+                           char *const __restrict__ msgbuf, const size_t msgbuf_len);
   void (*duplicate_points)(struct dt_develop_t *const dev, struct dt_masks_form_t *base, struct dt_masks_form_t *dest);
   void (*initial_source_pos)(struct dt_develop_t *dev, const float iwd, const float iht, float *x, float *y);
   // input coordinates are in absolute output-image space, dist is squared in the same space
@@ -77,10 +77,12 @@ typedef struct dt_masks_functions_t
                   const dt_dev_pixelpipe_iop_t *const piece,
                   struct dt_masks_form_t *const form,
                   float **buffer, int *width, int *height, int *posx, int *posy);
+  /** Rasterise into a pre-zeroed ROI-sized buffer. `touched` (may be NULL) receives the
+   * buffer-relative rectangle enclosing every pixel written -- see masks_touched.h. */
   int (*get_mask_roi)(const dt_iop_module_t *const fmodule, struct dt_dev_pixelpipe_t *pipe,
                       const dt_dev_pixelpipe_iop_t *const piece,
                       struct dt_masks_form_t *const form,
-                      const dt_iop_roi_t *roi, float *buffer);
+                      const dt_iop_roi_t *roi, float *buffer, dt_iop_roi_t *touched);
   int (*get_area)(const dt_iop_module_t *const module, struct dt_dev_pixelpipe_t *pipe,
                   const dt_dev_pixelpipe_iop_t *const piece,
                   struct dt_masks_form_t *const form,

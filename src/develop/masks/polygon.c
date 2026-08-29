@@ -55,6 +55,7 @@
 #include "develop/masks.h"
 #include "develop/masks_gui.h"
 #include "develop/masks/masks_functions.h"
+#include "develop/masks/masks_touched.h"
 #include "math/openmp_maths.h"
 #include "gui/actions/menu.h"
 #include <assert.h>
@@ -1778,16 +1779,27 @@ static int _polygon_events_mouse_scrolled(struct dt_iop_module_t *module, double
     return 0;
   }
 
+  /* `state` is the caller's raw key state, kept for the callback signature: the property to
+   * act on was already resolved from it by dt_masks_scroll_get_interaction(). A polygon owns
+   * no rotation, so that mapping falls through and the wheel does nothing here. Size and
+   * hardness apply to the selected node when there is one, to every node otherwise -- that
+   * scoping is the selection's business (dt_masks_gui_change_affects_selected_node_or_all),
+   * not the wheel's, which is why a selected node no longer forces hardness. */
   if(mask_gui->edit_mode == DT_MASKS_EDIT_FULL && dt_masks_is_anything_selected(mask_gui))
   {
-    if(dt_modifier_is(state, DT_PRIMARY_MASK))
-      return dt_masks_form_change_opacity(mask_gui->dev, mask_form, parent_id, up, flow);
-    if(dt_modifier_is(state, GDK_SHIFT_MASK) || mask_gui->node_selected)
-      return _change_hardness(mask_form, parent_id, mask_gui, module, form_index, up ? +0.01f : -0.01f,
-                              DT_MASKS_INCREMENT_OFFSET, flow);
-    else
-      return _change_size(mask_form, parent_id, mask_gui, module, form_index, up ? 1.02f : 0.98f,
-                          DT_MASKS_INCREMENT_SCALE, flow);
+    switch(interaction)
+    {
+      case DT_MASKS_INTERACTION_OPACITY:
+        return dt_masks_form_change_opacity(mask_gui->dev, mask_form, parent_id, up, flow);
+      case DT_MASKS_INTERACTION_HARDNESS:
+        return _change_hardness(mask_form, parent_id, mask_gui, module, form_index, up ? +0.01f : -0.01f,
+                                DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_SIZE:
+        return _change_size(mask_form, parent_id, mask_gui, module, form_index, up ? 1.02f : 0.98f,
+                            DT_MASKS_INCREMENT_SCALE, flow);
+      default:
+        return 0;
+    }
   }
   return 0;
 }
@@ -2254,11 +2266,19 @@ static void _polygon_draw_shape(struct dt_develop_t *dev, cairo_t *cr, const flo
   // Only draw if we have at least one valid point
   if(start_idx >= 0)
   {
-    cairo_move_to(cr, point_buffer[start_idx * 2], point_buffer[start_idx * 2 + 1]);
+    /* Decimate to device resolution, as the brush does; see dt_draw_min_emit_step(). */
+    const double min_step = dt_draw_min_emit_step(cr);
+    const double min_step2 = min_step * min_step;
+    double last_x = point_buffer[start_idx * 2], last_y = point_buffer[start_idx * 2 + 1];
+    cairo_move_to(cr, last_x, last_y);
     for(int point_index = start_idx + 1; point_index < point_count; point_index++)
     {
-      if(!isnan(point_buffer[point_index * 2]) && !isnan(point_buffer[point_index * 2 + 1]))
-        cairo_line_to(cr, point_buffer[point_index * 2], point_buffer[point_index * 2 + 1]);
+      const double x = point_buffer[point_index * 2], y = point_buffer[point_index * 2 + 1];
+      if(isnan(x) || isnan(y)) continue;
+      const double dx = x - last_x, dy = y - last_y;
+      if((dx * dx + dy * dy) < min_step2) continue;
+      cairo_line_to(cr, x, y);
+      last_x = x; last_y = y;
     }
   }
 }
@@ -3162,8 +3182,10 @@ static inline void _polygon_falloff_roi(float *buffer, int *p0, int *p1, int bw,
 static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                                  const dt_dev_pixelpipe_iop_t *const piece,
                                  dt_masks_form_t *const mask_form,
-                                 const dt_iop_roi_t *roi, float *buffer)
+                                 const dt_iop_roi_t *roi, float *buffer,
+                                 dt_iop_roi_t *touched)
 {
+  dt_masks_touched_none(touched);
   if(IS_NULL_PTR(module)) return 1;
   double start = 0.0;
   double start2 = 0.0;
@@ -3356,6 +3378,7 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
     {
       // roi lies completely within polygon
       for(size_t k = 0; k < (size_t)width * height; k++) buffer[k] = 1.0f;
+      dt_masks_touched_full(touched, width, height);
     }
     else
     {
@@ -3552,6 +3575,13 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
   dt_pixelpipe_cache_free_align(points);
   dt_pixelpipe_cache_free_align(border);
 
+  /* The raw bounding box already spans the border samples, so the feather falloff lies inside
+   * it too; the margin covers the one-pixel neighbour writes of the falloff stamps. The
+   * encircling case reported the full buffer above. */
+  if(!polygon_encircles_roi)
+    dt_masks_touched_set(touched, (int)floorf(xmin) - 2, (int)floorf(ymin) - 2, (int)ceilf(xmax) + 2,
+                         (int)ceilf(ymax) + 2, width, height);
+
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
     dt_print(DT_DEBUG_MASKS, "[masks %s] polygon fill buffer took %0.04f sec\n",
              mask_form->name,
@@ -3575,29 +3605,35 @@ static void _polygon_set_form_name(struct dt_masks_form_t *const mask_form, cons
 
 static void _polygon_set_hint_message(const dt_masks_form_gui_t *const mask_gui,
                                       const dt_masks_form_t *const mask_form,
-                                      const int opacity, char *const restrict msgbuf,
-                                      const size_t msgbuf_len)
+                                      char *const restrict msgbuf, const size_t msgbuf_len)
 {
+  // Ordered like the hit test in dt_masks_find_closest_handle_common(): the innermost target
+  // under the cursor is the one the next click will act on, so it is the one we describe.
+  // Only gestures that cannot be discovered any other way -- what the wheel does is the user's
+  // own mapping now (masks_gui.h), shown in the Drawn tab, so it is not repeated here.
   const guint node_count = mask_form->points ? g_list_length(mask_form->points) : 0;
   if(mask_gui->creation && node_count < 4)
-    g_strlcat(msgbuf, _("<b>Add node</b>: click, <b>Add sharp node</b>:ctrl+click\n"
-                        "<b>Cancel</b>: right-click or Esc"), msgbuf_len);
+    g_strlcat(msgbuf, _("<b>Add sharp node</b>: Ctrl+Click\n"
+                        "<b>Remove last node</b>: Backspace, <b>Cancel</b>: Esc"), msgbuf_len);
   else if(mask_gui->creation)
-    g_strlcat(msgbuf, _("<b>Add node</b>: click, <b>Add sharp node</b>:ctrl+click\n"
-                        "<b>Finish polygon</b>: Enter or click on first node"), msgbuf_len);
-  else if(mask_gui->handle_selected)
-    g_strlcat(msgbuf, _("<b>Node curvature</b>: drag\n<b>Reset curvature</b>: right-click"), msgbuf_len);
-  else if(mask_gui->node_selected)
-    g_strlcat(msgbuf, _("<b>NODE:</b> <b>Move</b>: drag, <b>Delete</b>: right-click or Del\n"
-                        "<b>Hardness</b>: scroll, <b>Switch smooth/sharp</b>: ctrl+click"), msgbuf_len);
+    g_strlcat(msgbuf, _("<b>Add sharp node</b>: Ctrl+Click, <b>Close path</b>: Enter, or Click on the first node\n"
+                        "<b>Remove last node</b>: Backspace, <b>Cancel</b>: Esc"), msgbuf_len);
+  else if(mask_gui->source_selected)
+    g_strlcat(msgbuf, _("<b>Move source</b>: Drag"), msgbuf_len);
+  else if(mask_gui->handle_border_hovered >= 0)
+    g_strlcat(msgbuf, _("<b>Node hardness</b>: Drag"), msgbuf_len);
+  else if(mask_gui->handle_hovered >= 0)
+    g_strlcat(msgbuf, _("<b>Node curvature</b>: Drag"), msgbuf_len);
+  // The node operations below need the node to be selected, which the first click does.
+  else if(mask_gui->node_hovered >= 0 && mask_gui->node_selected)
+    g_strlcat(msgbuf, _("<b>Move node</b>: Drag, <b>Switch smooth/sharp</b>: Ctrl+Click\n"
+                        "<b>Delete node</b>: Right-click or Del"), msgbuf_len);
   else if(mask_gui->node_hovered >= 0)
-    g_strlcat(msgbuf, _("<b>Move node</b>: drag\n<b>Delete node</b>: right-click\n"
-                        "<b>Hardness</b>: scroll, <b>Switch smooth/sharp</b>: ctrl+click"), msgbuf_len);
-  else if(mask_gui->seg_selected)
-    g_strlcat(msgbuf, _("<b>Move segment</b>: drag\n<b>Add node</b>: ctrl+click"), msgbuf_len);
-  else if(mask_gui->form_selected)
-    g_snprintf(msgbuf, msgbuf_len, _("<b>Size</b>: scroll, <b>Hardness</b>: shift+scroll\n"
-                                     "<b>Opacity</b>: ctrl+scroll (%d%%)"), opacity);
+    g_strlcat(msgbuf, _("<b>Move node</b>: Drag, <b>Delete node</b>: Right-click"), msgbuf_len);
+  else if(mask_gui->seg_hovered >= 0 || mask_gui->seg_selected)
+    g_strlcat(msgbuf, _("<b>Move segment</b>: Drag, <b>Add node</b>: Ctrl+Click"), msgbuf_len);
+  else if(mask_gui->form_selected || mask_gui->border_selected)
+    g_strlcat(msgbuf, _("<b>Move</b>: Drag"), msgbuf_len);
 }
 
 static void _polygon_duplicate_points(dt_develop_t *const dev, dt_masks_form_t *const base, dt_masks_form_t *const dest)
