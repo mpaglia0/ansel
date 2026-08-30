@@ -595,6 +595,27 @@ void dt_masks_group_ungroup(dt_develop_t *dev, dt_masks_form_t *dest_grp, dt_mas
 void dt_masks_group_update_name(dt_iop_module_t *module);
 dt_masks_form_group_t *dt_masks_group_add_form(dt_develop_t *dev, dt_masks_form_t *grp, dt_masks_form_t *form);
 
+/** Add a shape to a group with an EXPLICIT combination state and opacity, rather than the
+ * defaults dt_masks_group_add_form() applies (SHOW|USE|UNION at the configured opacity).
+ *
+ * This exists because three call sites wanted their own state and opacity and therefore built the
+ * membership row by hand -- malloc, four assignments, g_list_append -- which silently skipped both
+ * of the things the real adder does: the self-inclusion guard that stops a group containing
+ * itself, and the gravity-centre refresh the group needs before anything hit-tests it.
+ *
+ * Takes the group by pointer, not by id, because the callers legitimately build into a group that
+ * is not in dev->forms yet: it is created, filled, and only then published. Copy-on-write is the
+ * caller's business here for the same reason -- an unpublished group is referenced by nobody, and
+ * a published one must be touched before this is called, exactly as for dt_masks_group_add_form().
+ *
+ * @param parentid the row's AUTHORED origin, which is NOT always the group holding it: two
+ *        callers assemble a temporary group for an ungroup/regroup round trip and keep each row
+ *        pointing at the group it really came from. Pass grp->formid unless you mean otherwise.
+ * @return the new row, or NULL if the group is not a group or the add would nest it in itself. */
+dt_masks_form_group_t *dt_masks_group_add_form_with_state(dt_develop_t *dev, dt_masks_form_t *grp,
+                                                          dt_masks_form_t *form, int parentid,
+                                                          dt_masks_state_t state, float opacity);
+
 /** utils functions */
 int dt_masks_point_in_form_exact(const float *pts, int num_pts, const float *points, int points_start, int points_count);
 
@@ -644,7 +665,7 @@ dt_masks_form_group_t *dt_masks_form_group_find_entry(dt_masks_form_t *group_for
  * already knowing which group (if any) it belongs to, e.g. a flat "all shapes" row.
  * @param out_parentid if non-NULL, receives the owning group's formid (0 if none found).
  */
-dt_masks_form_group_t *dt_masks_form_group_find_any(dt_develop_t *dev, int formid, int *out_parentid);
+
 int dt_masks_group_index_from_formid(const dt_masks_form_t *group_form, int formid);
 dt_masks_form_group_t *dt_masks_form_get_selected_group(const struct dt_masks_form_t *form,
                                                         const struct dt_masks_form_gui_t *gui);
@@ -683,7 +704,7 @@ const char *dt_masks_interaction_name(dt_masks_interaction_t interaction);
 /**
  * @brief The other word for a property, when a shape family spells it its own way.
  *
- * A gradient stores its fade extent in the SIZE slot and its curvature in the HARDNESS one --
+ * A gradient stores its fade extent in the SIZE slot and its curvature in the FADING one --
  * same property of the interaction API, different vocabulary in front of the user, which is
  * also why the context menu renames those two sliders for gradients. Any UI naming a property
  * generically must show both words, or the gradient's own vocabulary has no visible home.
@@ -715,7 +736,7 @@ gboolean dt_masks_is_anything_hovered(const dt_masks_form_gui_t *mask_gui);
  */
 dt_masks_form_group_t *dt_masks_form_get_selected_group_live(const struct dt_masks_form_t *form,
                                                              const struct dt_masks_form_gui_t *gui);
-float dt_masks_form_get_interaction_value(dt_develop_t *dev, dt_masks_form_group_t *form_group,
+float dt_masks_form_get_interaction_value(dt_develop_t *dev, int group_id, int formid,
                                           dt_masks_interaction_t interaction);
 gboolean dt_masks_form_get_gravity_center(dt_develop_t *dev, const struct dt_masks_form_t *form, float center[2], float *area);
 void dt_masks_form_update_gravity_center(dt_develop_t *dev, struct dt_masks_form_t *form);
@@ -724,7 +745,7 @@ void dt_masks_form_update_gravity_center(dt_develop_t *dev, struct dt_masks_form
  * hit-testing read site recomputes lazily on first actual use. */
 void dt_masks_form_invalidate_gravity_center(struct dt_masks_form_t *form);
 int dt_masks_center_view_on_form(struct dt_develop_t *dev, const struct dt_masks_form_t *form);
-float dt_masks_form_set_interaction_value(dt_masks_form_group_t *form_group,
+float dt_masks_form_set_interaction_value(dt_develop_t *dev, int group_id, int formid,
                                           dt_masks_interaction_t interaction,
                                           float value, dt_masks_increment_t increment, int flow,
                                           struct dt_masks_form_gui_t *gui, struct dt_iop_module_t *module);
@@ -734,7 +755,7 @@ float dt_masks_form_set_interaction_value(dt_masks_form_group_t *form_group,
  * or setting it in an absolute fashion, then save it to configuration.
  *
  * @param form the shape to change. We will read its type internally
- * @param feature the propertie to change: hardness, size, curvature (for gradients)
+ * @param feature the propertie to change: fading, size, curvature (for gradients)
  * @param new_value if increment is set to absolute, this is directly the updated value. if increment is offset, the updated value is old_value + new_value. if increment is scale, the updated value is old value * new_value.
  * @param v_min minimum acceptable value of the property for sanitization
  * @param v_max maximum acceptable value of the property for sanitization
@@ -837,7 +858,6 @@ int dt_masks_find_closest_handle_common(dt_masks_form_t *mask_form, dt_masks_for
 
 void dt_masks_creation_mode_quit(dt_masks_form_gui_t *gui);
 gboolean dt_masks_creation_mode_enter(dt_develop_t *dev, dt_iop_module_t *module, const dt_masks_type_t type);
-void apply_operation(struct dt_masks_form_group_t *pt, const dt_masks_state_t apply_state);
 
 /** Contextual menu */
 
@@ -858,11 +878,12 @@ GtkWidget *dt_masks_create_menu(dt_masks_form_gui_t *gui, dt_masks_form_t *form,
 
 /**
  * @brief Append a bauhaus-slider menu item to a mask context menu, bound to one shape
- * interaction (size, fading/hardness, rotation, opacity). Shared by the darkroom
+ * interaction (size, fading, rotation, opacity). Shared by the darkroom
  * canvas context menu (dt_masks_create_menu) and the blend module's own shape-list
  * context menus, so both stay in sync.
  */
-GtkWidget *dt_masks_gui_add_interaction_slider(GtkWidget *menu, const char *label, dt_masks_form_group_t *form_group,
+GtkWidget *dt_masks_gui_add_interaction_slider(GtkWidget *menu, const char *label, dt_develop_t *dev,
+                                               int group_id, int formid,
                                                dt_masks_interaction_t interaction, dt_masks_increment_t increment,
                                                float min, float max, float step, float value, int digits,
                                                const char *format, float factor,
@@ -876,7 +897,7 @@ GtkWidget *dt_masks_gui_add_interaction_slider(GtkWidget *menu, const char *labe
  * group's `points` list.
  */
 void dt_masks_gui_populate_interaction_sliders(GtkWidget *menu, dt_develop_t *dev, dt_masks_form_t *form,
-                                               dt_masks_form_group_t *op_form,
+                                               int group_id,
                                                dt_masks_form_gui_t *gui, struct dt_iop_module_t *module);
 
 int dt_masks_gui_confirm_delete_form_dialog(const char *form_name);

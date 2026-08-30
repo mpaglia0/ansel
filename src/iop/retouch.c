@@ -69,6 +69,7 @@
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
 #include "develop/masks.h"
+#include "develop/masks_group.h"
 #include "develop/masks_gui.h"
 #include "develop/tiling.h"
 #include "gui/actions/menu.h"
@@ -592,14 +593,22 @@ static void rt_load_shape_algo_in_gui(dt_iop_module_t *self, const int form_sele
 
 static void rt_masks_form_change_opacity(dt_iop_module_t *self, int formid, float opacity)
 {
-  dt_masks_form_group_t *grpt = rt_get_mask_point_group(self, formid);
-  if(!IS_NULL_PTR(grpt))
-  {
-    grpt->opacity = CLAMP(opacity, 0.05f, 1.0f);
-    dt_conf_set_float("plugins/darkroom/masks/opacity", grpt->opacity);
+  const dt_develop_blend_params_t *bp = self->blend_params;
+  if(IS_NULL_PTR(bp)) return;
 
-    dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
-  }
+  /* Retouch keeps a 5% floor of its own, applied BEFORE the call: a fully transparent clone or
+   * heal is indistinguishable from a deleted one in this module's list, so it never offers 0 the
+   * way a generic mask does. The API clamps to [0;1] and would accept it. */
+  dt_masks_member_t member = { 0 };
+  const dt_masks_result_t result = dt_masks_group_set_member_opacity(self->dev, bp->mask_id, formid,
+                                                                     CLAMP(opacity, 0.05f, 1.0f), &member);
+  if(result != DT_MASKS_OK && result != DT_MASKS_UNCHANGED) return;
+
+  dt_conf_set_float("plugins/darkroom/masks/opacity", member.opacity);
+
+  /* Only a real change earns a history step. Re-setting the opacity a shape already has used to
+   * push an undo entry that undid nothing. */
+  if(result == DT_MASKS_OK) dt_dev_add_history_item(self->dev, self, TRUE, TRUE);
 }
 
 static float rt_masks_form_get_opacity(dt_iop_module_t *self, int formid)
@@ -682,12 +691,8 @@ static void rt_show_forms_for_current_scale(dt_iop_module_t *self)
       dt_masks_form_t *form = dt_masks_get_from_id(self->dev, formid);
       if(IS_NULL_PTR(form)) continue;
       
-      dt_masks_form_group_t *fpt = (dt_masks_form_group_t *)malloc(sizeof(dt_masks_form_group_t));
-      fpt->formid = formid;
-      fpt->parentid = grid;
-      fpt->state = DT_MASKS_STATE_USE | DT_MASKS_STATE_UNION;
-      fpt->opacity = 1.0f;
-      grp->points = g_list_append(grp->points, fpt);
+      dt_masks_group_add_form_with_state(self->dev, grp, form, grid,
+                                         DT_MASKS_STATE_USE | DT_MASKS_STATE_UNION, 1.0f);
     }
   }
 
@@ -824,7 +829,9 @@ static gboolean rt_masks_form_is_in_roi(dt_iop_module_t *self, const dt_dev_pixe
   int fl, ft, fw, fh;
   dt_dev_pixelpipe_iop_t piece_copy = *piece;
 
-  if(dt_masks_get_area(self, (dt_dev_pixelpipe_t *)pipe, &piece_copy, form, &fw, &fh, &fl, &ft) != 0) return FALSE;
+  if(dt_masks_get_area(self, (dt_dev_pixelpipe_t *)pipe, &piece_copy, form, &fw, &fh, &fl, &ft)
+     != DT_MASKS_RASTER_OK)
+    return FALSE;
 
   // is the form outside of the roi?
   fw *= roi_in->scale, fh *= roi_in->scale, fl *= roi_in->scale, ft *= roi_in->scale;
@@ -2593,7 +2600,7 @@ static void rt_compute_roi_in(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *
       // if the form is outside the roi, we just skip it
       // we get the area for the form
       int fl, ft, fw, fh;
-      if(dt_masks_get_area(self, pipe, piece, form, &fw, &fh, &fl, &ft) != 0)
+      if(dt_masks_get_area(self, pipe, piece, form, &fw, &fh, &fl, &ft) != DT_MASKS_RASTER_OK)
       {
         continue;
       }
@@ -2692,7 +2699,7 @@ static void rt_extend_roi_in_from_source_clones(struct dt_iop_module_t *self, dt
       
       // we get the source area
       int fl, ft, fw, fh;
-      if(dt_masks_get_source_area(self, pipe, piece, form, &fw, &fh, &fl, &ft) != 0)
+      if(dt_masks_get_source_area(self, pipe, piece, form, &fw, &fh, &fl, &ft) != DT_MASKS_RASTER_OK)
       {
         continue;
       }
@@ -2777,7 +2784,8 @@ static void rt_extend_roi_in_for_clone(struct dt_iop_module_t *self, dt_dev_pixe
 
       // get the source area
       int fl_src, ft_src, fw_src, fh_src;
-      if(dt_masks_get_source_area(self, pipe, piece, form, &fw_src, &fh_src, &fl_src, &ft_src) != 0)
+      if(dt_masks_get_source_area(self, pipe, piece, form, &fw_src, &fh_src, &fl_src, &ft_src)
+         != DT_MASKS_RASTER_OK)
       {
         continue;
       }

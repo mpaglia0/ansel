@@ -404,7 +404,7 @@ static float _gradient_get_interaction_value(const dt_masks_form_t *form, dt_mas
   {
     case DT_MASKS_INTERACTION_SIZE:
       return gradient->extent;
-    case DT_MASKS_INTERACTION_HARDNESS:
+    case DT_MASKS_INTERACTION_FADING:
       return gradient->curvature;
     case DT_MASKS_INTERACTION_ROTATION:
       return gradient->rotation;
@@ -446,7 +446,7 @@ static float _gradient_set_interaction_value(dt_masks_form_t *form, dt_masks_int
     case DT_MASKS_INTERACTION_SIZE:
       if(!_change_extent(form, gui, module, index, value, increment, flow)) return NAN;
       return _gradient_get_interaction_value(form, interaction);
-    case DT_MASKS_INTERACTION_HARDNESS:
+    case DT_MASKS_INTERACTION_FADING:
       if(!_change_curvature(form, gui, module, index, value, increment, flow)) return NAN;
       return _gradient_get_interaction_value(form, interaction);
     case DT_MASKS_INTERACTION_ROTATION:
@@ -535,7 +535,7 @@ static int _gradient_events_mouse_scrolled(struct dt_iop_module_t *module, doubl
   
   /* `state` is the caller's raw key state, kept for the callback signature: the property to
    * act on was already resolved from it by dt_masks_scroll_get_interaction(). A gradient
-   * spells the two shared properties its own way -- SIZE is the fade extent, HARDNESS is the
+   * spells the two shared properties its own way -- SIZE is the fade extent, FADING is the
    * curvature -- which is also how the context menu names them (masks_gui.c). */
   if(gui->creation)
   {
@@ -545,7 +545,7 @@ static int _gradient_events_mouse_scrolled(struct dt_iop_module_t *module, doubl
         return _init_rotation(form, (up ? +0.2f : -0.2f), DT_MASKS_INCREMENT_OFFSET, flow);
       case DT_MASKS_INTERACTION_OPACITY:
         return _init_opacity(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
-      case DT_MASKS_INTERACTION_HARDNESS:
+      case DT_MASKS_INTERACTION_FADING:
         return _init_curvature(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
       case DT_MASKS_INTERACTION_SIZE:
         return _init_extent(form, (up ? +1.02f : 0.98f), DT_MASKS_INCREMENT_SCALE, flow);
@@ -561,7 +561,7 @@ static int _gradient_events_mouse_scrolled(struct dt_iop_module_t *module, doubl
         return _change_rotation(form, gui, module, index, (up ? +0.2f : -0.2f), DT_MASKS_INCREMENT_OFFSET, flow);
       case DT_MASKS_INTERACTION_OPACITY:
         return dt_masks_form_change_opacity(gui->dev, form, parentid, up, flow);
-      case DT_MASKS_INTERACTION_HARDNESS:
+      case DT_MASKS_INTERACTION_FADING:
         return _change_curvature(form, gui, module, index, (up ? +0.02f : -0.02f), DT_MASKS_INCREMENT_OFFSET, flow);
       case DT_MASKS_INTERACTION_SIZE:
         return _change_extent(form, gui, module, index, (up ? 1.02f : 0.98f), DT_MASKS_INCREMENT_SCALE, flow);
@@ -1138,36 +1138,43 @@ static void _gradient_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks
                          gui->form_rotating, zoom_scale, gpt->points, gpt->points_count);
 }
 
-static int _gradient_get_points_border(dt_develop_t *dev, dt_masks_form_t *form, float **points, int *points_count,
+static dt_masks_raster_result_t _gradient_get_points_border(dt_develop_t *dev, dt_masks_form_t *form,
+                                       float **points, int *points_count,
                                        float **border, int *border_count, int source,
                                        const dt_iop_module_t *module)
 {
     // unused arg, keep compiler from complaining
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
+  // No geometry: an empty outline is the correct result here, not a failure. See the circle.
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   dt_masks_anchor_gradient_t *gradient = (dt_masks_anchor_gradient_t *)form->points->data;
-  if(IS_NULL_PTR(gradient)) return 0;
+  if(IS_NULL_PTR(gradient)) return DT_MASKS_RASTER_EMPTY;
   if(_gradient_get_points(dev, gradient->center[0], gradient->center[1], gradient->rotation, gradient->curvature,
                           points, points_count) != 0)
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   if(border)
-    return _gradient_get_pts_border(dev, gradient->center[0], gradient->center[1],
-                                    gradient->rotation, gradient->extent, gradient->curvature,
-                                    border, border_count);
-  return 0;
+    return dt_masks_raster_from_status(
+        _gradient_get_pts_border(dev, gradient->center[0], gradient->center[1],
+                                 gradient->rotation, gradient->extent, gradient->curvature,
+                                 border, border_count));
+  return DT_MASKS_RASTER_OK;
 }
 
-static int _gradient_get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _gradient_get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                               const dt_dev_pixelpipe_iop_t *const piece,
                               dt_masks_form_t *const form,
                               int *width, int *height, int *posx, int *posy)
 {
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
   const float wd = pipe->iwidth, ht = pipe->iheight;
 
   float points[8] = { 0.0f, 0.0f, wd, 0.0f, wd, ht, 0.0f, ht };
 
   // and we transform them with all distorted modules
   if(!dt_dev_distort_transform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, 4))
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
 
   // now we search min and max
   float xmin = 0.0f, xmax = 0.0f, ymin = 0.0f, ymax = 0.0f;
@@ -1186,7 +1193,7 @@ static int _gradient_get_area(const dt_iop_module_t *const module, dt_dev_pixelp
   *posy = ymin;
   *width = (xmax - xmin);
   *height = (ymax - ymin);
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 // caller needs to make sure that input remains within bounds
@@ -1198,16 +1205,22 @@ static inline float dt_gradient_lookup(const float *lut, const float i)
   return lut[bin1] * f + lut[bin0] * (1.0f - f);
 }
 
-static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                               const dt_dev_pixelpipe_iop_t *const piece,
                               dt_masks_form_t *const form,
                               float **buffer, int *width, int *height, int *posx, int *posy)
 {
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
+  *buffer = NULL;
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   double start2 = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) start2 = dt_get_wtime();
   // we get the area
-  if(_gradient_get_area(module, pipe, piece, form, width, height, posx, posy) != 0) return 1;
+  const dt_masks_raster_result_t area = _gradient_get_area(module, pipe, piece, form, width, height, posx, posy);
+  if(area != DT_MASKS_RASTER_OK) return area;
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
   {
@@ -1218,7 +1231,7 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
 
   // we get the gradient values
   dt_masks_anchor_gradient_t *gradient = (dt_masks_anchor_gradient_t *)((form->points)->data);
-  if(IS_NULL_PTR(gradient)) return 0;
+  if(IS_NULL_PTR(gradient)) return DT_MASKS_RASTER_EMPTY;
   // we create a buffer of grid points for later interpolation. mainly in order to reduce memory footprint
   const int w = *width;
   const int h = *height;
@@ -1229,7 +1242,7 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
   const int gh = (h + grid - 1) / grid + 1;
 
   float *points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * gw * gh, 0);
-  if(IS_NULL_PTR(points)) return 1;
+  if(IS_NULL_PTR(points)) return DT_MASKS_RASTER_ERROR;
   __OMP_PARALLEL_FOR__(collapse(2) if((size_t)gw * gh > 50000))
   for(int j = 0; j < gh; j++)
     for(int i = 0; i < gw; i++)
@@ -1249,7 +1262,7 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
   if(!dt_dev_distort_backtransform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, (size_t)gw * gh))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -1280,7 +1293,7 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
   if(IS_NULL_PTR(lut))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
   __OMP_PARALLEL_FOR_SIMD__(if(lutsize > 1000) aligned(lut : 64))
   for(int n = 0; n < lutsize; n++)
@@ -1319,7 +1332,7 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
   if(IS_NULL_PTR(*buffer))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   const float inv_grid2 = 1.0f / (grid * grid);
@@ -1366,22 +1379,22 @@ static int _gradient_get_mask(const dt_iop_module_t *const module, dt_dev_pixelp
     dt_print(DT_DEBUG_MASKS, "[masks %s] gradient fill took %0.04f sec\n", form->name,
              dt_get_wtime() - start2);
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 
-static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                                   const dt_dev_pixelpipe_iop_t *const piece,
                                   dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer,
                                   dt_iop_roi_t *touched)
 {
   dt_masks_touched_none(touched);
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   double start2 = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) start2 = dt_get_wtime();
   // we get the gradient values
   const dt_masks_anchor_gradient_t *gradient = (dt_masks_anchor_gradient_t *)(form->points->data);
-  if(IS_NULL_PTR(gradient)) return 0;
+  if(IS_NULL_PTR(gradient)) return DT_MASKS_RASTER_EMPTY;
 
   // we create a buffer of grid points for later interpolation. mainly in order to reduce memory footprint
   const int w = roi->width;
@@ -1394,7 +1407,7 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pi
   const int gh = (h + grid - 1) / grid + 1;
 
   float *points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * gw * gh, 0);
-  if(IS_NULL_PTR(points)) return 1;
+  if(IS_NULL_PTR(points)) return DT_MASKS_RASTER_ERROR;
   __OMP_PARALLEL_FOR__(collapse(2) if((size_t)gw * gh > 50000))
   for(int j = 0; j < gh; j++)
     for(int i = 0; i < gw; i++)
@@ -1417,7 +1430,7 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pi
                                         (size_t)gw * gh))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -1448,7 +1461,7 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pi
   if(IS_NULL_PTR(lut))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
   __OMP_PARALLEL_FOR_SIMD__(if(lutsize > 1000) aligned(lut : 64))
   for(int n = 0; n < lutsize; n++)
@@ -1528,7 +1541,7 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pi
     dt_print(DT_DEBUG_MASKS, "[masks %s] gradient fill took %0.04f sec\n", form->name,
              dt_get_wtime() - start2);
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 static void _gradient_sanitize_config(dt_masks_type_t type)

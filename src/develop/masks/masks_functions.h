@@ -71,23 +71,47 @@ typedef struct dt_masks_functions_t
                        int *inside, int *inside_border, int *near_handle, int *inside_source, float *dist);
   int (*get_points)(struct dt_develop_t *dev, float x, float y, float radius_a, float radius_b, float rotation,
                     float **points, int *points_count);
-  int (*get_points_border)(struct dt_develop_t *dev, struct dt_masks_form_t *form, float **points, int *points_count,
+  /** Build the shape's outline (and, when `border' is given, its border outline).
+   *
+   * Returns OK when the outline was built, EMPTY when the shape has no geometry to build one
+   * from -- an outline that is legitimately empty, which the caller may cache like any other
+   * result -- and ERROR when the build itself failed and produced nothing cacheable. The
+   * distinction is load-bearing: the outline cache key covers the whole group, so caching a
+   * FAILURE hides the shape until the geometry next moves, while refusing to cache an
+   * legitimately EMPTY one rebuilds every shape of the group on every expose, forever.
+   */
+  dt_masks_raster_result_t (*get_points_border)(struct dt_develop_t *dev, struct dt_masks_form_t *form,
+                           float **points, int *points_count,
                            float **border, int *border_count, int source, const dt_iop_module_t *const module);
-  int (*get_mask)(const dt_iop_module_t *const module, struct dt_dev_pixelpipe_t *pipe,
+  /** Rasterise into a freshly allocated buffer covering the shape's own bounding box.
+   * Same three outcomes as get_mask_roi. On anything but OK the out-parameters are still
+   * written (NULL buffer, zero geometry): callers read them unconditionally. */
+  dt_masks_raster_result_t (*get_mask)(const dt_iop_module_t *const module, struct dt_dev_pixelpipe_t *pipe,
                   const dt_dev_pixelpipe_iop_t *const piece,
                   struct dt_masks_form_t *const form,
                   float **buffer, int *width, int *height, int *posx, int *posy);
-  /** Rasterise into a pre-zeroed ROI-sized buffer. `touched` (may be NULL) receives the
-   * buffer-relative rectangle enclosing every pixel written -- see masks_touched.h. */
-  int (*get_mask_roi)(const dt_iop_module_t *const fmodule, struct dt_dev_pixelpipe_t *pipe,
+  /** Rasterise into a pre-zeroed ROI-sized buffer.
+   *
+   * `touched` (may be NULL) receives the buffer-relative rectangle enclosing every pixel
+   * written -- see masks_touched.h.
+   *
+   * Returns OK when the buffer was written, EMPTY when the shape has nothing to draw here
+   * (degenerate geometry, or wholly outside `roi`) and the buffer was left untouched, ERROR
+   * when the shape could not be computed and the buffer's contents are undefined. EMPTY is
+   * NOT a failure: the group fold skips such a shape and keeps folding. Every implementation
+   * must agree on which is which -- see dt_masks_raster_result_t.
+   */
+  dt_masks_raster_result_t (*get_mask_roi)(const dt_iop_module_t *const fmodule, struct dt_dev_pixelpipe_t *pipe,
                       const dt_dev_pixelpipe_iop_t *const piece,
                       struct dt_masks_form_t *const form,
                       const dt_iop_roi_t *roi, float *buffer, dt_iop_roi_t *touched);
-  int (*get_area)(const dt_iop_module_t *const module, struct dt_dev_pixelpipe_t *pipe,
+  /** The shape's bounding box. Same three outcomes; the out-parameters are always written. */
+  dt_masks_raster_result_t (*get_area)(const dt_iop_module_t *const module, struct dt_dev_pixelpipe_t *pipe,
                   const dt_dev_pixelpipe_iop_t *const piece,
                   struct dt_masks_form_t *const form,
                   int *width, int *height, int *posx, int *posy);
-  int (*get_source_area)(dt_iop_module_t *module, struct dt_dev_pixelpipe_t *pipe,
+  /** The clone source's bounding box. Same three outcomes; out-parameters always written. */
+  dt_masks_raster_result_t (*get_source_area)(dt_iop_module_t *module, struct dt_dev_pixelpipe_t *pipe,
                          dt_dev_pixelpipe_iop_t *piece, struct dt_masks_form_t *form,
                          int *width, int *height, int *posx, int *posy);
   gboolean (*get_gravity_center)(struct dt_develop_t *dev, const struct dt_masks_form_t *form, float center[2], float *area);
@@ -121,6 +145,24 @@ typedef struct dt_masks_functions_t
   int (*populate_context_menu)(GtkWidget *menu, struct dt_masks_form_t *form, struct dt_masks_form_gui_t *gui, const float pzx, const float pzy);
 } dt_masks_functions_t;
 
+/* Rasterisation entry points, dispatched only from inside the masks module: the group fold
+ * calls get_mask_roi on its children, and the GUI outline builder calls get_points_border.
+ * They were declared in the public header with no caller outside this directory. */
+dt_masks_raster_result_t dt_masks_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+                                               const dt_dev_pixelpipe_iop_t *const piece,
+                                               dt_masks_form_t *const form, const dt_iop_roi_t *roi,
+                                               float *buffer, dt_iop_roi_t *touched);
+
+dt_masks_raster_result_t dt_masks_get_points_border(struct dt_develop_t *dev, dt_masks_form_t *form,
+                               float **points, int *points_count,
+                               float **border, int *border_count, int source, dt_iop_module_t *module);
+
+/* The raw membership-state mutator. Module-private on purpose: it takes a row by pointer and
+ * cannot touch the group, so every external caller had to remember the copy-on-write dance and
+ * most did not. Outside code goes through dt_masks_group_set_member_operation(), which owns it. */
+void dt_masks_group_entry_apply_operation(struct dt_masks_form_group_t *pt,
+                                          const dt_masks_state_t apply_state);
+
 /** the shape-specific function tables */
 extern const dt_masks_functions_t dt_masks_functions_circle;
 extern const dt_masks_functions_t dt_masks_functions_ellipse;
@@ -139,8 +181,6 @@ void _check_id(dt_develop_t *dev, dt_masks_form_t *mask_form);
 void _set_group_name_from_module(dt_iop_module_t *module, dt_masks_form_t *group_form);
 dt_masks_form_t *_group_create(dt_develop_t *develop, dt_iop_module_t *module, dt_masks_type_t group_type);
 dt_masks_form_t *_group_from_module(dt_develop_t *develop, dt_iop_module_t *module);
-float _change_opacity(dt_masks_form_group_t *form_group, float value,
-                             const dt_masks_increment_t increment, const int flow);
 int _find_in_group(dt_develop_t *dev, dt_masks_form_t *group_form, int form_id);
 
 #ifdef __cplusplus

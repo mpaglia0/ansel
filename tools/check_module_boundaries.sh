@@ -349,6 +349,143 @@ if [ "${history_upcalls_now}" -gt "${history_upcalls_baseline}" ]; then
 fi
 
 # ---------------------------------------------------------------------------------------
+# 9. src/develop/masks is NOT closed. This is the ratchet that closes it.
+#
+# Unlike colorprofiles, opencl, caches and database above, this one starts far from zero and
+# is expected to stay non-zero for several releases. It is here because the masks audit
+# (issue #1299) found the leak is CONCENTRATED rather than diffuse -- five files account for
+# every direct struct access outside the module -- which is what makes draining it tractable,
+# and because the same defect kept coming back while nothing counted it: the rule that the
+# pipeline must resolve shapes through pipe->forms and never the live dev->forms was violated
+# and re-fixed four separate times, once three lines below the comment stating it.
+#
+# The counts here are what the enclosure plan's later phases drain. Every accessor added to
+# the module and every caller moved onto it takes one off a number, and the number may then
+# only be lowered, never raised -- so a phase that half-lands cannot silently un-land.
+#
+# What is counted, and why each is counted THIS way rather than more ambitiously:
+#
+#   includes       Files outside src/develop/masks/ that include the module's two public
+#                  headers. develop/blend.h is one of them, which is how the whole masks
+#                  surface reaches every IOP in the tree; that single edge is worth more than
+#                  the other twenty put together and it is the one P2 removes.
+#
+#   members        Direct reads of a masks-owned struct member from outside the module. The
+#                  member list is CURATED on purpose: it holds only names that no other struct
+#                  in this tree uses (formid, form_dragging, creation_formids, ...) and leaves
+#                  out the ambiguous ones a masks form shares with half the codebase (points,
+#                  type, name, state, opacity). That undercounts -- the audit's full census
+#                  found ~385 by reading declarations, this finds far fewer -- and undercounting is
+#                  the right error for a gate. A ratchet that moves when somebody renames an
+#                  unrelated `->state` is a ratchet that gets switched off. Every match this
+#                  does report is real: they land in exactly five files, and no other.
+#
+#   writes         The same members, assigned to. A write from outside is the sharper half:
+#                  it is a caller mutating a refcounted, copy-on-write object without going
+#                  through dt_masks_cow_touch(), which is how a snapshot ends up observing a
+#                  half-rewritten form. Every remaining match is a real one: the single false
+#                  positive this count used to carry -- supervisor.c's own event struct, whose
+#                  `formid` field matched on the left of `e->formid = form->formid` -- is gone,
+#                  because that field was renamed when the file was converted.
+#
+#   allocations    malloc/calloc of a masks type outside the module: four places build a
+#                  group-membership entry or a circle node by hand and rely on the module's
+#                  free path to release it. An allocator/deallocator pact held together by
+#                  convention.
+#
+#   forms          Direct touches of ->forms / ->allforms outside the module: the live GUI
+#                  list, the pipe's refcounted snapshot and the per-history-item snapshot, all
+#                  reached as plain GLists. This is the count behind the bug that came back
+#                  four times, and it only reaches zero when resolving a shape is something
+#                  callers ask the module to do.
+#
+#   rows           Files outside the module that name dt_masks_form_group_t at all -- the
+#                  group-membership row. A row cannot copy-on-write: it is memory owned by the
+#                  group, so whoever holds one must have touched the group first, and must not
+#                  keep holding it afterwards because the touch replaces it. Every caller that
+#                  resolves one is a caller that has to get both halves right by hand, and the
+#                  opacity sliders are the proof they do not: they touched once, when the menu
+#                  was built, then wrote through the row for the whole drag while committing
+#                  history at every step -- so from the second step on they edited the very
+#                  snapshots that were supposed to be frozen. The module's own interface headers
+#                  are excluded; naming the type there is the design, not the leak.
+masks_include_baseline=19
+masks_gui_include_baseline=11
+masks_member_baseline=83
+masks_write_baseline=20
+masks_alloc_baseline=1
+masks_forms_baseline=76
+masks_row_baseline=35
+
+# Members no other struct in the tree uses. Keep it that way: adding an ambiguous name here
+# buys a bigger number and loses the gate.
+masks_members='formid|parentid|form_dragging|source_dragging|form_selected|border_selected'
+masks_members="${masks_members}|source_selected|pivot_selected|group_selected|form_visible"
+masks_members="${masks_members}|creation_formids|creation_module|creation_type|guipoints"
+masks_members="${masks_members}|guipoints_count|uses_bezier_points_layout|gravity_center_valid"
+masks_members="${masks_members}|node_dragging|handle_dragging|seg_dragging|node_selected_idx"
+masks_members="${masks_members}|handle_border_selected|handle_border_hovered"
+
+# Drop whole-line comments so a count cannot move because somebody described the code.
+masks_strip() { grep -vE ':[0-9]+:[[:space:]]*(\*|//)'; }
+
+masks_include_now=$(grep -rn '^[ \t]*#[ \t]*include[ \t]*"develop/masks\.h"' \
+                    src/ --include='*.c' --include='*.h' --include='*.cc' 2>/dev/null \
+                    | grep -cv '^src/develop/masks/')
+masks_gui_include_now=$(grep -rn '^[ \t]*#[ \t]*include[ \t]*"develop/masks_gui\.h"' \
+                        src/ --include='*.c' --include='*.h' --include='*.cc' 2>/dev/null \
+                        | grep -cv '^src/develop/masks/')
+masks_member_now=$(grep -rnE "\->(${masks_members})\b" src/ --include='*.c' --include='*.cc' 2>/dev/null \
+                   | grep -v '^src/develop/masks/' | masks_strip | wc -l)
+masks_write_now=$(grep -rnE "\->(${masks_members})[[:space:]]*(=[^=]|\|=|&=|\+=|-=)" \
+                  src/ --include='*.c' --include='*.cc' 2>/dev/null \
+                  | grep -v '^src/develop/masks/' | masks_strip | wc -l)
+masks_alloc_now=$(grep -rnE '\b(malloc|calloc|g_malloc[0-9n]*|g_new[0-9]*)[[:space:]]*\(' \
+                  src/ --include='*.c' --include='*.cc' 2>/dev/null \
+                  | grep -v '^src/develop/masks/' \
+                  | grep -cE 'dt_masks_(form_t|form_gui_t|form_group_t|node_|anchor_|point_)')
+masks_forms_now=$(grep -rnE '\->(forms|allforms)\b' src/ --include='*.c' --include='*.cc' 2>/dev/null \
+                  | grep -v '^src/develop/masks/' | masks_strip | wc -l)
+
+# The module's own public headers declare the type; only its CONSUMERS are leakage.
+masks_own_headers='^src/develop/masks/|^src/develop/masks\.h|^src/develop/masks_types\.h'
+masks_own_headers="${masks_own_headers}|^src/develop/masks_group\.h|^src/develop/masks_gui\.h"
+masks_row_now=$(grep -rnE '\bdt_masks_form_group_t\b' \
+                src/ --include='*.c' --include='*.cc' --include='*.h' 2>/dev/null \
+                | grep -vE "${masks_own_headers}" | masks_strip | wc -l)
+
+echo "masks:         ${masks_include_now} include masks.h, ${masks_gui_include_now} include masks_gui.h" \
+     "(baselines ${masks_include_baseline}, ${masks_gui_include_baseline}),"
+echo "               ${masks_member_now} external struct-member reads, ${masks_write_now} of them writes" \
+     "(baselines ${masks_member_baseline}, ${masks_write_baseline}),"
+echo "               ${masks_alloc_now} external allocations, ${masks_forms_now} direct ->forms touches" \
+     "(baselines ${masks_alloc_baseline}, ${masks_forms_baseline}),"
+echo "               ${masks_row_now} external mentions of a membership row" \
+     "(baseline ${masks_row_baseline})."
+
+masks_findings=0
+masks_check() { # name now baseline
+  if [ "$2" -gt "$3" ]; then
+    echo "masks: $1 ROSE ($3 -> $2). The module is being enclosed, not extended: ask it for what"
+    echo "       you need instead of reaching into a dt_masks_form_t. See issue #1299."
+    masks_findings=$((masks_findings + 1))
+  elif [ "$2" -lt "$3" ]; then
+    echo "masks: $1 fell ($3 -> $2). Lower the baseline in this script, in the same commit, so"
+    echo "       the ground you took cannot be given back."
+    masks_findings=$((masks_findings + 1))
+  fi
+}
+masks_check "masks.h includers"    "${masks_include_now}"     "${masks_include_baseline}"
+masks_check "masks_gui.h includers" "${masks_gui_include_now}" "${masks_gui_include_baseline}"
+masks_check "struct-member reads"  "${masks_member_now}"      "${masks_member_baseline}"
+masks_check "struct-member writes" "${masks_write_now}"       "${masks_write_baseline}"
+masks_check "external allocations" "${masks_alloc_now}"       "${masks_alloc_baseline}"
+masks_check "direct ->forms"       "${masks_forms_now}"       "${masks_forms_baseline}"
+masks_check "membership rows named externally" "${masks_row_now}" "${masks_row_baseline}"
+findings=$((findings + masks_findings))
+
+
+# ---------------------------------------------------------------------------------------
 # 4. How much of the pixel engine still names a toolkit -- the GTK->Qt door.
 #
 # This measures a DIFFERENT property from tools/check_layering.sh, and the difference is the
@@ -438,5 +575,5 @@ if [ "${findings}" -gt 0 ]; then
   exit 1
 fi
 
-echo "OK: src/system is closed, src/widgets does not reach into gui/; colorprofiles, opencl, caches, database, metadata and history held; the pixel engine's toolkit surface did not grow."
+echo "OK: src/system is closed, src/widgets does not reach into gui/; colorprofiles, opencl, caches, database, metadata and history held; masks did not leak further; the pixel engine's toolkit surface did not grow."
 exit 0

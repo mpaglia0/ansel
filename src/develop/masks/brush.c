@@ -47,6 +47,7 @@
 #include "develop/masks/masks_distort.h"
 #include "develop/masks.h"
 #include "develop/masks_gui.h"
+#include "develop/blend_gui.h"   // dt_iop_gui_blend_masks_update()
 #include "develop/masks/masks_functions.h"
 #include "develop/masks/masks_touched.h"
 #include "math/openmp_maths.h"
@@ -54,8 +55,8 @@
 #include "widgets/accelerators.h"
 #include "widgets/widget_settings.h"
 
-#define HARDNESS_MIN 0.00001f
-#define HARDNESS_MAX 1.0f
+#define FADING_MIN 0.00001f
+#define FADING_MAX 1.0f
 
 #define BORDER_MIN 0.00005f
 #define BORDER_MAX 0.5f
@@ -64,7 +65,7 @@
  * @brief Get squared distance of a point to the segment, including payload deltas.
  *
  * Uses the first and last points as segment endpoints and adds weighted distance
- * in border/hardness/density space to preserve brush dynamics.
+ * in border/fading/density space to preserve brush dynamics.
  */
 static float _brush_point_line_distance2(int point_index, int point_count,
                                          const float *point_buffer, const float *payload_buffer)
@@ -72,17 +73,17 @@ static float _brush_point_line_distance2(int point_index, int point_count,
   const float point_x = point_buffer[2 * point_index];
   const float point_y = point_buffer[2 * point_index + 1];
   const float point_border = payload_buffer[4 * point_index];
-  const float point_hardness = payload_buffer[4 * point_index + 1];
+  const float point_fading = payload_buffer[4 * point_index + 1];
   const float point_density = payload_buffer[4 * point_index + 2];
   const float start_x = point_buffer[0];
   const float start_y = point_buffer[1];
   const float start_border = payload_buffer[0];
-  const float start_hardness = payload_buffer[1];
+  const float start_fading = payload_buffer[1];
   const float start_density = payload_buffer[2];
   const float end_x = point_buffer[2 * (point_count - 1)];
   const float end_y = point_buffer[2 * (point_count - 1) + 1];
   const float end_border = payload_buffer[4 * (point_count - 1)];
-  const float end_hardness = payload_buffer[4 * (point_count - 1) + 1];
+  const float end_fading = payload_buffer[4 * (point_count - 1) + 1];
   const float end_density = payload_buffer[4 * (point_count - 1) + 2];
   const float bweight = 1.0f;
   const float hweight = 0.01f;
@@ -91,7 +92,7 @@ static float _brush_point_line_distance2(int point_index, int point_count,
   const float segment_dx = end_x - start_x;
   const float segment_dy = end_y - start_y;
   const float segment_db = end_border - start_border;
-  const float segment_dh = end_hardness - start_hardness;
+  const float segment_dh = end_fading - start_fading;
   const float segment_dd = end_density - start_density;
 
   const float dot = (point_x - start_x) * segment_dx + (point_y - start_y) * segment_dy;
@@ -105,7 +106,7 @@ static float _brush_point_line_distance2(int point_index, int point_count,
     dx = point_x - start_x;
     dy = point_y - start_y;
     db = point_border - start_border;
-    dh = point_hardness - start_hardness;
+    dh = point_fading - start_fading;
     dd = point_density - start_density;
   }
   else if(t < 0.0f)
@@ -113,7 +114,7 @@ static float _brush_point_line_distance2(int point_index, int point_count,
     dx = point_x - start_x;
     dy = point_y - start_y;
     db = point_border - start_border;
-    dh = point_hardness - start_hardness;
+    dh = point_fading - start_fading;
     dd = point_density - start_density;
   }
   else if(t > 1.0f)
@@ -121,7 +122,7 @@ static float _brush_point_line_distance2(int point_index, int point_count,
     dx = point_x - end_x;
     dy = point_y - end_y;
     db = point_border - end_border;
-    dh = point_hardness - end_hardness;
+    dh = point_fading - end_fading;
     dd = point_density - end_density;
   }
   else
@@ -129,7 +130,7 @@ static float _brush_point_line_distance2(int point_index, int point_count,
     dx = point_x - (start_x + t * segment_dx);
     dy = point_y - (start_y + t * segment_dy);
     db = point_border - (start_border + t * segment_db);
-    dh = point_hardness - (start_hardness + t * segment_dh);
+    dh = point_fading - (start_fading + t * segment_dh);
     dd = point_density - (start_density + t * segment_dd);
   }
 
@@ -180,7 +181,7 @@ static GList *_brush_ramer_douglas_peucker(const float *point_buffer, int point_
     first_node->node[1] = point_buffer[1];
     first_node->ctrl1[0] = first_node->ctrl1[1] = first_node->ctrl2[0] = first_node->ctrl2[1] = -1.0f;
     first_node->border[0] = first_node->border[1] = payload_buffer[0];
-    first_node->hardness = payload_buffer[1];
+    first_node->fading = payload_buffer[1];
     first_node->density = payload_buffer[2];
     first_node->state = DT_MASKS_POINT_STATE_NORMAL;
     result_list = g_list_append(result_list, (gpointer)first_node);
@@ -190,7 +191,7 @@ static GList *_brush_ramer_douglas_peucker(const float *point_buffer, int point_
     last_node->node[1] = point_buffer[(point_count - 1) * 2 + 1];
     last_node->ctrl1[0] = last_node->ctrl1[1] = last_node->ctrl2[0] = last_node->ctrl2[1] = -1.0f;
     last_node->border[0] = last_node->border[1] = payload_buffer[(point_count - 1) * 4];
-    last_node->hardness = payload_buffer[(point_count - 1) * 4 + 1];
+    last_node->fading = payload_buffer[(point_count - 1) * 4 + 1];
     last_node->density = payload_buffer[(point_count - 1) * 4 + 2];
     last_node->state = DT_MASKS_POINT_STATE_NORMAL;
     result_list = g_list_append(result_list, (gpointer)last_node);
@@ -844,16 +845,16 @@ static int _brush_get_pts_border(dt_develop_t *develop, dt_masks_form_t *mask_fo
     if(cw > 0)
     {
       const float pa[7] = { point1->node[0] * iwd - dx, point1->node[1] * iht - dy, point1->ctrl2[0] * iwd - dx,
-                            point1->ctrl2[1] * iht - dy, point1->border[1] * MIN(iwd, iht), point1->hardness,
+                            point1->ctrl2[1] * iht - dy, point1->border[1] * MIN(iwd, iht), point1->fading,
                             point1->density };
       const float pb[7] = { point2->node[0] * iwd - dx, point2->node[1] * iht - dy, point2->ctrl1[0] * iwd - dx,
-                            point2->ctrl1[1] * iht - dy, point2->border[0] * MIN(iwd, iht), point2->hardness,
+                            point2->ctrl1[1] * iht - dy, point2->border[0] * MIN(iwd, iht), point2->fading,
                             point2->density };
       const float pc[7] = { point2->node[0] * iwd - dx, point2->node[1] * iht - dy, point2->ctrl2[0] * iwd - dx,
-                            point2->ctrl2[1] * iht - dy, point2->border[1] * MIN(iwd, iht), point2->hardness,
+                            point2->ctrl2[1] * iht - dy, point2->border[1] * MIN(iwd, iht), point2->fading,
                             point2->density };
       const float pd[7] = { point3->node[0] * iwd - dx, point3->node[1] * iht - dy, point3->ctrl1[0] * iwd - dx,
-                            point3->ctrl1[1] * iht - dy, point3->border[0] * MIN(iwd, iht), point3->hardness,
+                            point3->ctrl1[1] * iht - dy, point3->border[0] * MIN(iwd, iht), point3->fading,
                             point3->density };
       memcpy(p1, pa, sizeof(float) * 7);
       memcpy(p2, pb, sizeof(float) * 7);
@@ -863,16 +864,16 @@ static int _brush_get_pts_border(dt_develop_t *develop, dt_masks_form_t *mask_fo
     else
     {
       const float pa[7] = { point1->node[0] * iwd - dx, point1->node[1] * iht - dy, point1->ctrl1[0] * iwd - dx,
-                            point1->ctrl1[1] * iht - dy, point1->border[1] * MIN(iwd, iht), point1->hardness,
+                            point1->ctrl1[1] * iht - dy, point1->border[1] * MIN(iwd, iht), point1->fading,
                             point1->density };
       const float pb[7] = { point2->node[0] * iwd - dx, point2->node[1] * iht - dy, point2->ctrl2[0] * iwd - dx,
-                            point2->ctrl2[1] * iht - dy, point2->border[0] * MIN(iwd, iht), point2->hardness,
+                            point2->ctrl2[1] * iht - dy, point2->border[0] * MIN(iwd, iht), point2->fading,
                             point2->density };
       const float pc[7] = { point2->node[0] * iwd - dx, point2->node[1] * iht - dy, point2->ctrl1[0] * iwd - dx,
-                            point2->ctrl1[1] * iht - dy, point2->border[1] * MIN(iwd, iht), point2->hardness,
+                            point2->ctrl1[1] * iht - dy, point2->border[1] * MIN(iwd, iht), point2->fading,
                             point2->density };
       const float pd[7] = { point3->node[0] * iwd - dx, point3->node[1] * iht - dy, point3->ctrl2[0] * iwd - dx,
-                            point3->ctrl2[1] * iht - dy, point3->border[0] * MIN(iwd, iht), point3->hardness,
+                            point3->ctrl2[1] * iht - dy, point3->border[0] * MIN(iwd, iht), point3->fading,
                             point3->density };
       memcpy(p1, pa, sizeof(float) * 7);
       memcpy(p2, pb, sizeof(float) * 7);
@@ -880,7 +881,7 @@ static int _brush_get_pts_border(dt_develop_t *develop, dt_masks_form_t *mask_fo
       memcpy(p4, pd, sizeof(float) * 7);
     }
 
-    // 1st. special case: render abrupt transitions between different opacity and/or hardness values
+    // 1st. special case: render abrupt transitions between different opacity and/or fading values
     if((fabsf(p1[5] - p2[5]) > 0.05f || fabsf(p1[6] - p2[6]) > 0.05f)
        || (start_stamp && n == 2 * node_count - 1))
     {
@@ -1176,6 +1177,44 @@ static void _brush_get_distance(float point_x, float point_y, float radius,
     }
   }
 
+  // we check if we are near a segment of the centerline. This runs BEFORE the outline test:
+  // the outline wraps the whole stroke, so on a thin brush both are within cursor reach at
+  // once, and the segment is the one carrying an action (move it, Ctrl+Click to add a node)
+  // while the outline has none of its own.
+  if(gui_points->points && gui_points->points_count > 2 + corner_count * 3)
+  {
+    // Own accumulator: the source pass above walks a different outline, and its distances
+    // must not veto a segment hit on the form itself.
+    float min_dist_points = FLT_MAX;
+    int current_seg = 1;
+    for(int i = corner_count * 3; i < gui_points->points_count; i++)
+    {
+      // do we change of path segment ?
+      if(gui_points->points[i * 2 + 1] == gui_points->points[current_seg * 6 + 3]
+         && gui_points->points[i * 2] == gui_points->points[current_seg * 6 + 2])
+      {
+        current_seg = (current_seg + 1) % corner_count;
+      }
+      //distance from tested point to current form point
+      const float yy = gui_points->points[i * 2 + 1];
+      const float xx = gui_points->points[i * 2];
+
+      const float dx = point_x - xx;
+      const float dy = point_y - yy;
+      const float dd = (dx * dx) + (dy * dy);
+      if(dd < min_dist_points)
+      {
+        min_dist_points = dd;
+
+        if(current_seg > 0 && dd < radius2)
+        {
+          *near_handle = current_seg - 1;
+        }
+      }
+    }
+    min_dist = MIN(min_dist, min_dist_points);
+  }
+
  // we check if it's inside borders
   if(gui_points->border && gui_points->border_count > 2 + corner_count * 3)
   {
@@ -1202,54 +1241,30 @@ static void _brush_get_distance(float point_x, float point_y, float radius,
       last_y = yy;
     }
 
-    *inside = *inside_border = (nearest != -1 || (crossings & 1));
-  }
-
-  // and we check if we are near_handle a segment
-  if(gui_points->points && gui_points->points_count > 2 + corner_count * 3)
-  {
-    int current_seg = 1;
-    for(int i = corner_count * 3; i < gui_points->points_count; i++)
-    {
-      // do we change of path segment ?
-      if(gui_points->points[i * 2 + 1] == gui_points->points[current_seg * 6 + 3]
-         && gui_points->points[i * 2] == gui_points->points[current_seg * 6 + 2])
-      {
-        current_seg = (current_seg + 1) % corner_count;
-      }
-      //distance from tested point to current form point
-      const float yy = gui_points->points[i * 2 + 1];
-      const float xx = gui_points->points[i * 2];
-
-      const float dx = point_x - xx;
-      const float dy = point_y - yy;
-      const float dd = (dx * dx) + (dy * dy);
-      if(dd < min_dist)
-      {
-        min_dist = dd;
-
-        if(current_seg > 0 && dd < radius2)
-        {
-          *near_handle = current_seg - 1;
-        }
-      }
-    }
+    // Being enclosed by the outline is what makes the stroke hoverable at all, but it is not
+    // a hit on the border itself: only proximity to the outline is, and only where no
+    // centerline segment is closer. Reporting the whole band as border made the segment
+    // unreachable, since the shared hit test answers on the border before the segment.
+    *inside = (nearest != -1 || (crossings & 1));
+    *inside_border = (nearest != -1) && (*near_handle < 0);
   }
 
   *distance = min_dist;
 }
 
-static int _brush_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
+static dt_masks_raster_result_t _brush_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
                                     float **point_buffer, int *point_count,
                                     float **border_buffer, int *border_count,
                                     int use_source, const dt_iop_module_t *module)
 {
-  if(use_source && IS_NULL_PTR(module)) return 1;
+  // Asking for the source outline without a module is a programming error, not an empty shape.
+  if(use_source && IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   const double ioporder = (module) ? module->iop_order : 0.0f;
   const dt_masks_distort_t gui_dist = dt_masks_distort_for_gui(develop);
-  return _brush_get_pts_border(develop, mask_form, ioporder, DT_DEV_TRANSFORM_DIR_ALL,
-                               &gui_dist, point_buffer, point_count, border_buffer,
-                               border_count, NULL, NULL, use_source);
+  return dt_masks_raster_from_status(
+      _brush_get_pts_border(develop, mask_form, ioporder, DT_DEV_TRANSFORM_DIR_ALL,
+                            &gui_dist, point_buffer, point_count, border_buffer,
+                            border_count, NULL, NULL, use_source));
 }
 
 /** find relative position within a brush segment that is closest to the point given by coordinates x and y;
@@ -1335,14 +1350,14 @@ static int _find_closest_handle(dt_masks_form_t *mask_form, dt_masks_form_gui_t 
 }
 
 
-static int _init_hardness(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
-                          const float amount, const dt_masks_increment_t increment, const int flow)
+static int _init_fading(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
+                        const float amount, const dt_masks_increment_t increment, const int flow)
 {
-  const float masks_hardness = dt_masks_get_set_conf_value_with_toast(mask_form, "hardness", amount,
-                                                                      HARDNESS_MIN, HARDNESS_MAX, increment, flow,
-                                                                      _("hardness: %3.2f%%"), 100.0f);
+  const float masks_fading = dt_masks_get_set_conf_value_with_toast(mask_form, "fading", amount,
+                                                                    FADING_MIN, FADING_MAX, increment, flow,
+                                                                    _("fading: %3.2f%%"), 100.0f);
   if(mask_gui->guipoints_count > 0)
-    dt_masks_dynbuf_set(mask_gui->guipoints_payload, -3, masks_hardness);
+    dt_masks_dynbuf_set(mask_gui->guipoints_payload, -3, masks_fading);
   return 1;
 }
 
@@ -1350,7 +1365,7 @@ static int _init_size(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gu
                       const float amount, const dt_masks_increment_t increment, const int flow)
 {
   const float masks_border = dt_masks_get_set_conf_value_with_toast(mask_form, "border", amount,
-                                                                    HARDNESS_MIN, HARDNESS_MAX, increment, flow,
+                                                                    FADING_MIN, FADING_MAX, increment, flow,
                                                                     _("size: %3.2f%%"), 2.f * 100.f);
   if(mask_gui->guipoints_count > 0)
     dt_masks_dynbuf_set(mask_gui->guipoints_payload, -4, masks_border);
@@ -1377,20 +1392,20 @@ static float _brush_get_interaction_value(const dt_masks_form_t *mask_form, dt_m
       if(size <= 0.0f) return NAN;
       return size;
     }
-    case DT_MASKS_INTERACTION_HARDNESS:
+    case DT_MASKS_INTERACTION_FADING:
     {
-      float hardness_sum = 0.0f;
-      int hardness_count = 0;
+      float fading_sum = 0.0f;
+      int fading_count = 0;
 
       for(const GList *point_node = mask_form->points; point_node; point_node = g_list_next(point_node))
       {
         const dt_masks_node_brush_t *node = (const dt_masks_node_brush_t *)point_node->data;
         if(IS_NULL_PTR(node)) continue;
-        hardness_sum += node->hardness;
-        hardness_count++;
+        fading_sum += node->fading;
+        fading_count++;
       }
 
-      return hardness_count > 0 ? hardness_sum / (float)hardness_count : NAN;
+      return fading_count > 0 ? fading_sum / (float)fading_count : NAN;
     }
     default:
       return NAN;
@@ -1422,9 +1437,9 @@ static gboolean _brush_get_gravity_center(dt_develop_t *dev, const dt_masks_form
   return ok;
 }
 
-static int _change_hardness(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
-                            struct dt_iop_module_t *module, int index, const float amount,
-                            const dt_masks_increment_t increment, const int flow);
+static int _change_fading(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
+                          struct dt_iop_module_t *module, int index, const float amount,
+                          const dt_masks_increment_t increment, const int flow);
 static int _change_size(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
                         struct dt_iop_module_t *module, int index, const float amount,
                         const dt_masks_increment_t increment, const int flow);
@@ -1444,17 +1459,17 @@ static float _brush_set_interaction_value(dt_masks_form_t *mask_form, dt_masks_i
     case DT_MASKS_INTERACTION_SIZE:
       if(!_change_size(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
       return _brush_get_interaction_value(mask_form, interaction);
-    case DT_MASKS_INTERACTION_HARDNESS:
-      if(!_change_hardness(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
+    case DT_MASKS_INTERACTION_FADING:
+      if(!_change_fading(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
       return _brush_get_interaction_value(mask_form, interaction);
     default:
       return NAN;
   }
 }
 
-static int _change_hardness(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
-                            struct dt_iop_module_t *module, int index, const float amount,
-                            const dt_masks_increment_t increment, const int flow)
+static int _change_fading(dt_masks_form_t *mask_form, int parentid, dt_masks_form_gui_t *mask_gui,
+                          struct dt_iop_module_t *module, int index, const float amount,
+                          const dt_masks_increment_t increment, const int flow)
 {
   if(IS_NULL_PTR(mask_form) || IS_NULL_PTR(mask_form->points)) return 0;
   int node_index = 0;
@@ -1466,14 +1481,14 @@ static int _change_hardness(dt_masks_form_t *mask_form, int parentid, dt_masks_f
     if(dt_masks_gui_change_affects_selected_node_or_all(mask_gui, node_index))
     {
       dt_masks_node_brush_t *node = (dt_masks_node_brush_t *)node_entry->data;
-      const float current_hardness = node->hardness;
-      result_amount = dt_masks_apply_increment_precomputed(current_hardness, amount, scale_amount, offset_amount, increment);
+      const float current_fading = node->fading;
+      result_amount = dt_masks_apply_increment_precomputed(current_fading, amount, scale_amount, offset_amount, increment);
 
-      node->hardness = CLAMPF(result_amount, HARDNESS_MIN, HARDNESS_MAX);
+      node->fading = CLAMPF(result_amount, FADING_MIN, FADING_MAX);
     }
   }
 
-  dt_masks_get_set_conf_value(mask_form, "hardness", result_amount, HARDNESS_MIN, HARDNESS_MAX, increment, flow);
+  dt_masks_get_set_conf_value(mask_form, "fading", result_amount, FADING_MIN, FADING_MAX, increment, flow);
 
   // we recreate the form points
   dt_masks_gui_form_create(mask_form, mask_gui, index, module);
@@ -1517,7 +1532,7 @@ static int _change_size(dt_masks_form_t *mask_form, int parentid, dt_masks_form_
     }
   }
 
-  dt_masks_get_set_conf_value(mask_form, "border", amount, HARDNESS_MIN, HARDNESS_MAX, increment, flow);
+  dt_masks_get_set_conf_value(mask_form, "border", amount, FADING_MIN, FADING_MAX, increment, flow);
 
   // we recreate the form points
   if(!IS_NULL_PTR(mask_gui) && !IS_NULL_PTR(module)) dt_masks_gui_form_create(mask_form, mask_gui, index, module);
@@ -1538,7 +1553,7 @@ static int _brush_events_mouse_scrolled(struct dt_iop_module_t *module, double w
   
   /* `state` is the caller's raw key state, kept for the callback signature: the property to
    * act on was already resolved from it by dt_masks_scroll_get_interaction(). A brush owns no
-   * rotation, so that mapping falls through and the wheel does nothing here. Size and hardness
+   * rotation, so that mapping falls through and the wheel does nothing here. Size and fading
    * apply to the selected node when there is one, to every node otherwise -- that scoping is
    * the selection's business (dt_masks_gui_change_affects_selected_node_or_all), not the
    * wheel's. */
@@ -1546,9 +1561,9 @@ static int _brush_events_mouse_scrolled(struct dt_iop_module_t *module, double w
   {
     switch(interaction)
     {
-      case DT_MASKS_INTERACTION_HARDNESS:
-        return _init_hardness(mask_form, parentid, mask_gui, scroll_up ? 1.02f : 0.98f,
-                              DT_MASKS_INCREMENT_SCALE, flow);
+      case DT_MASKS_INTERACTION_FADING:
+        return _init_fading(mask_form, parentid, mask_gui, scroll_up ? 1.02f : 0.98f,
+                            DT_MASKS_INCREMENT_SCALE, flow);
       case DT_MASKS_INTERACTION_OPACITY:
         return _init_opacity(mask_form, parentid, mask_gui, scroll_up ? +0.02f : -0.02f,
                              DT_MASKS_INCREMENT_OFFSET, flow);
@@ -1572,9 +1587,9 @@ static int _brush_events_mouse_scrolled(struct dt_iop_module_t *module, double w
     {
       case DT_MASKS_INTERACTION_OPACITY:
         return dt_masks_form_change_opacity(mask_gui->dev, mask_form, parentid, scroll_up, flow);
-      case DT_MASKS_INTERACTION_HARDNESS:
-        return _change_hardness(mask_form, parentid, mask_gui, module, index, scroll_up ? -0.01f : 0.01f,
-                                DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_FADING:
+        return _change_fading(mask_form, parentid, mask_gui, module, index, scroll_up ? -0.01f : 0.01f,
+                              DT_MASKS_INCREMENT_OFFSET, flow);
       case DT_MASKS_INTERACTION_SIZE:
         return _change_size(mask_form, parentid, mask_gui, module, index, scroll_up ? 1.02f : 0.98f,
                             DT_MASKS_INCREMENT_SCALE, flow);
@@ -1592,10 +1607,10 @@ static void _get_pressure_sensitivity(dt_masks_form_gui_t *mask_gui)
   const char *psens = dt_conf_get_string_const("pressure_sensitivity");
   if(!IS_NULL_PTR(psens))
   {
-    if(!strcmp(psens, "hardness (absolute)"))
-      mask_gui->pressure_sensitivity = DT_MASKS_PRESSURE_HARDNESS_ABS;
-    else if(!strcmp(psens, "hardness (relative)"))
-      mask_gui->pressure_sensitivity = DT_MASKS_PRESSURE_HARDNESS_REL;
+    if(!strcmp(psens, "fading (absolute)"))
+      mask_gui->pressure_sensitivity = DT_MASKS_PRESSURE_FADING_ABS;
+    else if(!strcmp(psens, "fading (relative)"))
+      mask_gui->pressure_sensitivity = DT_MASKS_PRESSURE_FADING_REL;
     else if(!strcmp(psens, "opacity (absolute)"))
       mask_gui->pressure_sensitivity = DT_MASKS_PRESSURE_OPACITY_ABS;
     else if(!strcmp(psens, "opacity (relative)"))
@@ -1643,7 +1658,7 @@ static void _add_node_to_segment(struct dt_iop_module_t *module, dt_masks_form_t
   dt_masks_node_brush_t *point1 = (dt_masks_node_brush_t *)next_pt->data;
   new_node->border[0] = point0->border[0] * (1.0f - t) + point1->border[0] * t;
   new_node->border[1] = point0->border[1] * (1.0f - t) + point1->border[1] * t;
-  new_node->hardness = point0->hardness * (1.0f - t) + point1->hardness * t;
+  new_node->fading = point0->fading * (1.0f - t) + point1->fading * t;
   new_node->density = point0->density * (1.0f - t) + point1->density * t;
 
   mask_form->points = g_list_insert(mask_form->points, new_node, selected_segment + 1);
@@ -1686,9 +1701,9 @@ static int _brush_events_button_pressed(struct dt_iop_module_t *module, double w
     {
       // The trick is to use the incremental setting, set to 1.0 to re-use the generic getter/setter without changing value
       float masks_border = dt_masks_get_set_conf_value(mask_form, "border", 1.0f,
-                                                       HARDNESS_MIN, HARDNESS_MAX, TRUE, 1);
-      float masks_hardness = dt_masks_get_set_conf_value(mask_form, "hardness", 1.0f,
-                                                         HARDNESS_MIN, HARDNESS_MAX, TRUE, 1);
+                                                       FADING_MIN, FADING_MAX, TRUE, 1);
+      float masks_fading = dt_masks_get_set_conf_value(mask_form, "fading", 1.0f,
+                                                       FADING_MIN, FADING_MAX, TRUE, 1);
     
       if(dt_modifier_is(state, DT_PRIMARY_MASK | GDK_SHIFT_MASK) || dt_modifier_is(state, GDK_SHIFT_MASK))
       {
@@ -1705,7 +1720,7 @@ static int _brush_events_button_pressed(struct dt_iop_module_t *module, double w
         mask_gui->guipoints_payload = dt_masks_dynbuf_init(400000, "brush guipoints_payload");
       if(IS_NULL_PTR(mask_gui->guipoints_payload)) return 1;
       dt_masks_dynbuf_add_2(mask_gui->guipoints, mask_gui->pos[0], mask_gui->pos[1]);
-      dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, masks_border, masks_hardness);
+      dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, masks_border, masks_fading);
       dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, masks_density, pressure);
       dt_control_mouse_is_painting(TRUE);
       mask_gui->guipoints_count = 1;
@@ -1844,13 +1859,13 @@ static void _apply_pen_pressure(dt_masks_form_gui_t *mask_gui, float *payload_bu
     switch(mask_gui->pressure_sensitivity)
     {
       case DT_MASKS_PRESSURE_BRUSHSIZE_REL:
-        payload[0] = MAX(HARDNESS_MIN, payload[0] * pressure);
+        payload[0] = MAX(FADING_MIN, payload[0] * pressure);
         break;
-      case DT_MASKS_PRESSURE_HARDNESS_ABS:
-        payload[1] = MAX(HARDNESS_MIN, pressure);
+      case DT_MASKS_PRESSURE_FADING_ABS:
+        payload[1] = MAX(FADING_MIN, pressure);
         break;
-      case DT_MASKS_PRESSURE_HARDNESS_REL:
-        payload[1] = MAX(HARDNESS_MIN, payload[1] * pressure);
+      case DT_MASKS_PRESSURE_FADING_REL:
+        payload[1] = MAX(FADING_MIN, payload[1] * pressure);
         break;
       case DT_MASKS_PRESSURE_OPACITY_ABS:
         payload[2] = MAX(0.05f, pressure);
@@ -1880,7 +1895,7 @@ static int _brush_events_button_released(struct dt_iop_module_t *module, double 
 
   // The trick is to use the incremental setting, set to 1.0 to re-use the generic getter/setter without changing value
   float masks_border = dt_masks_get_set_conf_value(mask_form, "border", 1.0f,
-                                                   HARDNESS_MIN, HARDNESS_MAX, TRUE, 1);
+                                                   FADING_MIN, FADING_MAX, TRUE, 1);
 
   if(mask_gui->creation && which == 1)
   {
@@ -1903,10 +1918,10 @@ static int _brush_events_button_released(struct dt_iop_module_t *module, double 
         const float y = dt_masks_dynbuf_get(mask_gui->guipoints, -1) - 0.01f;
         dt_masks_dynbuf_add_2(mask_gui->guipoints, x, y);
         const float border = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -4);
-        const float hardness = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -3);
+        const float fading = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -3);
         const float density = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -2);
         const float pressure = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -1);
-        dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, border, hardness);
+        dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, border, fading);
         dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, density, pressure);
         mask_gui->guipoints_count++;
       }
@@ -1921,7 +1936,7 @@ static int _brush_events_button_released(struct dt_iop_module_t *module, double 
       _apply_pen_pressure(mask_gui, guipoints_payload);
 
       // accuracy level for node elimination, dependent on brush size
-      const float epsilon2 = _get_brush_smoothing() * sqf(MAX(HARDNESS_MIN, masks_border));
+      const float epsilon2 = _get_brush_smoothing() * sqf(MAX(FADING_MIN, masks_border));
 
       // we simplify the path and generate the nodes
       mask_form->points = _brush_ramer_douglas_peucker(guipoints, mask_gui->guipoints_count,
@@ -1973,7 +1988,7 @@ static int _brush_events_button_released(struct dt_iop_module_t *module, double 
       mask_gui->guipoints_count = 0;
 
       dt_masks_set_edit_mode(module, DT_MASKS_EDIT_FULL);
-      dt_masks_iop_update(module);
+      dt_iop_gui_blend_masks_update(module);
 
       dt_masks_change_form_gui(mask_gui->dev, NULL);
     }
@@ -2018,9 +2033,9 @@ static int _brush_events_mouse_moved(struct dt_iop_module_t *module, double widg
     {
       dt_masks_dynbuf_add_2(mask_gui->guipoints, mask_gui->pos[0], mask_gui->pos[1]);
       const float border = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -4);
-      const float hardness = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -3);
+      const float fading = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -3);
       const float density = dt_masks_dynbuf_get(mask_gui->guipoints_payload, -2);
-      dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, border, hardness);
+      dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, border, fading);
       dt_masks_dynbuf_add_2(mask_gui->guipoints_payload, density, pressure);
       mask_gui->guipoints_count++;
       return 1;
@@ -2355,11 +2370,11 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
 
       const float masks_border = dt_masks_get_set_conf_value(mask_form, "border", 1.0f, BORDER_MIN, BORDER_MAX,
                                                              DT_MASKS_INCREMENT_SCALE, 1);
-      const float masks_hardness = dt_masks_get_set_conf_value(mask_form, "hardness", 1.0f, HARDNESS_MIN,
-                                                               HARDNESS_MAX, DT_MASKS_INCREMENT_SCALE, 1);
+      const float masks_fading = dt_masks_get_set_conf_value(mask_form, "fading", 1.0f, FADING_MIN,
+                                                             FADING_MAX, DT_MASKS_INCREMENT_SCALE, 1);
       const float opacity = dt_conf_get_float("plugins/darkroom/masks/opacity");
 
-      const float radius1 = masks_border * masks_hardness * min_iwd_iht;
+      const float radius1 = masks_border * masks_fading * min_iwd_iht;
       const float radius2 = masks_border * min_iwd_iht;
 
       float xpos = mask_gui->pos[0];
@@ -2390,7 +2405,7 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
     }
     else
     {
-      float masks_border = 0.0f, masks_hardness = 0.0f, masks_density = 0.0f;
+      float masks_border = 0.0f, masks_fading = 0.0f, masks_density = 0.0f;
       float radius = 0.0f, oldradius = 0.0f, opacity = 0.0f, oldopacity = 0.0f, pressure = 0.0f;
       int stroked = 1;
 
@@ -2401,17 +2416,17 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
       cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
       cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
       masks_border = guipoints_payload[0];
-      masks_hardness = guipoints_payload[1];
+      masks_fading = guipoints_payload[1];
       masks_density = guipoints_payload[2];
       pressure = guipoints_payload[3];
 
       switch(mask_gui->pressure_sensitivity)
       {
-        case DT_MASKS_PRESSURE_HARDNESS_ABS:
-          masks_hardness = MAX(HARDNESS_MIN, pressure);
+        case DT_MASKS_PRESSURE_FADING_ABS:
+          masks_fading = MAX(FADING_MIN, pressure);
           break;
-        case DT_MASKS_PRESSURE_HARDNESS_REL:
-          masks_hardness = MAX(HARDNESS_MIN, masks_hardness * pressure);
+        case DT_MASKS_PRESSURE_FADING_REL:
+          masks_fading = MAX(FADING_MIN, masks_fading * pressure);
           break;
         case DT_MASKS_PRESSURE_OPACITY_ABS:
           masks_density = MAX(0.05f, pressure);
@@ -2420,7 +2435,7 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
           masks_density = MAX(0.05f, masks_density * pressure);
           break;
         case DT_MASKS_PRESSURE_BRUSHSIZE_REL:
-          masks_border = MAX(HARDNESS_MIN, masks_border * pressure);
+          masks_border = MAX(FADING_MIN, masks_border * pressure);
           break;
         default:
         case DT_MASKS_PRESSURE_OFF:
@@ -2428,7 +2443,7 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
           break;
       }
 
-      radius = oldradius = masks_border * masks_hardness * min_iwd_iht;
+      radius = oldradius = masks_border * masks_fading * min_iwd_iht;
       opacity = oldopacity = masks_density;
 
       cairo_set_line_width(cr,  DT_PIXEL_APPLY_DPI(2 * radius));
@@ -2440,17 +2455,17 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
         cairo_line_to(cr, guipoints[i * 2], guipoints[i * 2 + 1]);
         stroked = 0;
         masks_border = guipoints_payload[i * 4];
-        masks_hardness = guipoints_payload[i * 4 + 1];
+        masks_fading = guipoints_payload[i * 4 + 1];
         masks_density = guipoints_payload[i * 4 + 2];
         pressure = guipoints_payload[i * 4 + 3];
 
         switch(mask_gui->pressure_sensitivity)
         {
-          case DT_MASKS_PRESSURE_HARDNESS_ABS:
-            masks_hardness = MAX(HARDNESS_MIN, pressure);
+          case DT_MASKS_PRESSURE_FADING_ABS:
+            masks_fading = MAX(FADING_MIN, pressure);
             break;
-          case DT_MASKS_PRESSURE_HARDNESS_REL:
-            masks_hardness = MAX(HARDNESS_MIN, masks_hardness * pressure);
+          case DT_MASKS_PRESSURE_FADING_REL:
+            masks_fading = MAX(FADING_MIN, masks_fading * pressure);
             break;
           case DT_MASKS_PRESSURE_OPACITY_ABS:
             masks_density = MAX(0.05f, pressure);
@@ -2459,7 +2474,7 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
             masks_density = MAX(0.05f, masks_density * pressure);
             break;
           case DT_MASKS_PRESSURE_BRUSHSIZE_REL:
-            masks_border = MAX(HARDNESS_MIN, masks_border * pressure);
+            masks_border = MAX(FADING_MIN, masks_border * pressure);
             break;
           default:
           case DT_MASKS_PRESSURE_OFF:
@@ -2467,7 +2482,7 @@ static void _brush_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_fo
             break;
         }
 
-        radius = masks_border * masks_hardness * min_iwd_iht;
+        radius = masks_border * masks_fading * min_iwd_iht;
         opacity = masks_density;
 
         if(radius != oldradius || opacity != oldopacity)
@@ -2746,7 +2761,10 @@ static int _get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pi
   {
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
-    *width = *height = *offset_x = *offset_y = 0;
+    *width = 0;
+  *height = 0;
+  *offset_x = 0;
+  *offset_y = 0;
     return 0;
   }
   _brush_bounding_box(points, border, node_count, points_count, width, height, offset_x, offset_y);
@@ -2756,30 +2774,40 @@ static int _get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pi
   return 0;
 }
 
-static int _brush_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _brush_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
                                   dt_dev_pixelpipe_iop_t *piece,
                                   dt_masks_form_t *mask_form, int *width, int *height, int *offset_x, int *offset_y)
 {
-  return _get_area(module, pipe, piece, mask_form, width, height, offset_x, offset_y, 1);
+  *width = 0;
+  *height = 0;
+  *offset_x = 0;
+  *offset_y = 0;
+  return dt_masks_raster_from_status(
+      _get_area(module, pipe, piece, mask_form, width, height, offset_x, offset_y, 1));
 }
 
-static int _brush_get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _brush_get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                            const dt_dev_pixelpipe_iop_t *const piece,
                            dt_masks_form_t *const mask_form, int *width, int *height, int *offset_x,
                            int *offset_y)
 {
-  return _get_area(module, pipe, piece, mask_form, width, height, offset_x, offset_y, 0);
+  *width = 0;
+  *height = 0;
+  *offset_x = 0;
+  *offset_y = 0;
+  return dt_masks_raster_from_status(
+      _get_area(module, pipe, piece, mask_form, width, height, offset_x, offset_y, 0));
 }
 
 /** we write a falloff segment */
 static void _brush_falloff(float *const restrict buffer, int segment_start[2], int segment_end[2],
-                           int offset_x, int offset_y, int buffer_width, float hardness, float density)
+                           int offset_x, int offset_y, int buffer_width, float fading, float density)
 {
   // segment length
   const int segment_length = sqrt((segment_end[0] - segment_start[0]) * (segment_end[0] - segment_start[0])
                                   + (segment_end[1] - segment_start[1]) * (segment_end[1] - segment_start[1]))
                              + 1;
-  const int solid_length = (int)segment_length * hardness;
+  const int solid_length = (int)segment_length * fading;
   const int soft_length = segment_length - solid_length;
 
   const float segment_dx = segment_end[0] - segment_start[0];
@@ -2807,12 +2835,17 @@ static void _brush_falloff(float *const restrict buffer, int segment_start[2], i
  *
  * The buffer is returned zero-initialized and filled only in the falloff region.
  */
-static int _brush_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _brush_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                            const dt_dev_pixelpipe_iop_t *const piece,
                            dt_masks_form_t *const mask_form,
                            float **buffer, int *width, int *height, int *offset_x, int *offset_y)
 {
-  if(IS_NULL_PTR(module)) return 1;
+  *buffer = NULL;
+  *width = 0;
+  *height = 0;
+  *offset_x = 0;
+  *offset_y = 0;
+  if(IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   double timer_start = 0.0;
   double timer_step_start = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) timer_start = timer_step_start = dt_get_wtime();
@@ -2828,7 +2861,7 @@ static int _brush_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
     dt_pixelpipe_cache_free_align(payload);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -2846,8 +2879,11 @@ static int _brush_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe
     dt_pixelpipe_cache_free_align(border);
     dt_pixelpipe_cache_free_align(payload);
     *buffer = NULL;
-    *width = *height = *offset_x = *offset_y = 0;
-    return 0;
+    *width = 0;
+  *height = 0;
+  *offset_x = 0;
+  *offset_y = 0;
+    return DT_MASKS_RASTER_EMPTY;
   }
   const gboolean use_sparse = (pipe->mask_rasterization_step > 1);
   const int sparse_step = pipe->mask_rasterization_step;
@@ -2866,7 +2902,7 @@ static int _brush_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
     dt_pixelpipe_cache_free_align(payload);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
   memset(*buffer, 0, sizeof(float) * buffer_size);
 
@@ -2923,18 +2959,18 @@ static int _brush_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe
     dt_print(DT_DEBUG_MASKS, "[masks %s] brush fill buffer took %0.04f sec\n", mask_form->name,
              dt_get_wtime() - timer_start);
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 /** we write a falloff segment respecting limits of buffer */
 static inline void _brush_falloff_roi(float *buffer, const int *segment_start, const int *segment_end,
-                                      int buffer_width, int buffer_height, float hardness, float density)
+                                      int buffer_width, int buffer_height, float fading, float density)
 {
   // segment length (increase by 1 to avoid division-by-zero special case handling)
   const int segment_length = sqrt((segment_end[0] - segment_start[0]) * (segment_end[0] - segment_start[0])
                                   + (segment_end[1] - segment_start[1]) * (segment_end[1] - segment_start[1]))
                              + 1;
-  const int solid_length = hardness * segment_length;
+  const int solid_length = fading * segment_length;
 
   const float step_x = (float)(segment_end[0] - segment_start[0]) / (float)segment_length;
   const float step_y = (float)(segment_end[1] - segment_start[1]) / (float)segment_length;
@@ -2987,13 +3023,13 @@ static inline void _brush_falloff_roi(float *buffer, const int *segment_start, c
  *
  * The buffer is assumed pre-zeroed. Points are scaled/shifted into ROI space before stamping.
  */
-static int _brush_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _brush_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                                const dt_dev_pixelpipe_iop_t *const piece,
                                dt_masks_form_t *const mask_form, const dt_iop_roi_t *roi, float *buffer,
                                dt_iop_roi_t *touched)
 {
   dt_masks_touched_none(touched);
-  if(IS_NULL_PTR(module)) return 1;
+  if(IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   double timer_start = 0.0;
   double timer_step_start = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) timer_start = timer_step_start = dt_get_wtime();
@@ -3018,7 +3054,7 @@ static int _brush_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixel
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
     dt_pixelpipe_cache_free_align(payload);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -3035,7 +3071,7 @@ static int _brush_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixel
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
     dt_pixelpipe_cache_free_align(payload);
-    return 0;
+    return DT_MASKS_RASTER_EMPTY;
   }
 
   // we shift and scale down brush and border
@@ -3074,7 +3110,7 @@ static int _brush_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixel
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
     dt_pixelpipe_cache_free_align(payload);
-    return 0;
+    return DT_MASKS_RASTER_EMPTY;
   }
 
   // now we fill the falloff
@@ -3163,7 +3199,7 @@ static int _brush_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixel
              dt_get_wtime() - timer_start);
   }
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 static void _brush_sanitize_config(dt_masks_type_t type)

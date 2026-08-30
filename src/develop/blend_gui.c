@@ -65,6 +65,7 @@
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/masks.h"
+#include "develop/masks_group.h"   // dt_masks_group_set_member_operation()
 #include "develop/masks_gui.h"
 #include "widgets/button.h"
 #include "widgets/gradientslider.h"
@@ -1747,7 +1748,7 @@ static void _blendop_masks_apply_and_commit(dt_iop_module_t *module)
   if(IS_NULL_PTR(module)) return;
   if(IS_NULL_PTR(module->dev)) return;
 
-  dt_masks_iop_update(module);
+  dt_iop_gui_blend_masks_update(module);
   dt_dev_add_history_item(module->dev, module, TRUE, TRUE);
   dt_iop_gui_update_header(module);
   dt_control_queue_redraw_center();
@@ -2088,28 +2089,11 @@ static void _blendop_masks_group_operation_callback(GtkWidget *menu_item, gpoint
   const int parentid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-parentid"));
   const dt_masks_state_t state = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(menu_item), "blend-state"));
 
-  // apply_operation() below mutates the group_entry in place, memory owned by the parent
-  // group -- touch the parent before resolving the entry, or a shared parent's group_entry
-  // gets mutated behind the back of a snapshot that still references it.
-  dt_masks_form_t *parent_form = dt_masks_get_from_id(module->dev, parentid);
-  if(IS_NULL_PTR(parent_form) || !(parent_form->type & DT_MASKS_GROUP)) return;
-  parent_form = dt_masks_cow_touch(module->dev, parent_form);
-
-  dt_masks_form_group_t *group_entry = NULL;
-  for(GList *group_node = parent_form->points; group_node; group_node = g_list_next(group_node))
-  {
-    dt_masks_form_group_t *entry = (dt_masks_form_group_t *)group_node->data;
-    if(entry && entry->formid == formid)
-    {
-      group_entry = entry;
-      break;
-    }
-  }
-  if(IS_NULL_PTR(group_entry)) return;
-
-  const int old_state = group_entry->state;
-  apply_operation(group_entry, state);
-  if(group_entry->state == old_state) return;
+  /* The touch-then-resolve dance this used to spell out by hand -- and which every other caller
+   * of it got wrong -- now lives inside the module, where it cannot be omitted. UNCHANGED means
+   * the row already had this operator, so there is nothing to commit. */
+  if(dt_masks_group_set_member_operation(module->dev, parentid, formid, state, NULL) != DT_MASKS_OK)
+    return;
 
   _blendop_masks_apply_and_commit(module);
   DT_DEBUG_CONTROL_SIGNAL_RAISE(dt_control_signal_get_global(), DT_SIGNAL_MASK_CHANGED, formid, parentid,
@@ -2296,21 +2280,15 @@ static GtkWidget *_blendop_masks_group_ctx_menu(dt_iop_gui_blend_data_t *bd, dt_
   GtkWidget *menu = gtk_menu_new();
   gtk_style_context_add_class(gtk_widget_get_style_context(menu), "dt-masks-context-menu");
 
-  // Same shape-parameter sliders (size/fading/rotation/opacity) as the darkroom canvas's
-  // own shape context menu (dt_masks_create_menu). Touch the parent group before resolving
-  // the entry pointer, same rule as _blendop_masks_group_operation_callback: the sliders
-  // mutate this entry in place across the whole drag/scroll interaction.
-  dt_masks_form_t *parent_group = dt_masks_get_from_id(module->dev, parentid);
-  if(!IS_NULL_PTR(parent_group) && (parent_group->type & DT_MASKS_GROUP))
-    parent_group = dt_masks_cow_touch(module->dev, parent_group);
-  dt_masks_form_group_t *op_form = (!IS_NULL_PTR(parent_group) && (parent_group->type & DT_MASKS_GROUP))
-                                       ? dt_masks_form_group_find_entry(parent_group, formid, NULL)
-                                       : NULL;
+  // Same shape-parameter sliders (size/fading/rotation/opacity) as the darkroom canvas's own
+  // shape context menu (dt_masks_create_menu). The sliders name the row by identity and let the
+  // write API copy-on-write per step, so this no longer has to touch the parent group up front --
+  // which never worked anyway once a slider started committing history mid-drag.
   dt_masks_form_t *form = dt_masks_get_from_id(module->dev, formid);
 
-  if(!IS_NULL_PTR(op_form) && !IS_NULL_PTR(form))
+  if(!IS_NULL_PTR(form))
   {
-    dt_masks_gui_populate_interaction_sliders(menu, module->dev, form, op_form, module->dev->form_gui, module);
+    dt_masks_gui_populate_interaction_sliders(menu, module->dev, form, parentid, module->dev->form_gui, module);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
   }
 
@@ -3712,7 +3690,7 @@ void dt_iop_gui_init_contours(GtkBox *blendw, dt_iop_module_t *module)
   gtk_box_pack_start(blendw, bd->contrast_slider, FALSE, FALSE, 0);
 }
 
-void dt_masks_iop_update(dt_iop_module_t *module)
+void dt_iop_gui_blend_masks_update(dt_iop_module_t *module)
 {
   dt_iop_gui_blend_data_t *bd = module->gui ? (dt_iop_gui_blend_data_t *)module->gui->blend_data : NULL;
   dt_develop_blend_params_t *bp = module->blend_params;
@@ -3803,7 +3781,7 @@ void dt_masks_iop_update(dt_iop_module_t *module)
 /* Property columns, in display order. DT_MASKS_INTERACTION_UNDEF ("nothing") is a column like
  * the others -- it is how a row is unmapped -- and comes last, after what it opts out of. */
 static const dt_masks_interaction_t _blendop_scroll_columns[]
-    = { DT_MASKS_INTERACTION_SIZE, DT_MASKS_INTERACTION_HARDNESS, DT_MASKS_INTERACTION_OPACITY,
+    = { DT_MASKS_INTERACTION_SIZE, DT_MASKS_INTERACTION_FADING, DT_MASKS_INTERACTION_OPACITY,
         DT_MASKS_INTERACTION_ROTATION, DT_MASKS_INTERACTION_UNDEF };
 
 static void _blendop_masks_scroll_toggled(GtkToggleButton *button, gpointer user_data)
@@ -3873,7 +3851,7 @@ static GtkWidget *_blendop_masks_create_scroll_grid(void)
     gtk_widget_set_halign(header, GTK_ALIGN_START);
     gtk_widget_set_valign(header, GTK_ALIGN_END);
     /* Spanning, not one cell: a label rotated 45 degrees requests the width of its slanted
-     * bounding box (measured: 102px for "Hardness/Curvature" against 24px for a radio), and a
+     * bounding box (measured: 102px for "Fading/Curvature" against 24px for a radio), and a
      * single-cell title makes its whole column that wide. Letting each title span the columns
      * to its right -- the direction it leans into, whose header space is free -- constrains the
      * sum instead of one column, and every column falls back to the width of its radio. */
@@ -4645,7 +4623,7 @@ void dt_iop_gui_update_blending(dt_iop_module_t *module)
       || _blendif_are_output_channels_used(module->blend_params, bd->csp);
 
   dt_iop_gui_update_blendif(module);
-  dt_masks_iop_update(module);
+  dt_iop_gui_blend_masks_update(module);
   dt_iop_gui_update_raster(module);
 
   /* sync page states from mask mode */

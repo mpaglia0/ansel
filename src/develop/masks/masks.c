@@ -52,6 +52,8 @@
 #include "caches/pixelpipe_cache_alloc.h"
 #include "develop/masks.h"
 #include "history/notify.h"
+#include "develop/blend_gui.h"   // dt_iop_gui_blend_masks_update()
+#include "develop/masks_group.h"
 #include "develop/masks/masks_functions.h"
 #include "develop/masks/masks_touched.h"
 #include "develop/develop.h"
@@ -211,33 +213,41 @@ int dt_masks_form_duplicate_in_group(dt_develop_t *develop, int group_id, int fo
   return nid;
 }
 
-int dt_masks_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
+dt_masks_raster_result_t dt_masks_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
                                float **point_buffer, int *point_count,
                                float **border_buffer, int *border_count,
                                int source, dt_iop_module_t *module)
 {
+  /* A shape type with no outline builder is a programming error, not an empty outline. */
   if(mask_form->functions && mask_form->functions->get_points_border)
     return mask_form->functions->get_points_border(develop, mask_form, point_buffer, point_count,
                                                    border_buffer, border_count, source, module);
-  return 1;
+  return DT_MASKS_RASTER_ERROR;
 }
 
-int dt_masks_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+dt_masks_raster_result_t dt_masks_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
                       dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *mask_form,
                       int *area_width, int *area_height, int *area_pos_x, int *area_pos_y)
 {
+  *area_width = 0;
+  *area_height = 0;
+  *area_pos_x = 0;
+  *area_pos_y = 0;
   if(mask_form->functions && mask_form->functions->get_area)
     return mask_form->functions->get_area(module, pipe, piece, mask_form, area_width, area_height,
                                           area_pos_x, area_pos_y);
-  return 1;
+  return DT_MASKS_RASTER_ERROR;
 }
 
-int dt_masks_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+dt_masks_raster_result_t dt_masks_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
                              dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *mask_form,
                              int *area_width, int *area_height,
                              int *area_pos_x, int *area_pos_y)
 {
-  *area_width = *area_height = *area_pos_x = *area_pos_y = 0;
+  *area_width = 0;
+  *area_height = 0;
+  *area_pos_x = 0;
+  *area_pos_y = 0;
 
   // must be a clone form
   if(mask_form->type & DT_MASKS_CLONE)
@@ -246,7 +256,9 @@ int dt_masks_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
       return mask_form->functions->get_source_area(module, pipe, piece, mask_form, area_width, area_height,
                                                    area_pos_x, area_pos_y);
   }
-  return 1;
+
+  /* A form that is not a clone has no source area. That is an absence, not a failure. */
+  return DT_MASKS_RASTER_EMPTY;
 }
 
 int dt_masks_version(void)
@@ -985,7 +997,7 @@ void dt_masks_form_delete(dt_develop_t *dev, struct dt_iop_module_t *module, dt_
     if(removed)
     if(removed && !IS_NULL_PTR(module))
     {
-      dt_masks_iop_update(module);
+      dt_iop_gui_blend_masks_update(module);
 
     }
     if(removed) dt_masks_form_update_gravity_center(dev, group_form);
@@ -1021,7 +1033,7 @@ void dt_masks_form_delete(dt_develop_t *dev, struct dt_iop_module_t *module, dt_
       if(form_id == iop_module->blend_params->mask_id)
       {
         iop_module->blend_params->mask_id = 0;
-        dt_masks_iop_update(iop_module);
+        dt_iop_gui_blend_masks_update(iop_module);
       }
       else
       {
@@ -1047,7 +1059,7 @@ void dt_masks_form_delete(dt_develop_t *dev, struct dt_iop_module_t *module, dt_
           }
           if(removed)
           {
-            dt_masks_iop_update(iop_module);
+            dt_iop_gui_blend_masks_update(iop_module);
 
             if(IS_NULL_PTR(iop_group->points)) dt_masks_form_delete(dev, iop_module, NULL, iop_group);
           }
@@ -1384,25 +1396,268 @@ void dt_masks_cleanup_unused(dt_develop_t *develop)
 /* The two rasterisation dispatchers. They were inline in masks.h, which forced the
  * per-shape function table to be public; a per-buffer call is not a per-pixel cost,
  * so the inline bought nothing and the table is private now. */
-int dt_masks_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+dt_masks_raster_result_t dt_masks_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                       const dt_dev_pixelpipe_iop_t *const piece,
                       dt_masks_form_t *const form,
                       float **buffer, int *width, int *height, int *posx, int *posy)
 {
+  *buffer = NULL;
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
+  /* A shape type with no rasteriser is a programming error, not an empty shape. */
   return (form->functions && form->functions->get_mask)
     ? form->functions->get_mask(module, pipe, piece, form, buffer, width, height, posx, posy)
-    : 1;
+    : DT_MASKS_RASTER_ERROR;
 }
 
-int dt_masks_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
-                          const dt_dev_pixelpipe_iop_t *const piece,
-                          dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer,
-                          dt_iop_roi_t *touched)
+dt_masks_raster_result_t dt_masks_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+                                               const dt_dev_pixelpipe_iop_t *const piece,
+                                               dt_masks_form_t *const form, const dt_iop_roi_t *roi,
+                                               float *buffer, dt_iop_roi_t *touched)
 {
   dt_masks_touched_none(touched);
+  /* A shape type with no rasteriser is a programming error, not an empty shape: report ERROR so
+   * the fold refuses to publish a buffer nobody wrote. */
   return (form->functions && form->functions->get_mask_roi)
     ? form->functions->get_mask_roi(module, pipe, piece, form, roi, buffer, touched)
-    : 1;
+    : DT_MASKS_RASTER_ERROR;
+}
+
+
+/* ==========================================================================================
+ * The read side of the group API (develop/masks_group.h).
+ *
+ * All three are thread-neutral by construction: they read only the object they are handed and
+ * take no lock. That is what lets the pipeline call them on a snapshot and the GUI call them on
+ * the live list with the same code.
+ * ========================================================================================== */
+
+gboolean dt_masks_form_get_info(const dt_masks_form_t *form, dt_masks_form_info_t *out)
+{
+  /* `out' is left untouched on FALSE so a caller may keep a default in it across a failed call --
+   * the dt_colorspaces_profile_at() convention. */
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(out)) return FALSE;
+
+  out->formid = form->formid;
+  out->type = form->type;
+  out->version = form->version;
+  out->is_group = (form->type & DT_MASKS_GROUP) != 0;
+  out->is_retouch = (form->type & DT_MASKS_IS_RETOUCHE) != 0;
+  /* Not recursive: the group's own rows, which is what compositing order is defined over. */
+  out->member_count = out->is_group ? g_list_length(form->points) : 0;
+  g_strlcpy(out->name, form->name, sizeof(out->name));
+  return TRUE;
+}
+
+/* One place builds the value type callers see, so a row is never copied out field by field at
+ * three separate call sites -- each of which would have to be found again the day
+ * dt_masks_member_t grows a field. @p entry may be NULL: the member comes back zeroed but KEEPS
+ * its index, for the reason dt_masks_group_copy_members() spells out below. */
+static void _member_from_entry(dt_masks_member_t *const out, const dt_masks_form_group_t *const entry,
+                               const guint index)
+{
+  if(IS_NULL_PTR(out)) return;
+
+  out->index = index;
+
+  if(IS_NULL_PTR(entry))
+  {
+    out->formid = 0;
+    out->parentid = 0;
+    out->state = DT_MASKS_STATE_NONE;
+    out->opacity = 0.0f;
+    return;
+  }
+
+  out->formid = entry->formid;
+  out->parentid = entry->parentid;
+  out->state = (dt_masks_state_t)entry->state;
+  out->opacity = entry->opacity;
+}
+
+
+/* Resolve one membership row from (group, formid), the identity the whole write API is keyed on.
+ *
+ * @p touch says whether the caller is about to MUTATE the row, and the asymmetry is the point:
+ *  - a writer must touch FIRST and resolve from what the touch returned, because cloning a group
+ *    clones its membership blocks with it -- a row resolved before the touch belongs to the copy
+ *    that was just abandoned, and the mutation lands in memory nothing reads;
+ *  - a reader must NOT touch. Copy-on-write is for writers; touching on a read would clone a
+ *    shared group every time the GUI merely asks what a shape's opacity is.
+ */
+static dt_masks_form_group_t *_resolve_member(dt_develop_t *dev, const int group_id, const int formid,
+                                              const gboolean touch, guint *const out_index)
+{
+  if(!IS_NULL_PTR(out_index)) *out_index = 0;
+
+  dt_masks_form_t *group = dt_masks_get_from_id(dev, group_id);
+  if(IS_NULL_PTR(group) || !(group->type & DT_MASKS_GROUP)) return NULL;
+
+  if(touch) group = dt_masks_cow_touch(dev, group);
+  if(IS_NULL_PTR(group)) return NULL;
+
+  guint index = 0;
+  for(GList *node = group->points; node; node = g_list_next(node), index++)
+  {
+    dt_masks_form_group_t *const entry = (dt_masks_form_group_t *)node->data;
+    if(IS_NULL_PTR(entry) || entry->formid != formid) continue;
+
+    if(!IS_NULL_PTR(out_index)) *out_index = index;
+    return entry;
+  }
+
+  return NULL;
+}
+
+
+guint dt_masks_group_copy_members(const dt_masks_form_t *group, dt_masks_member_t *out,
+                                  const guint out_max)
+{
+  /* Refusing anything that is not a group is what keeps the polymorphic ->points unreachable from
+   * outside: for a group it holds membership rows, for every other form it holds geometry nodes,
+   * and the only thing telling them apart is this bit. */
+  if(IS_NULL_PTR(group) || !(group->type & DT_MASKS_GROUP)) return 0;
+
+  guint total = 0;
+  for(const GList *node = group->points; node; node = g_list_next(node), total++)
+  {
+    if(IS_NULL_PTR(out) || total >= out_max) continue;
+
+    /* A row that cannot be read STILL CONSUMES ITS INDEX. Position is the compositing order and
+     * the index into retouch's rt_forms[] and spots' clone_algo[], both persisted in the user's
+     * database, so dropping a row here would silently re-pair every later shape with the wrong
+     * algorithm. _member_from_entry() zeroes it instead, index kept. */
+    _member_from_entry(&out[total], (const dt_masks_form_group_t *)node->data, total);
+  }
+
+  /* The TOTAL, always -- a caller that passed a short buffer needs to know it was short, and a
+   * caller that passed NULL is asking for exactly this. */
+  return total;
+}
+
+const char *dt_masks_type_name(const dt_masks_type_t type)
+{
+  /* dt_masks_type_t is a bit field, not an enumeration of alternatives, so first match wins and
+   * this order is load-bearing. It is the order the conf-key builder has always used.
+   *
+   * These tokens are PERSISTED: they build plugins/darkroom/<plugin>/<type>/<feature>, declared in
+   * data/anselconfig.xml.in. "polygon" can never become "path" -- a key outside confgen reads 0,
+   * which would silently reset the user's fading. */
+  if(type & DT_MASKS_CIRCLE) return "circle";
+  else if(type & DT_MASKS_POLYGON) return "polygon";
+  else if(type & DT_MASKS_ELLIPSE) return "ellipse";
+  else if(type & DT_MASKS_GRADIENT) return "gradient";
+  else if(type & DT_MASKS_BRUSH) return "brush";
+  else if(type & DT_MASKS_GROUP) return "group";
+  else return "unknown";
+}
+
+
+dt_masks_result_t dt_masks_group_set_member_operation(dt_develop_t *dev, const int group_id,
+                                                      const int formid, const dt_masks_state_t operation,
+                                                      dt_masks_member_t *out)
+{
+  if(IS_NULL_PTR(dev)) return DT_MASKS_INVALID;
+  if(operation != DT_MASKS_STATE_INVERSE && !(operation & DT_MASKS_STATE_IS_COMBINE_OP))
+    return DT_MASKS_INVALID;
+
+  guint index = 0;
+  dt_masks_form_group_t *const entry = _resolve_member(dev, group_id, formid, TRUE, &index);
+  if(IS_NULL_PTR(entry)) return DT_MASKS_NOT_FOUND;
+
+  const int before = entry->state;
+  if(operation == DT_MASKS_STATE_INVERSE)
+    entry->state ^= DT_MASKS_STATE_INVERSE;
+  else
+    entry->state = (entry->state & ~DT_MASKS_STATE_IS_COMBINE_OP) | operation;
+
+  _member_from_entry(out, entry, index);
+  return (entry->state == before) ? DT_MASKS_UNCHANGED : DT_MASKS_OK;
+}
+
+
+/* Depth-first walk for the group that references @p formid. @p grp NULL means "start from every
+ * top-level group in dev->forms". @p max_depth is a cycle brake, not a modelling limit: a group
+ * referencing an ancestor of itself would otherwise recurse forever, and nothing in the data model
+ * forbids one being written to XMP. */
+static dt_masks_form_t *_find_holder(dt_develop_t *dev, dt_masks_form_t *grp, const int formid,
+                                     const int max_depth)
+{
+  if(max_depth <= 0) return NULL;
+
+  if(IS_NULL_PTR(grp))
+  {
+    for(GList *forms = dev->forms; forms; forms = g_list_next(forms))
+    {
+      dt_masks_form_t *const form = (dt_masks_form_t *)forms->data;
+      if(IS_NULL_PTR(form) || !(form->type & DT_MASKS_GROUP)) continue;
+
+      dt_masks_form_t *const found = _find_holder(dev, form, formid, max_depth - 1);
+      if(!IS_NULL_PTR(found)) return found;
+    }
+    return NULL;
+  }
+
+  for(GList *points = grp->points; points; points = g_list_next(points))
+  {
+    const dt_masks_form_group_t *const point = (const dt_masks_form_group_t *)points->data;
+    if(IS_NULL_PTR(point)) continue;
+    if(point->formid == formid) return grp;
+
+    dt_masks_form_t *const sub = dt_masks_get_from_id(dev, point->formid);
+    if(IS_NULL_PTR(sub) || !(sub->type & DT_MASKS_GROUP)) continue;
+
+    dt_masks_form_t *const found = _find_holder(dev, sub, formid, max_depth - 1);
+    if(!IS_NULL_PTR(found)) return found;
+  }
+  return NULL;
+}
+
+
+int dt_masks_group_find_holder(dt_develop_t *dev, const int formid)
+{
+  if(IS_NULL_PTR(dev) || formid == 0) return 0;
+
+  const dt_masks_form_t *const grp = _find_holder(dev, NULL, formid, 32);
+  return IS_NULL_PTR(grp) ? 0 : grp->formid;
+}
+
+
+dt_masks_result_t dt_masks_group_get_member(dt_develop_t *dev, const int group_id, const int formid,
+                                            dt_masks_member_t *out)
+{
+  if(IS_NULL_PTR(dev)) return DT_MASKS_INVALID;
+
+  guint index = 0;
+  const dt_masks_form_group_t *const entry = _resolve_member(dev, group_id, formid, FALSE, &index);
+  if(IS_NULL_PTR(entry)) return DT_MASKS_NOT_FOUND;
+
+  _member_from_entry(out, entry, index);
+  return DT_MASKS_OK;
+}
+
+
+dt_masks_result_t dt_masks_group_set_member_opacity(dt_develop_t *dev, const int group_id, const int formid,
+                                                    const float opacity, dt_masks_member_t *out)
+{
+  if(IS_NULL_PTR(dev)) return DT_MASKS_INVALID;
+
+  /* Reject NaN rather than clamp it. CLAMPF() is written as a pair of ordered comparisons, and
+   * every comparison against NaN is false, so it would quietly return the LOW bound: a NaN
+   * arriving from a caller's own arithmetic would blank the shape instead of being reported. */
+  if(!isfinite(opacity)) return DT_MASKS_INVALID;
+
+  guint index = 0;
+  dt_masks_form_group_t *const entry = _resolve_member(dev, group_id, formid, TRUE, &index);
+  if(IS_NULL_PTR(entry)) return DT_MASKS_NOT_FOUND;
+
+  const float before = entry->opacity;
+  entry->opacity = CLAMPF(opacity, 0.0f, 1.0f);
+
+  _member_from_entry(out, entry, index);
+  return (entry->opacity == before) ? DT_MASKS_UNCHANGED : DT_MASKS_OK;
 }
 
 // clang-format off

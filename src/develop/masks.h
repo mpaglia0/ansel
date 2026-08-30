@@ -84,7 +84,7 @@ GList dev->forms
   |        | dt_masks_form_t  --------------------> dt_masks_type_t type; const dt_masks_functions_t *functions;
   |              |                                   float source[2]; char name[128]; int formid; int version;
   |              { GList *points;
-  |                  | dt_masks_node_brush_t ----->  float node[2]; float pressure; float hardness; float size;
+  |                  | dt_masks_node_brush_t ----->  float node[2]; float pressure; float fading; float size;
   |                  |                                dt_masks_pressure_sensitivity_t pressure_sensitivity;
   |                  | dt_masks_node_brush_t -----> ...
   |                  |
@@ -109,6 +109,7 @@ GList dev->forms
 #ifndef DT_DEVELOP_MASKS_H
 #define DT_DEVELOP_MASKS_H
 
+#include "develop/masks_types.h"   // the vocabulary: shape kinds, states, and the value types
 #include "system/atomic.h"
 #include "common/logging.h"
 #include "system/macros.h"
@@ -134,31 +135,7 @@ extern "C" {
 
 #define DEVELOP_MASKS_VERSION (6)
 
-/**forms types */
-typedef enum dt_masks_type_t
-{
-  DT_MASKS_NONE = 0, // keep first
-  DT_MASKS_CIRCLE = 1 << 0,
-  DT_MASKS_POLYGON = 1 << 1,
-  DT_MASKS_GROUP = 1 << 2,
-  DT_MASKS_CLONE = 1 << 3,
-  DT_MASKS_GRADIENT = 1 << 4,
-  DT_MASKS_ELLIPSE = 1 << 5,
-  DT_MASKS_BRUSH = 1 << 6,
-  DT_MASKS_NON_CLONE = 1 << 7,
 
-  DT_MASKS_ALL = DT_MASKS_CIRCLE | DT_MASKS_POLYGON | DT_MASKS_GROUP |
-                 DT_MASKS_GRADIENT | DT_MASKS_ELLIPSE | DT_MASKS_BRUSH,
-
-  DT_MASKS_IS_CLOSED_SHAPE = DT_MASKS_CIRCLE | DT_MASKS_ELLIPSE | DT_MASKS_POLYGON,
-  DT_MASKS_IS_OPEN_SHAPE   = DT_MASKS_ALL & ~DT_MASKS_IS_CLOSED_SHAPE,
-  
-  DT_MASKS_IS_RETOUCHE = DT_MASKS_CLONE | DT_MASKS_NON_CLONE,
-
-  DT_MASKS_IS_PATH_SHAPE   = DT_MASKS_POLYGON | DT_MASKS_BRUSH,
-  DT_MASKS_IS_PRIMITIVE_SHAPE = DT_MASKS_CIRCLE | DT_MASKS_ELLIPSE | DT_MASKS_GRADIENT
-
-} dt_masks_type_t;
 
 /**masts states */
 
@@ -172,20 +149,7 @@ typedef enum dt_masks_event_t
   DT_MASKS_EVENT_CHANGE = 5,
   DT_MASKS_EVENT_RESET  = 6
 } dt_masks_event_t;
-typedef enum dt_masks_state_t
-{
-  DT_MASKS_STATE_NONE = 0,
-  DT_MASKS_STATE_USE = 1 << 0,
-  DT_MASKS_STATE_SHOW = 1 << 1,
-  DT_MASKS_STATE_INVERSE = 1 << 2,
-  DT_MASKS_STATE_UNION = 1 << 3,
-  DT_MASKS_STATE_INTERSECTION = 1 << 4,
-  DT_MASKS_STATE_DIFFERENCE = 1 << 5,
-  DT_MASKS_STATE_EXCLUSION = 1 << 6,
-  DT_MASKS_STATE_NOOP = 1 << 7,
 
-  DT_MASKS_STATE_IS_COMBINE_OP = DT_MASKS_STATE_UNION | DT_MASKS_STATE_INTERSECTION | DT_MASKS_STATE_DIFFERENCE | DT_MASKS_STATE_EXCLUSION
-} dt_masks_state_t;
 
 typedef enum dt_masks_points_states_t
 {
@@ -199,25 +163,15 @@ typedef enum dt_masks_gradient_states_t
   DT_MASKS_GRADIENT_STATE_SIGMOIDAL = 2
 } dt_masks_gradient_states_t;
 
-typedef enum dt_masks_increment_t
-{
-  DT_MASKS_INCREMENT_ABSOLUTE = 0,
-  DT_MASKS_INCREMENT_SCALE = 1,
-  DT_MASKS_INCREMENT_OFFSET = 2
-} dt_masks_increment_t;
 
-typedef enum dt_masks_edit_mode_t
-{
-  DT_MASKS_EDIT_OFF = 0,
-  DT_MASKS_EDIT_FULL = 1,
-  DT_MASKS_EDIT_RESTRICTED = 2
-} dt_masks_edit_mode_t;
+
+
 
 typedef enum dt_masks_pressure_sensitivity_t
 {
   DT_MASKS_PRESSURE_OFF = 0,
-  DT_MASKS_PRESSURE_HARDNESS_REL = 1,
-  DT_MASKS_PRESSURE_HARDNESS_ABS = 2,
+  DT_MASKS_PRESSURE_FADING_REL = 1,
+  DT_MASKS_PRESSURE_FADING_ABS = 2,
   DT_MASKS_PRESSURE_OPACITY_REL = 3,
   DT_MASKS_PRESSURE_OPACITY_ABS = 4,
   DT_MASKS_PRESSURE_BRUSHSIZE_REL = 5
@@ -272,7 +226,7 @@ typedef struct dt_masks_node_brush_t
   float ctrl2[2];
   float border[2];
   float density;
-  float hardness;
+  float fading;
   dt_masks_points_states_t state;
 } dt_masks_node_brush_t;
 
@@ -287,34 +241,11 @@ typedef struct dt_masks_anchor_gradient_t
   dt_masks_gradient_states_t state;
 } dt_masks_anchor_gradient_t;
 
-/** structure used to store all forms's id for a group */
-typedef struct dt_masks_form_group_t
-{
-  int formid;
-  int parentid;
-  int state;
-  float opacity;
-} dt_masks_form_group_t;
 
 
 
-/*
-* Type of user interaction to map with internal properties of masks.
-* Those used to be deduced implicitly by each shape from Shift/Ctrl/Shift+Ctrl + mouse
-* scroll, which is a shitty design when using Wacom tablets. No shape reads key modifiers
-* any more: the wheel is resolved once, against the user's mapping, by
-* dt_masks_scroll_get_interaction() -- see masks_gui.h -- and every entry point
-* (mouse_scroll callback, context-menu sliders) names the property it acts on.
-*/
-typedef enum dt_masks_interaction_t
-{
-  DT_MASKS_INTERACTION_UNDEF = 0,    // no property: an unmapped wheel combination does nothing
-  DT_MASKS_INTERACTION_SIZE = 1,     // property of the form (shape), explicit
-  DT_MASKS_INTERACTION_HARDNESS = 2, // property of the form (shape), explicit
-  DT_MASKS_INTERACTION_OPACITY = 3,  // property of the group in which the form is included, explicit
-  DT_MASKS_INTERACTION_ROTATION = 4, // property of the form (shape), explicit
-  DT_MASKS_INTERACTION_LAST
-} dt_masks_interaction_t;
+
+
 
 /** structure used to define a form */
 typedef struct dt_masks_form_t
@@ -360,13 +291,46 @@ typedef struct dt_masks_form_t
 /* Rasterisation entry points: dispatch through the private table. */
 /** get points in real space with respect of distortion dx and dy are used to eventually move the center of
  * the circle */
-int dt_masks_get_points_border(struct dt_develop_t *dev, dt_masks_form_t *form, float **points, int *points_count,
-                               float **border, int *border_count, int source, dt_iop_module_t *module);
+/**
+ * @brief What a rasterisation attempt produced.
+ *
+ * @details The rasterisation family used to return a bare `int` on a "0 means success"
+ * convention that could not say the third thing that actually happens: a shape with nothing to
+ * draw. Callers therefore had to guess, and the shapes disagreed -- a NULL points list made a
+ * circle report failure (which aborted the whole group fold) and an ellipse report success
+ * (which rendered it as zeros). Same data, opposite outcomes, decided by which shape carried it.
+ *
+ * OK    -- the buffer was written; `touched`, where the callee takes one, describes what.
+ * EMPTY -- nothing to draw: degenerate geometry, or the shape lies entirely outside this ROI.
+ *          A legitimate outcome, NOT an error. The buffer is left as the caller supplied it.
+ * ERROR -- the shape could not be computed (allocation failure, a distortion transform that
+ *          did not converge). The buffer's contents are undefined and must not be published.
+ *
+ * OK is 0 so that a caller written against the old convention still reads a success as success;
+ * every other value is a non-success, which is the safe direction for anything not yet migrated.
+ */
+typedef enum dt_masks_raster_result_t
+{
+  DT_MASKS_RASTER_OK = 0,
+  DT_MASKS_RASTER_EMPTY,
+  DT_MASKS_RASTER_ERROR
+} dt_masks_raster_result_t;
+
+/** Adapt an internal helper still on the plain "0 means success" convention. Such a helper has
+ * no way to report EMPTY, so everything non-zero becomes ERROR -- which is the conservative
+ * reading, and the one those helpers' callers already applied. */
+static inline dt_masks_raster_result_t dt_masks_raster_from_status(const int status)
+{
+  return (status == 0) ? DT_MASKS_RASTER_OK : DT_MASKS_RASTER_ERROR;
+}
+
+
 /** get the rectangle which include the form and his border */
-int dt_masks_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece,
+dt_masks_raster_result_t dt_masks_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+                      dt_dev_pixelpipe_iop_t *piece,
                       dt_masks_form_t *form,
                       int *width, int *height, int *posx, int *posy);
-int dt_masks_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+dt_masks_raster_result_t dt_masks_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
                              dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,
                              int *width, int *height, int *posx, int *posy);
 
@@ -427,22 +391,19 @@ static inline void dt_masks_set_ctrl_points(float ctrl1[2], float ctrl2[2], cons
 
 
 /** get the transparency mask of the form and his border */
-int dt_masks_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+dt_masks_raster_result_t dt_masks_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                       const dt_dev_pixelpipe_iop_t *const piece,
                       dt_masks_form_t *const form,
                       float **buffer, int *width, int *height, int *posx, int *posy);
 
 /** Rasterise `form` into the pre-zeroed ROI-sized `buffer`. `touched` (may be NULL) receives
  * the buffer-relative rectangle enclosing every pixel written; empty when nothing was. */
-int dt_masks_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
-                          const dt_dev_pixelpipe_iop_t *const piece,
-                          dt_masks_form_t *const form, const dt_iop_roi_t *roi, float *buffer,
-                          dt_iop_roi_t *touched);
 
 
-int dt_masks_group_render_roi(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
-                              const dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,
-                              const dt_iop_roi_t *roi, float *buffer);
+
+dt_masks_raster_result_t dt_masks_group_render_roi(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+                                                   const dt_dev_pixelpipe_iop_t *piece, dt_masks_form_t *form,
+                                                   const dt_iop_roi_t *roi, float *buffer);
 
 // returns current masks version
 int dt_masks_version(void);
@@ -484,8 +445,6 @@ void dt_masks_cleanup_unused(dt_develop_t *dev);
 
 
 
-#define DEVELOP_MASKS_NB_SHAPES 5
-
 
 
 
@@ -519,7 +478,7 @@ void dt_masks_cleanup_unused(dt_develop_t *dev);
 
 dt_masks_edit_mode_t dt_masks_get_edit_mode(struct dt_iop_module_t *module);
 void dt_masks_set_edit_mode(struct dt_iop_module_t *module, dt_masks_edit_mode_t value);
-void dt_masks_iop_update(struct dt_iop_module_t *module);
+
 void dt_masks_iop_use_same_as(struct dt_iop_module_t *module, struct dt_iop_module_t *src);
 /** Hash a group's full content (recursing into members). Children are resolved from the given
  * forms list — pass the same list the group came from (live dev->forms or a snapshot), so the
@@ -574,13 +533,6 @@ void dt_masks_duplicate_points(const dt_masks_form_t *base, dt_masks_form_t *des
 
 
 
-/** detail mask support */
-void dt_masks_extend_border(float *const mask, const int width, const int height, const int border);
-void dt_masks_blur_9x9_coeff(float *coeffs, const float sigma);
-void dt_masks_blur_9x9(float *const src, float *const out, const int width, const int height, const float sigma);
-void dt_masks_calc_rawdetail_mask(float *const src, float *const out, float *const tmp, const int width,
-                                  const int height, const dt_aligned_pixel_t wb);
-void dt_masks_calc_detail_mask(float *const src, float *const out, float *const tmp, const int width, const int height, const float threshold, const gboolean detail);
 
 
 

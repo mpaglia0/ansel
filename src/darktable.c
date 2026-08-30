@@ -123,6 +123,7 @@
 #include "gui/privacy_consent.h"
 #include "common/sentry.h"
 #include "common/telemetry.h"
+#include "common/updates.h"
 #include "common/system_signal_handling.h"
 #include "widgets/bauhaus.h"
 #include "gui/presets.h"
@@ -199,6 +200,7 @@
 
 #include "common/dbus.h"
 #include "common/utility.h"
+#include "common/times.h"   // dt_times_t, dt_get_times(), dt_get_wtime(), dt_show_times()
 
 #if defined(__SUNOS__)
 #include <sys/varargs.h>
@@ -869,6 +871,14 @@ static void _xmp_mode_preferences_changed(gpointer instance, gpointer user_data)
   (void)user_data;
 
   dt_image_xmp_mode_refresh_from_conf();
+}
+
+
+// Nightly update check found a newer build (GUI thread). Help > Update to the latest
+// nightly build opens the same URL; here we only say so.
+static void _updates_notify(const char *version, const char *url)
+{
+  dt_control_log(_("A newer nightly build is available (%s).\nHelp ▸ Update to the latest nightly build"), version);
 }
 
 int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load_data)
@@ -1837,6 +1847,11 @@ int dt_init(int argc, char *argv[], const gboolean init_gui, const gboolean load
   // Opt-in usage analytics (PostHog) - separate toggle from crash reporting.
   dt_telemetry_init(init_gui);
 
+  // Nightly builds: once a day, ask ansel.photos/nightly.json whether a newer build
+  // exists for this format. Its own toggle (updates/enabled), no telemetry involved.
+  // The toast is ours to post: the module lives in common/ and does not know control/.
+  dt_updates_init(init_gui, _updates_notify);
+
   dt_print(DT_DEBUG_CONTROL, "[init] startup took %f seconds\n", dt_get_wtime() - start_wtime);
 
   return 0;
@@ -1858,6 +1873,9 @@ void dt_cleanup()
   // events are sent while the rest of the app is still up; the clean-session
   // counter it writes is persisted later by dt_conf_cleanup().
   dt_sentry_shutdown();
+
+  // Stop the update check first: it is the one that may still post to the GUI thread.
+  dt_updates_shutdown();
 
   // Flush and stop usage analytics.
   dt_telemetry_shutdown();

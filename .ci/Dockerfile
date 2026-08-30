@@ -53,5 +53,17 @@ RUN export GCC_VER=14 && /bin/bash /tmp/install-deps-ubuntu.sh && \
 WORKDIR /src
 COPY . /src
 
-RUN sh /src/build.sh --install && \
+# The build context has no .git (see .dockerignore), so the version string and the
+# commit hash cannot be derived inside; the workflow computes them on the host and
+# hands them in. Defaults keep a bare `docker build` working, just unversioned.
+ARG ANSEL_VERSION=unknown-version
+ARG ANSEL_COMMIT_HASH=unknown
+ARG ANSEL_BUILD_CHANNEL=self-build
+# Both reach tools/create_version_c.sh through the environment. The version is NOT a
+# cmake -DPROJECT_VERSION: project(VERSION) takes dotted digits only and rejects the
+# nightly string at configure time.
+ENV ANSEL_COMMIT_HASH=${ANSEL_COMMIT_HASH}
+ENV ANSEL_VERSION=${ANSEL_VERSION}
+RUN sh /src/build.sh --install \
+      --cmake-option "-DBUILD_CHANNEL=${ANSEL_BUILD_CHANNEL}" && \
     rm -rf /src/build /src/src

@@ -47,8 +47,8 @@
 #include "math/openmp_maths.h"
 #include "widgets/accelerators.h"
 
-#define HARDNESS_MIN 0.0005f
-#define HARDNESS_MAX 1.0f
+#define FADING_MIN 0.0005f
+#define FADING_MAX 1.0f
 
 #define BORDER_MIN 0.00005f
 #define BORDER_MAX 0.5f
@@ -184,17 +184,17 @@ static int _circle_get_creation_preview(dt_masks_form_t *form, dt_masks_form_gui
   return err;
 }
 
-static int _init_hardness(dt_masks_form_t *form, const float amount, const dt_masks_increment_t increment, const int flow)
+static int _init_fading(dt_masks_form_t *form, const float amount, const dt_masks_increment_t increment, const int flow)
 {
-  dt_masks_get_set_conf_value_with_toast(form, "border", amount, HARDNESS_MIN, HARDNESS_MAX,
-                                         increment, flow, _("Hardness: %3.2f%%"), 100.0f);
+  dt_masks_get_set_conf_value_with_toast(form, "border", amount, FADING_MIN, FADING_MAX,
+                                         increment, flow, _("Fading: %3.2f%%"), 100.0f);
   return 1;
 }
 
 static int _init_size(dt_masks_form_t *form, const float amount, const dt_masks_increment_t increment, const int flow)
 {
 
-  dt_masks_get_set_conf_value_with_toast(form, "size", amount, HARDNESS_MIN, HARDNESS_MAX,
+  dt_masks_get_set_conf_value_with_toast(form, "size", amount, FADING_MIN, FADING_MAX,
                                          increment, flow, _("Size: %3.2f%%"), 2.f * 100.f);
   return 1;
 }
@@ -216,7 +216,7 @@ static float _circle_get_interaction_value(const dt_masks_form_t *form, dt_masks
   {
     case DT_MASKS_INTERACTION_SIZE:
       return circle->radius;
-    case DT_MASKS_INTERACTION_HARDNESS:
+    case DT_MASKS_INTERACTION_FADING:
       return circle->border;
     default:
       return NAN;
@@ -234,8 +234,8 @@ static gboolean _circle_get_gravity_center(dt_develop_t *dev, const dt_masks_for
   return TRUE;
 }
 
-static int _change_hardness(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module,
-                            int index, const float amount, const dt_masks_increment_t increment, const int flow);
+static int _change_fading(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module,
+                          int index, const float amount, const dt_masks_increment_t increment, const int flow);
 static int _change_size(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module,
                         int index, const float amount, const dt_masks_increment_t increment, const int flow);
 
@@ -254,24 +254,24 @@ static float _circle_set_interaction_value(dt_masks_form_t *form, dt_masks_inter
     case DT_MASKS_INTERACTION_SIZE:
       if(!_change_size(form, gui, module, index, value, increment, flow)) return NAN;
       return _circle_get_interaction_value(form, interaction);
-    case DT_MASKS_INTERACTION_HARDNESS:
-      if(!_change_hardness(form, gui, module, index, value, increment, flow)) return NAN;
+    case DT_MASKS_INTERACTION_FADING:
+      if(!_change_fading(form, gui, module, index, value, increment, flow)) return NAN;
       return _circle_get_interaction_value(form, interaction);
     default:
       return NAN;
   }
 }
 
-static int _change_hardness(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module, int index, const float amount, const dt_masks_increment_t increment, const int flow)
+static int _change_fading(dt_masks_form_t *form, dt_masks_form_gui_t *gui, struct dt_iop_module_t *module, int index, const float amount, const dt_masks_increment_t increment, const int flow)
 {
   if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
   dt_masks_node_circle_t *circle = (dt_masks_node_circle_t *)(form->points)->data;
   if(IS_NULL_PTR(circle)) return 0;
 
   circle->border = CLAMPF(dt_masks_apply_increment(circle->border, amount, increment, flow),
-                          HARDNESS_MIN, HARDNESS_MAX);
+                          FADING_MIN, FADING_MAX);
 
-  _init_hardness(form, amount, increment, flow);
+  _init_fading(form, amount, increment, flow);
 
   // we recreate the form points
   dt_masks_gui_form_create(form, gui, index, module);
@@ -326,8 +326,8 @@ static int _circle_events_mouse_scrolled(struct dt_iop_module_t *module, double 
     {
       case DT_MASKS_INTERACTION_OPACITY:
         return _init_opacity(form, up ? +0.02f : -0.02f, DT_MASKS_INCREMENT_OFFSET, flow);
-      case DT_MASKS_INTERACTION_HARDNESS:
-        return _init_hardness(form, up ? +1.02f : 0.98f, DT_MASKS_INCREMENT_SCALE, flow);
+      case DT_MASKS_INTERACTION_FADING:
+        return _init_fading(form, up ? +1.02f : 0.98f, DT_MASKS_INCREMENT_SCALE, flow);
       case DT_MASKS_INTERACTION_SIZE:
         return _init_size(form, up ? +1.02f : 0.98f, DT_MASKS_INCREMENT_SCALE, flow);
       default:
@@ -340,8 +340,8 @@ static int _circle_events_mouse_scrolled(struct dt_iop_module_t *module, double 
     {
       case DT_MASKS_INTERACTION_OPACITY:
         return dt_masks_form_change_opacity(gui->dev, form, parentid, up, flow);
-      case DT_MASKS_INTERACTION_HARDNESS:
-        return _change_hardness(form, gui, module, index, up ? +1.02f : 0.98f, DT_MASKS_INCREMENT_SCALE, flow);
+      case DT_MASKS_INTERACTION_FADING:
+        return _change_fading(form, gui, module, index, up ? +1.02f : 0.98f, DT_MASKS_INCREMENT_SCALE, flow);
       case DT_MASKS_INTERACTION_SIZE:
         return _change_size(form, gui, module, index, up ? +1.02f : 0.98f, DT_MASKS_INCREMENT_SCALE, flow);
       default:
@@ -681,43 +681,55 @@ static void _bounding_box(const float *const points, int num_points, int *width,
   *height = (ymax - ymin);
 }
 
-static int _circle_get_points_border(dt_develop_t *dev, struct dt_masks_form_t *form, float **points,
+static dt_masks_raster_result_t _circle_get_points_border(dt_develop_t *dev, struct dt_masks_form_t *form,
+                                     float **points,
                                      int *points_count, float **border, int *border_count, int source,
                                      const dt_iop_module_t *module)
 {
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
+  /* No geometry to build an outline from: the outline is empty, which is a result, not a
+   * failure. Reporting success here (as this did) told the caller to cache a NULL outline as
+   * if it had been built. */
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   dt_masks_node_circle_t *circle = (dt_masks_node_circle_t *)((form->points)->data);
-  if(IS_NULL_PTR(circle)) return 0;
+  if(IS_NULL_PTR(circle)) return DT_MASKS_RASTER_EMPTY;
   float x = circle->center[0];
   float y = circle->center[1];
   if(source)
   {
     float xs = form->source[0];
     float ys = form->source[1];
-    return _circle_get_points_source(dev, x, y, xs, ys, circle->radius, circle->radius, 0.0f, points, points_count, module);
+    return dt_masks_raster_from_status(
+        _circle_get_points_source(dev, x, y, xs, ys, circle->radius, circle->radius, 0.0f, points, points_count, module));
   }
   else
   {
     if(form->functions->get_points(dev, x, y, circle->radius, circle->radius, 0, points, points_count) != 0)
-      return 1;
+      return DT_MASKS_RASTER_ERROR;
     if(!IS_NULL_PTR(border))
     {
       float outer_radius = circle->radius + circle->border;
-      return form->functions->get_points(dev, x, y, outer_radius, outer_radius, 0, border, border_count);
+      return dt_masks_raster_from_status(
+          form->functions->get_points(dev, x, y, outer_radius, outer_radius, 0, border, border_count));
     }
-    return 0;
+    return DT_MASKS_RASTER_OK;
   }
-  return 1;
 }
 
-static int _circle_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _circle_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
                                    dt_dev_pixelpipe_iop_t *piece,
                                    dt_masks_form_t *form, int *width, int *height, int *posx, int *posy)
 {
+  /* Every early exit below must leave the out-parameters defined: callers read them
+   * whenever this reports anything but ERROR, and three of them used to report success
+   * for a shape with no geometry while writing none of these. */
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
   // we get the circle values
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   dt_masks_node_circle_t *circle = (dt_masks_node_circle_t *)((form->points)->data);
-  if(IS_NULL_PTR(circle)) return 0;
+  if(IS_NULL_PTR(circle)) return DT_MASKS_RASTER_EMPTY;
   float wd = pipe->iwidth, ht = pipe->iheight;
 
   // compute the points we need to transform (center and circumference of circle)
@@ -726,29 +738,33 @@ static int _circle_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *
   float *const restrict points =
     _points_to_transform(pipe->dev, form->source[0], form->source[1], outer_radius, wd, ht, &num_points);
   if(IS_NULL_PTR(points))
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
 
   // and transform them with all distorted modules
   if(!dt_dev_distort_transform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, num_points))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   _bounding_box(points, num_points, width, height, posx, posy);
   dt_pixelpipe_cache_free_align(points);
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
-static int _circle_get_area(const dt_iop_module_t *const restrict module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _circle_get_area(const dt_iop_module_t *const restrict module, dt_dev_pixelpipe_t *pipe,
                             const dt_dev_pixelpipe_iop_t *const restrict piece,
                             dt_masks_form_t *const restrict form,
                             int *width, int *height, int *posx, int *posy)
 {
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 0;
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
   // we get the circle values
   dt_masks_node_circle_t *circle = (dt_masks_node_circle_t *)((form->points)->data);
-  if(IS_NULL_PTR(circle)) return 0;
+  if(IS_NULL_PTR(circle)) return DT_MASKS_RASTER_EMPTY;
   float wd = pipe->iwidth, ht = pipe->iheight;
 
   // compute the points we need to transform (center and circumference of circle)
@@ -757,30 +773,36 @@ static int _circle_get_area(const dt_iop_module_t *const restrict module, dt_dev
   float *const restrict points =
     _points_to_transform(pipe->dev, circle->center[0], circle->center[1], outer_radius, wd, ht, &num_points);
   if(IS_NULL_PTR(points))
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
 
   // and transform them with all distorted modules
   if(!dt_dev_distort_transform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, num_points))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   _bounding_box(points, num_points, width, height, posx, posy);
   dt_pixelpipe_cache_free_align(points);
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
-static int _circle_get_mask(const dt_iop_module_t *const restrict module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _circle_get_mask(const dt_iop_module_t *const restrict module, dt_dev_pixelpipe_t *pipe,
                             const dt_dev_pixelpipe_iop_t *const restrict piece,
                             dt_masks_form_t *const restrict form,
                             float **buffer, int *width, int *height, int *posx, int *posy)
 {
+  *buffer = NULL;
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
   double start2 = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) start2 = dt_get_wtime();
 
   // we get the area
-  if(_circle_get_area(module, pipe, piece, form, width, height, posx, posy) != 0) return 1;
+  const dt_masks_raster_result_t area = _circle_get_area(module, pipe, piece, form, width, height, posx, posy);
+  if(area != DT_MASKS_RASTER_OK) return area;
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
   {
@@ -795,7 +817,7 @@ static int _circle_get_mask(const dt_iop_module_t *const restrict module, dt_dev
   const int w = *width, h = *height;
   float *const restrict points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)w * h * 2, 0);
   if(IS_NULL_PTR(points))
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
 
   const float pos_x = *posx;
   const float pos_y = *posy;
@@ -821,7 +843,7 @@ static int _circle_get_mask(const dt_iop_module_t *const restrict module, dt_dev
   if(!dt_dev_distort_backtransform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, (size_t)w * h))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -836,7 +858,7 @@ static int _circle_get_mask(const dt_iop_module_t *const restrict module, dt_dev
   if(IS_NULL_PTR(*buffer))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   // we populate the buffer
@@ -865,18 +887,18 @@ static int _circle_get_mask(const dt_iop_module_t *const restrict module, dt_dev
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
     dt_print(DT_DEBUG_MASKS, "[masks %s] circle fill took %0.04f sec\n", form->name, dt_get_wtime() - start2);
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 
-static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt_dev_pixelpipe_t *pipe,
                                 const dt_dev_pixelpipe_iop_t *const restrict piece,
                                 dt_masks_form_t *const form, const dt_iop_roi_t *const roi,
                                 float *const restrict buffer, dt_iop_roi_t *touched)
 {
   dt_masks_touched_none(touched);
-  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return 1;
-  if(IS_NULL_PTR(module)) return 1;
+  if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
+  if(IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   double start1 = 0.0;
   double start2 = start1;
   
@@ -884,7 +906,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt
 
   // we get the circle parameters
   dt_masks_node_circle_t *circle = (dt_masks_node_circle_t *)((form->points)->data);
-  if(IS_NULL_PTR(circle)) return 1;
+  if(IS_NULL_PTR(circle)) return DT_MASKS_RASTER_EMPTY;
   const int wi = pipe->iwidth, hi = pipe->iheight;
   const float centerx = circle->center[0] * wi;
   const float centery = circle->center[1] * hi;
@@ -920,7 +942,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt
   // we need many points as we do not know how the circle might get distorted in the pixelpipe
   const size_t circpts = dt_masks_roundup(MIN(360, 2 * M_PI * sqr_total), 8);
   float *const restrict circ = dt_pixelpipe_cache_alloc_align_float_cache(circpts * 2, 0);
-  if(IS_NULL_PTR(circ)) return 1;
+  if(IS_NULL_PTR(circ)) return DT_MASKS_RASTER_ERROR;
   __OMP_PARALLEL_FOR__(if(circpts/8 > 1000))
   for(int n = 0; n < circpts / 8; n++)
   {
@@ -955,7 +977,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt
                                         circpts))
   {
     dt_pixelpipe_cache_free_align(circ);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -1007,10 +1029,10 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt
   // check if there is anything to do at all;
   // only if width and height of bounding box is 2 or greater the shape lies inside of roi and requires action
   if(bbw <= 1 || bbh <= 1)
-    return 0;
+    return DT_MASKS_RASTER_EMPTY;
 
   float *const restrict points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)bbw * bbh * 2, 0);
-  if(IS_NULL_PTR(points)) return 1;
+  if(IS_NULL_PTR(points)) return DT_MASKS_RASTER_ERROR;
 
   // we populate the grid points in module coordinates
   __OMP_PARALLEL_FOR__(collapse(2) if(bbw*bbh > 50000))
@@ -1033,7 +1055,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt
                                         (size_t)bbw * bbh))
   {
     dt_pixelpipe_cache_free_align(points);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -1117,7 +1139,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module, dt
              dt_get_wtime() - start1);
   }
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 static void _circle_sanitize_config(dt_masks_type_t type)

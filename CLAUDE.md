@@ -984,6 +984,28 @@ last node's own coordinate sits at the very end of the forward pass. Everything 
 drawn centerline (the outline stroking, the source shape, the clone link's midpoint) uses that
 helper.
 
+### A brush's outline encloses the whole stroke, so "inside the border" cannot mean "on the border"
+
+`dt_masks_find_closest_handle_common()` (`masks_gui.c`) answers in one fixed order — source,
+border, segment, shape — so whatever a shape's `get_distance()` reports as `inside_border`
+preempts its segment. For a closed shape the two are disjoint regions: a polygon's `inside_border`
+is the feather ring, true only *between* the outline and the form, so a cursor on the centerline
+falls through to the segment test.
+
+A brush has no such ring. Its `points` are the centerline walked there and back (zero area) and
+its `border` is the outline wrapping the whole painted band, so a point-in-polygon test on that
+border is true across the entire stroke. Reporting that as `inside_border` makes the brush's
+segment — drag to move it, Ctrl+Click to insert a node — unreachable everywhere, while the shape
+still looks perfectly hoverable. For a brush, `inside` is "enclosed by the outline" and
+`inside_border` is "within cursor reach of the outline itself, and no centerline segment is
+closer": the outline carries no drag action of its own (border width is edited through the
+per-node handle and the wheel), so on a thin stroke, where outline and centerline are both within
+reach at once, the segment wins.
+
+`_brush_get_distance()`'s source pass walks a different outline, so its distances need their own
+accumulator — sharing one running minimum lets a clone source near the form veto every segment hit
+on the form itself.
+
 ### A drawing pass must not leave a path in the cairo context
 
 Cairo keeps the current path across calls, so a leftover is painted by the next `cairo_stroke()`
@@ -1051,20 +1073,22 @@ only because the callback is shared.
 
 The mapping is one conf key per wheel/modifier combination
 (`plugins/darkroom/masks/scroll/{plain,shift,primary,primary_shift}`, enum values `none` |
-`size` | `hardness` | `opacity` | `rotation`, declared in `data/anselconfig.xml.in`) behind
+`size` | `fading` | `opacity` | `rotation`, declared in `data/anselconfig.xml.in`) behind
 `dt_masks_scroll_mapping_get/set()` and `dt_masks_scroll_get_interaction()` (`masks_gui.h`).
 Those enum values are a storage format: never translate them, never reorder them against
 `dt_masks_interaction_t`. The mapping is **application-wide** — which property the wheel edits
 is a user habit, not a property of a shape or of the module owning the mask — and its defaults
 reproduce the historical modifier behaviour, so a user who never opens the panel sees no change.
 
-A gradient spells the two shared properties its own way: `SIZE` is the fade extent, `HARDNESS`
-the curvature. That is also how the context-menu sliders name them, and why
-`dt_masks_interaction_alias_name()` exists.
+A gradient spells one of the shared properties its own way: `FADING` is the curvature. `SIZE`
+is the fade extent but keeps the shared name, since it is the shape's size in the only sense a
+gradient has one. That is also how the context-menu sliders name them, and why
+`dt_masks_interaction_alias_name()` exists — it answers `NULL` for every property a gradient
+names like everyone else.
 
 Scope is the selection's business, not the wheel's: `dt_masks_gui_change_affects_selected_node_or_all()`
-already restricts a size/hardness change to the selected node. A shape must not additionally
-*substitute* a property based on selection state — the polygon used to force hardness on a plain
+already restricts a size/fading change to the selected node. A shape must not additionally
+*substitute* a property based on selection state — the polygon used to force fading on a plain
 wheel whenever a node was selected, which made the mapping unreachable for that shape.
 
 The GUI is the "Mouse wheel" collapsible section of the Drawn tab (`blend_gui.c`), one radio
@@ -1161,6 +1185,33 @@ when Ansel 1.0 is prepared, per explicit instruction not to migrate any user's l
 prematurely).
 
 ---
+
+### The masks module is being enclosed, and the ratchet counts the way out
+
+`src/develop/masks` is not a closed module yet: five files outside it (`develop/blend_gui.c`,
+`libs/masks.c`, `iop/retouch.c`, `iop/spots.c`, `develop/supervisor.c`) reach directly into
+`dt_masks_form_t` and friends, four places `malloc` a masks type by hand, and `->forms` is walked
+as a plain `GList` all over `develop/`. The audit behind that is issue #1299; the plan is to drain
+it phase by phase rather than in one break.
+
+**`tools/check_module_boundaries.sh` section 9 counts the remaining leaks, and the counts may only
+FALL.** Adding a new external struct access, a new includer of `masks.h`, a new hand-rolled
+allocation or a new raw `->forms` walk fails CI. So does *removing* one without lowering the
+baseline in the same commit — that is deliberate: it is what stops a phase from half-landing and
+the ground being quietly given back later.
+
+Two things about those counters a future editor should not "improve":
+
+- **The member list is curated to names no other struct in the tree uses** (`formid`,
+  `form_dragging`, `creation_formids`, …) and deliberately omits the ambiguous ones a masks form
+  shares with everything else (`points`, `type`, `name`, `state`, `opacity`). It therefore
+  undercounts — the full census found ~385 accesses by reading declarations, the gate reports 102
+  — and that is the right error for a gate. Widening it buys a bigger number and loses the
+  property that every match is real.
+- **One write match is a known false positive and stays counted**: `supervisor.c`'s own event
+  struct also has a `formid`, so `e->formid = form->formid` matches on the left while genuinely
+  reading a masks form on the right. It is stable, so it costs nothing; chasing it would mean
+  excluding the file, which would hide real writes appearing there later.
 
 ## IOP modules
 
@@ -1436,7 +1487,7 @@ reconfigure on same-size re-entry).
 
 A `GtkLabel` with `gtk_label_set_angle()` requests the width of its *slanted* bounding box, so a
 diagonal column title makes its whole column that wide — measured on the masks wheel-mapping
-grid: 102 px for "Hardness/Curvature" at 45° against 24 px for the radio button underneath it.
+grid: 102 px for "Fading/Curvature" at 45° against 24 px for the radio button underneath it.
 Zeroing `column-spacing` does not help, because the spacing was never what separated the cells.
 
 Two things fix it, and both are needed. Give the grid `GTK_ALIGN_START`: handed more width than
@@ -1563,6 +1614,22 @@ Config option strings in `anselconfig.xml.in` MUST equal the kernel `.name` fiel
 silently falls back to default instead of erroring.
 
 ---
+
+## Nightly distribution
+
+The Sentry **environment** is `<build channel>-<platform>` (`nightly-windows`,
+`self-build-linux`, `package-fedora-macos`): the sessions API groups crash-free rates by
+release and environment and by nothing else, so this is how the website shows a build's crash
+rate per package. Split on the LAST hyphen — a channel can contain hyphens. Sessions from before
+this carry the bare channel; readers must accept both.
+
+Nightlies land in one `nightly-YYYY-MM` pre-release per month (GitHub caps a *release* at
+1000 assets; five formats a night filled the old rolling `v0.0.0` in under a year).
+`tools/nightly_manifest.py` writes `nightly.json` — the newest build per format — after
+every nightly, and that file drives the website buttons, the in-app check
+(`src/common/updates.c`), the Homebrew cask and the Scoop manifest. The format keys in the
+script's `FORMATS` and in `dt_updates_runtime_format()` must agree. `doc/nightly-distribution.md`
+is the manual: secrets, retention, R2, signing costs, GHCR for later.
 
 ## Tools
 

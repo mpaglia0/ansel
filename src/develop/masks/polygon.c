@@ -60,8 +60,8 @@
 #include "gui/actions/menu.h"
 #include <assert.h>
 
-#define HARDNESS_MIN 0.0005f
-#define HARDNESS_MAX 1.0f
+#define FADING_MIN 0.0005f
+#define FADING_MAX 1.0f
 
 #define BORDER_MIN 0.00005f
 #define BORDER_MAX 0.5f
@@ -1232,17 +1232,19 @@ static void _polygon_translate_all_nodes(dt_masks_form_t *mask_form, const float
     _polygon_translate_node((dt_masks_node_polygon_t *)node_entry->data, delta_x, delta_y);
 }
 
-static int _polygon_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
+static dt_masks_raster_result_t _polygon_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
                                       float **point_buffer, int *point_count,
                                       float **border_buffer, int *border_count,
                                       int source, const dt_iop_module_t *module)
 {
-  if(source && IS_NULL_PTR(module)) return 1;
+  // Asking for the source outline without a module is a programming error, not an empty shape.
+  if(source && IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   const double ioporder = (module) ? module->iop_order : 0.0f;
   const dt_masks_distort_t gui_dist = dt_masks_distort_for_gui(develop);
-  return _polygon_get_pts_border(develop, mask_form, ioporder, DT_DEV_TRANSFORM_DIR_ALL,
-                                 &gui_dist, point_buffer, point_count,
-                                 border_buffer, border_count, source);
+  return dt_masks_raster_from_status(
+      _polygon_get_pts_border(develop, mask_form, ioporder, DT_DEV_TRANSFORM_DIR_ALL,
+                              &gui_dist, point_buffer, point_count,
+                              border_buffer, border_count, source));
 }
 
 static void _polygon_get_sizes(struct dt_iop_module_t *module, dt_masks_form_t *mask_form,
@@ -1326,20 +1328,20 @@ static float _polygon_get_interaction_value(const dt_masks_form_t *mask_form,
       if(size <= 0.0f) return NAN;
       return size;
     }
-    case DT_MASKS_INTERACTION_HARDNESS:
+    case DT_MASKS_INTERACTION_FADING:
     {
-      float hardness_sum = 0.0f;
-      int hardness_count = 0;
+      float fading_sum = 0.0f;
+      int fading_count = 0;
 
       for(const GList *point_node = mask_form->points; point_node; point_node = g_list_next(point_node))
       {
         const dt_masks_node_polygon_t *node = (const dt_masks_node_polygon_t *)point_node->data;
         if(IS_NULL_PTR(node)) continue;
-        hardness_sum += node->border[0] + node->border[1];
-        hardness_count += 2;
+        fading_sum += node->border[0] + node->border[1];
+        fading_count += 2;
       }
 
-      return hardness_count > 0 ? hardness_sum / (float)hardness_count : NAN;
+      return fading_count > 0 ? fading_sum / (float)fading_count : NAN;
     }
     default:
       return NAN;
@@ -1375,9 +1377,9 @@ static gboolean _polygon_get_gravity_center(dt_develop_t *dev, const dt_masks_fo
 static int _change_size(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
                         struct dt_iop_module_t *module, int form_index, const float amount,
                         const dt_masks_increment_t increment, const int flow);
-static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
-                            struct dt_iop_module_t *module, int form_index, const float amount,
-                            const dt_masks_increment_t increment, int flow);
+static int _change_fading(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
+                          struct dt_iop_module_t *module, int form_index, const float amount,
+                          const dt_masks_increment_t increment, int flow);
 
 static float _polygon_set_interaction_value(dt_masks_form_t *mask_form,
                                             dt_masks_interaction_t interaction, float value,
@@ -1395,8 +1397,8 @@ static float _polygon_set_interaction_value(dt_masks_form_t *mask_form,
     case DT_MASKS_INTERACTION_SIZE:
       if(!_change_size(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
       return _polygon_get_interaction_value(mask_form, interaction);
-    case DT_MASKS_INTERACTION_HARDNESS:
-      if(!_change_hardness(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
+    case DT_MASKS_INTERACTION_FADING:
+      if(!_change_fading(mask_form, 0, mask_gui, module, index, value, increment, flow)) return NAN;
       return _polygon_get_interaction_value(mask_form, interaction);
     default:
       return NAN;
@@ -1636,15 +1638,15 @@ static gboolean _polygon_form_gravity_center(const dt_masks_form_t *mask_form,
 }
 
 /**
- * @brief Initialize hardness from config and emit the toast with a size-normalized percentage.
+ * @brief Initialize fading from config and emit the toast with a size-normalized percentage.
  */
-static int _init_hardness(dt_masks_form_t *mask_form, const float amount,
-                          const dt_masks_increment_t increment, const int flow,
-                          const float mask_size, const float border_size)
+static int _init_fading(dt_masks_form_t *mask_form, const float amount,
+                        const dt_masks_increment_t increment, const int flow,
+                        const float mask_size, const float border_size)
 {
-  const float mask_hardness = dt_masks_get_set_conf_value(mask_form, "hardness", amount,
-                                                          HARDNESS_MIN, HARDNESS_MAX, increment, flow);
-  dt_toast_log(_("Hardness: %3.2f%%"), (border_size * mask_hardness) / mask_size * 100.0f);
+  const float mask_fading = dt_masks_get_set_conf_value(mask_form, "fading", amount,
+                                                        FADING_MIN, FADING_MAX, increment, flow);
+  dt_toast_log(_("Fading: %3.2f%%"), (border_size * mask_fading) / mask_size * 100.0f);
   return 1;
 }
 
@@ -1721,11 +1723,11 @@ static int _change_size(dt_masks_form_t *mask_form, int parent_id, dt_masks_form
 }
 
 /**
- * @brief Change polygon hardness for the active node scope or the full shape.
+ * @brief Change polygon fading for the active node scope or the full shape.
  */
-static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
-                            struct dt_iop_module_t *module, int form_index, const float amount,
-                            const dt_masks_increment_t increment, int flow)
+static int _change_fading(dt_masks_form_t *mask_form, int parent_id, dt_masks_form_gui_t *mask_gui,
+                          struct dt_iop_module_t *module, int form_index, const float amount,
+                          const dt_masks_increment_t increment, int flow)
 {
   int node_index = 0;
   const float scale_amount = powf(amount, (float)flow);
@@ -1740,10 +1742,10 @@ static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_
 
       node->border[0] = CLAMPF(dt_masks_apply_increment_precomputed(node->border[0], amount, scale_amount,
                                                                      offset_amount, increment),
-                               HARDNESS_MIN, HARDNESS_MAX);
+                               FADING_MIN, FADING_MAX);
       node->border[1] = CLAMPF(dt_masks_apply_increment_precomputed(node->border[1], amount, scale_amount,
                                                                      offset_amount, increment),
-                               HARDNESS_MIN, HARDNESS_MAX);
+                               FADING_MIN, FADING_MAX);
     }
   }
 
@@ -1751,7 +1753,7 @@ static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_
   float border_size = 0.0f;
   _polygon_get_sizes(module, mask_form, mask_gui, form_index, &mask_size, &border_size);
 
-  _init_hardness(mask_form, amount, increment, flow, mask_size, border_size);
+  _init_fading(mask_form, amount, increment, flow, mask_size, border_size);
 
   // Rebuild the cached GUI geometry.
   dt_masks_gui_form_create(mask_form, mask_gui, form_index, module);
@@ -1760,7 +1762,7 @@ static int _change_hardness(dt_masks_form_t *mask_form, int parent_id, dt_masks_
 }
 
 /**
- * @brief Handle mouse wheel updates for polygon size/hardness/opacity.
+ * @brief Handle mouse wheel updates for polygon size/fading/opacity.
  */
 /* Shape handlers receive widget-space coordinates, while normalized output-image
  * coordinates come from `mask_gui->rel_pos` and absolute output-image
@@ -1782,18 +1784,18 @@ static int _polygon_events_mouse_scrolled(struct dt_iop_module_t *module, double
   /* `state` is the caller's raw key state, kept for the callback signature: the property to
    * act on was already resolved from it by dt_masks_scroll_get_interaction(). A polygon owns
    * no rotation, so that mapping falls through and the wheel does nothing here. Size and
-   * hardness apply to the selected node when there is one, to every node otherwise -- that
+   * fading apply to the selected node when there is one, to every node otherwise -- that
    * scoping is the selection's business (dt_masks_gui_change_affects_selected_node_or_all),
-   * not the wheel's, which is why a selected node no longer forces hardness. */
+   * not the wheel's, which is why a selected node no longer forces fading. */
   if(mask_gui->edit_mode == DT_MASKS_EDIT_FULL && dt_masks_is_anything_selected(mask_gui))
   {
     switch(interaction)
     {
       case DT_MASKS_INTERACTION_OPACITY:
         return dt_masks_form_change_opacity(mask_gui->dev, mask_form, parent_id, up, flow);
-      case DT_MASKS_INTERACTION_HARDNESS:
-        return _change_hardness(mask_form, parent_id, mask_gui, module, form_index, up ? +0.01f : -0.01f,
-                                DT_MASKS_INCREMENT_OFFSET, flow);
+      case DT_MASKS_INTERACTION_FADING:
+        return _change_fading(mask_form, parent_id, mask_gui, module, form_index, up ? +0.01f : -0.01f,
+                              DT_MASKS_INCREMENT_OFFSET, flow);
       case DT_MASKS_INTERACTION_SIZE:
         return _change_size(mask_form, parent_id, mask_gui, module, form_index, up ? 1.02f : 0.98f,
                             DT_MASKS_INCREMENT_SCALE, flow);
@@ -1856,7 +1858,7 @@ static int _polygon_events_button_pressed(struct dt_iop_module_t *module, double
 
       else // we create a node
       {
-        float masks_border = MIN(dt_conf_get_float("plugins/darkroom/masks/polygon/hardness"), HARDNESS_MAX);
+        float masks_border = MIN(dt_conf_get_float("plugins/darkroom/masks/polygon/fading"), FADING_MAX);
 
         int node_count = g_list_length(mask_form->points);
         // change the values
@@ -1866,7 +1868,7 @@ static int _polygon_events_button_pressed(struct dt_iop_module_t *module, double
         dt_masks_gui_cursor_to_raw_norm(mask_gui->dev, mask_gui, polygon_node->node);
 
         polygon_node->ctrl1[0] = polygon_node->ctrl1[1] = polygon_node->ctrl2[0] = polygon_node->ctrl2[1] = -1.0;
-        polygon_node->border[0] = polygon_node->border[1] = MAX(HARDNESS_MIN, masks_border);
+        polygon_node->border[0] = polygon_node->border[1] = MAX(FADING_MIN, masks_border);
         polygon_node->state = DT_MASKS_POINT_STATE_NORMAL;
   
         if(node_count == 0)
@@ -1876,7 +1878,7 @@ static int _polygon_events_button_pressed(struct dt_iop_module_t *module, double
           polygon_first_node->node[0] = polygon_node->node[0];
           polygon_first_node->node[1] = polygon_node->node[1];
           polygon_first_node->ctrl1[0] = polygon_first_node->ctrl1[1] = polygon_first_node->ctrl2[0] = polygon_first_node->ctrl2[1] = -1.0;
-          polygon_first_node->border[0] = polygon_first_node->border[1] = MAX(HARDNESS_MIN, masks_border);
+          polygon_first_node->border[0] = polygon_first_node->border[1] = MAX(FADING_MIN, masks_border);
           polygon_first_node->state = DT_MASKS_POINT_STATE_NORMAL;
           mask_form->points = g_list_append(mask_form->points, polygon_first_node);
 
@@ -2522,19 +2524,29 @@ static int _get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pi
   return 0;
 }
 
-static int _polygon_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _polygon_get_source_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
                                    dt_dev_pixelpipe_iop_t *piece,
                                    dt_masks_form_t *mask_form, int *width, int *height, int *posx, int *posy)
 {
-  return _get_area(module, pipe, piece, mask_form, width, height, posx, posy, TRUE);
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
+  return dt_masks_raster_from_status(
+      _get_area(module, pipe, piece, mask_form, width, height, posx, posy, TRUE));
 }
 
-static int _polygon_get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _polygon_get_area(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                              const dt_dev_pixelpipe_iop_t *const piece,
                              dt_masks_form_t *const mask_form,
                              int *width, int *height, int *posx, int *posy)
 {
-  return _get_area(module, pipe, piece, mask_form, width, height, posx, posy, FALSE);
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
+  return dt_masks_raster_from_status(
+      _get_area(module, pipe, piece, mask_form, width, height, posx, posy, FALSE));
 }
 
 /**
@@ -2565,12 +2577,17 @@ static int _polygon_get_area(const dt_iop_module_t *const module, dt_dev_pixelpi
   }
 }
 
-static int _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                              const dt_dev_pixelpipe_iop_t *const piece,
                              dt_masks_form_t *const mask_form,
                              float **buffer, int *width, int *height, int *posx, int *posy)
 {
-  if(IS_NULL_PTR(module)) return 1;
+  *buffer = NULL;
+  *width = 0;
+  *height = 0;
+  *posx = 0;
+  *posy = 0;
+  if(IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   double start = 0.0;
   double start2 = 0.0;
 
@@ -2588,7 +2605,7 @@ static int _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpi
   {
     dt_pixelpipe_cache_free_align(point_buffer);
     dt_pixelpipe_cache_free_align(border_buffer);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -2629,7 +2646,7 @@ static int _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpi
   {
     dt_pixelpipe_cache_free_align(point_buffer);
     dt_pixelpipe_cache_free_align(border_buffer);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
 
   // we write all the point around the polygon into the buffer
@@ -2839,7 +2856,7 @@ static int _polygon_get_mask(const dt_iop_module_t *const module, dt_dev_pixelpi
     dt_print(DT_DEBUG_MASKS, "[masks %s] polygon fill buffer took %0.04f sec\n", mask_form->name,
              dt_get_wtime() - start);
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 
@@ -3179,14 +3196,14 @@ static inline void _polygon_falloff_roi(float *buffer, int *p0, int *p1, int bw,
 
 // build a stamp which can be combined with other shapes in the same group
 // prerequisite: 'buffer' is all zeros
-static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
+static dt_masks_raster_result_t _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pixelpipe_t *pipe,
                                  const dt_dev_pixelpipe_iop_t *const piece,
                                  dt_masks_form_t *const mask_form,
                                  const dt_iop_roi_t *roi, float *buffer,
                                  dt_iop_roi_t *touched)
 {
   dt_masks_touched_none(touched);
-  if(IS_NULL_PTR(module)) return 1;
+  if(IS_NULL_PTR(module)) return DT_MASKS_RASTER_ERROR;
   double start = 0.0;
   double start2 = 0.0;
   if(dt_get_debug_flags() & DT_DEBUG_PERF) start = dt_get_wtime();
@@ -3223,13 +3240,13 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
   {
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
-    return 1;
+    return DT_MASKS_RASTER_ERROR;
   }
   if(points_count <= 2)
   {
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
-    return 0;
+    return DT_MASKS_RASTER_EMPTY;
   }
 
   if(dt_get_debug_flags() & DT_DEBUG_PERF)
@@ -3324,7 +3341,7 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
   {
     dt_pixelpipe_cache_free_align(points);
     dt_pixelpipe_cache_free_align(border);
-    return 0;
+    return DT_MASKS_RASTER_EMPTY;
   }
 
   // now get min/max values
@@ -3355,7 +3372,7 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
     {
       dt_pixelpipe_cache_free_align(points);
       dt_pixelpipe_cache_free_align(border);
-      return 1;
+      return DT_MASKS_RASTER_ERROR;
     }
     memcpy(cpoints, points, sizeof(float) * 2 * points_count);
 
@@ -3468,7 +3485,7 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
     {
       dt_pixelpipe_cache_free_align(points);
       dt_pixelpipe_cache_free_align(border);
-      return 1;
+      return DT_MASKS_RASTER_ERROR;
     }
 
     int dindex = 0;
@@ -3587,7 +3604,7 @@ static int _polygon_get_mask_roi(const dt_iop_module_t *const module, dt_dev_pix
              mask_form->name,
              dt_get_wtime() - start);
 
-  return 0;
+  return DT_MASKS_RASTER_OK;
 }
 
 static void _polygon_sanitize_config(dt_masks_type_t type)
@@ -3621,7 +3638,7 @@ static void _polygon_set_hint_message(const dt_masks_form_gui_t *const mask_gui,
   else if(mask_gui->source_selected)
     g_strlcat(msgbuf, _("<b>Move source</b>: Drag"), msgbuf_len);
   else if(mask_gui->handle_border_hovered >= 0)
-    g_strlcat(msgbuf, _("<b>Node hardness</b>: Drag"), msgbuf_len);
+    g_strlcat(msgbuf, _("<b>Node fading</b>: Drag"), msgbuf_len);
   else if(mask_gui->handle_hovered >= 0)
     g_strlcat(msgbuf, _("<b>Node curvature</b>: Drag"), msgbuf_len);
   // The node operations below need the node to be selected, which the first click does.
