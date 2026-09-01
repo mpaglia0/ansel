@@ -71,7 +71,7 @@ static void _circle_get_distance(float x, float y, float as, dt_masks_form_gui_t
   const float pt[2] = { x, y };
 
   if(gpt->source && gpt->source_count > 0
-     && dt_masks_point_in_form_exact(pt, 1, gpt->source, 1, gpt->source_count) >= 0)
+     && dt_masks_point_in_form_exact(pt, 1, gpt->source, 1, gpt->source_count, NULL, 0) >= 0)
   {
     *inside_source = 1;
     *inside = 1;
@@ -92,11 +92,11 @@ static void _circle_get_distance(float x, float y, float as, dt_masks_form_gui_t
   *dist = sqf(center_dx) + sqf(center_dy);
 
   // we check if it's inside borders
-  if(dt_masks_point_in_form_exact(pt, 1, gpt->border, 1, gpt->border_count) < 0) return;
+  if(dt_masks_point_in_form_exact(pt, 1, gpt->border, 1, gpt->border_count, NULL, 0) < 0) return;
   *inside = 1;
 
   // and we check if it's inside form
-  if(dt_masks_point_in_form_exact(pt, 1, gpt->points, 1, gpt->points_count) < 0)
+  if(dt_masks_point_in_form_exact(pt, 1, gpt->points, 1, gpt->points_count, NULL, 0) < 0)
     *inside_border = 1;
 }
 
@@ -161,22 +161,7 @@ static int _circle_get_creation_preview(dt_masks_form_t *form, dt_masks_form_gui
                              &preview->border, &preview->border_count);
 
   if(!err && dt_masks_form_is_clone(form))
-  {
-    float source_pos[2] = { 0.0f, 0.0f };
-    dt_masks_calculate_source_pos_origin(gui, gui->pos[0], gui->pos[1], gui->pos[0], gui->pos[1],
-                                        &source_pos[0], &source_pos[1], FALSE);
-    const float center_source[2] = { source_pos[0] - gui->pos[0], source_pos[1] - gui->pos[1] };
-
-    preview->source_points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * preview->points_count, 0);
-    if(IS_NULL_PTR(preview->source_points))
-      err = 1;
-
-    for(int i = 0; !err && i < preview->points_count; i++)
-    {
-      preview->source_points[i * 2] = preview->points[i * 2] + center_source[0];
-      preview->source_points[i * 2 + 1] = preview->points[i * 2 + 1] + center_source[1];
-    }
-  }
+    err = dt_masks_preview_add_clone_source(gui, preview);
 
   if(err)
     dt_masks_preview_buffers_cleanup(preview);
@@ -476,9 +461,13 @@ static int _circle_events_mouse_moved(struct dt_iop_module_t *module, double x, 
   return 0;
 }
 
-static void _circle_draw_shape(dt_develop_t *dev, cairo_t *cr, const float *points, const int points_count, const int coord_nb, const gboolean border, const gboolean source)
+static void _circle_draw_shape(dt_develop_t *dev, cairo_t *cr, const float *points, const int points_count, const int coord_nb, const gboolean border, const gboolean source,
+                              const dt_masks_skip_range_t *skips, const int skip_count)
 {
-   // unused arg, keep compiler from complaining
+  /* A circle has no self-intersections, so it never carries an exclusion list -- these are the
+   * shared shape_draw_function_t signature, not something to honour here. */
+  (void)dev; (void)border; (void)source; (void)skips; (void)skip_count;
+
   /* One line_to per point sampled at RAW resolution is several per device pixel; emit at the
    * resolution the context can actually show. See dt_draw_min_emit_step() (mirrors the brush). */
   const double min_step = dt_draw_min_emit_step(cr);
@@ -542,45 +531,7 @@ static int _circle_get_points_source(dt_develop_t *dev, float x, float y, float 
   *points = _points_to_transform(dev, x, y, radius, wd, ht, points_count);
   if(IS_NULL_PTR(*points)) return 1;
 
-  // we transform with all distortion that happen *before* the module
-  // so we have now the TARGET points in module input reference
-  if(!dt_dev_distort_transform_gui(dev, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_EXCL,
-                                    *points, *points_count))
-    goto error;
-
-  // now we move all the points by the shift
-  // so we have now the SOURCE points in module input reference
-  float pts[2] = { xs, ys };
-  dt_dev_coordinates_raw_norm_to_raw_abs(dev, pts, 1);
-  if(!dt_dev_distort_transform_gui(dev, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_EXCL,
-                                    pts, 1))
-    goto error;
-
-  {
-    const float dx = pts[0] - (*points)[0];
-    const float dy = pts[1] - (*points)[1];
-    __OMP_PARALLEL_FOR_SIMD__(if(*points_count > 100) aligned(points:64))
-    for(int i = 0; i < *points_count; i++)
-    {
-      (*points)[i * 2] += dx;
-      (*points)[i * 2 + 1] += dy;
-    }
-  }
-
-  // we apply the rest of the distortions (those after the module)
-  // so we have now the SOURCE points in final image reference
-  if(!dt_dev_distort_transform_gui(dev, module->iop_order, DT_DEV_TRANSFORM_DIR_FORW_INCL,
-                                    *points, *points_count))
-    goto error;
-
-  return 0;
-
-  // if we failed, then free all and return
-error:
-  dt_pixelpipe_cache_free_align(*points);
-  *points = NULL;
-  *points_count = 0;
-  return 1;
+  return dt_masks_points_shift_to_source(dev, module, points, points_count, xs, ys, 0);
 }
 
 static int _circle_get_points(dt_develop_t *dev, float x, float y, float radius, float radius2, float rotation,
@@ -644,13 +595,13 @@ static void _circle_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_f
   const gboolean selected = (gui->group_selected == index) && (gui->form_selected || gui->form_dragging);
   if(gpt->points && gpt->points_count > 1)
     dt_draw_shape_lines(gui->dev, DT_MASKS_NO_DASH, FALSE, cr, num_points, selected, zoom_scale, gpt->points,
-                        gpt->points_count, &dt_masks_functions_circle.draw_shape, CAIRO_LINE_CAP_BUTT);
+                        gpt->points_count, &dt_masks_functions_circle.draw_shape, CAIRO_LINE_CAP_BUTT, NULL, 0);
   // we draw the borders
   if(gui->group_selected == index)
   { 
     if(gpt->border && gpt->border_count > 1)
       dt_draw_shape_lines(gui->dev, DT_MASKS_DASH_STICK, FALSE, cr, num_points, (gui->border_selected), zoom_scale, gpt->border,
-                          gpt->border_count, &dt_masks_functions_circle.draw_shape, CAIRO_LINE_CAP_ROUND);
+                          gpt->border_count, &dt_masks_functions_circle.draw_shape, CAIRO_LINE_CAP_ROUND, NULL, 0);
   }
 
   // draw the source if any
@@ -663,29 +614,17 @@ static void _circle_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks_f
   }
 }
 
-static void _bounding_box(const float *const points, int num_points, int *width, int *height, int *posx, int *posy)
-{
-  // search for min/max X and Y coordinates
-  float xmin = FLT_MAX, xmax = FLT_MIN, ymin = FLT_MAX, ymax = FLT_MIN;
-  for(int i = 1; i < num_points; i++) // skip point[0], which is circle's center
-  {
-    xmin = fminf(points[i * 2], xmin);
-    xmax = fmaxf(points[i * 2], xmax);
-    ymin = fminf(points[i * 2 + 1], ymin);
-    ymax = fmaxf(points[i * 2 + 1], ymax);
-  }
-  // set the min/max values we found
-  *posx = xmin;
-  *posy = ymin;
-  *width = (xmax - xmin);
-  *height = (ymax - ymin);
-}
 
 static dt_masks_raster_result_t _circle_get_points_border(dt_develop_t *dev, struct dt_masks_form_t *form,
                                      float **points,
-                                     int *points_count, float **border, int *border_count, int source,
+                                     int *points_count, float **border, int *border_count,
+                                     dt_masks_skip_range_t **border_skips, int *border_skip_count,
+                                     int source,
                                      const dt_iop_module_t *module)
 {
+  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
+  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
+
   /* No geometry to build an outline from: the outline is empty, which is a result, not a
    * failure. Reporting success here (as this did) told the caller to cache a NULL outline as
    * if it had been built. */
@@ -747,7 +686,7 @@ static dt_masks_raster_result_t _circle_get_source_area(dt_iop_module_t *module,
     return DT_MASKS_RASTER_ERROR;
   }
 
-  _bounding_box(points, num_points, width, height, posx, posy);
+  dt_masks_points_bounding_box(points, num_points, width, height, posx, posy);
   dt_pixelpipe_cache_free_align(points);
   return DT_MASKS_RASTER_OK;
 }
@@ -782,7 +721,7 @@ static dt_masks_raster_result_t _circle_get_area(const dt_iop_module_t *const re
     return DT_MASKS_RASTER_ERROR;
   }
 
-  _bounding_box(points, num_points, width, height, posx, posy);
+  dt_masks_points_bounding_box(points, num_points, width, height, posx, posy);
   dt_pixelpipe_cache_free_align(points);
   return DT_MASKS_RASTER_OK;
 }
@@ -1031,39 +970,13 @@ static dt_masks_raster_result_t _circle_get_mask_roi(const dt_iop_module_t *cons
   if(bbw <= 1 || bbh <= 1)
     return DT_MASKS_RASTER_EMPTY;
 
-  float *const restrict points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)bbw * bbh * 2, 0);
+  const dt_masks_sample_grid_t sample_grid
+      = { .x0 = bbxm, .y0 = bbym, .width = bbw, .height = bbh,
+          .step = grid, .px = px, .py = py, .iscale = iscale };
+  float *const restrict points
+      = dt_masks_sample_grid_backtransform(pipe, module->iop_order, &sample_grid, "circle", form->name);
   if(IS_NULL_PTR(points)) return DT_MASKS_RASTER_ERROR;
-
-  // we populate the grid points in module coordinates
-  __OMP_PARALLEL_FOR__(collapse(2) if(bbw*bbh > 50000))
-  for(int j = bbym; j <= bbYM; j++)
-    for(int i = bbxm; i <= bbXM; i++)
-    {
-      const size_t index = (size_t)(j - bbym) * bbw + i - bbxm;
-      points[index * 2] = (grid * i + px) * iscale;
-      points[index * 2 + 1] = (grid * j + py) * iscale;
-    }
-
-  if(dt_get_debug_flags() & DT_DEBUG_PERF)
-  {
-    dt_print(DT_DEBUG_MASKS, "[masks %s] circle grid took %0.04f sec\n", form->name, dt_get_wtime() - start2);
-    start2 = dt_get_wtime();
-  }
-
-  // we back transform all these points to the input image coordinates
-  if(!dt_dev_distort_backtransform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points,
-                                        (size_t)bbw * bbh))
-  {
-    dt_pixelpipe_cache_free_align(points);
-    return DT_MASKS_RASTER_ERROR;
-  }
-
-  if(dt_get_debug_flags() & DT_DEBUG_PERF)
-  {
-    dt_print(DT_DEBUG_MASKS, "[masks %s] circle transform took %0.04f sec\n", form->name,
-             dt_get_wtime() - start2);
-    start2 = dt_get_wtime();
-  }
+  start2 = dt_get_wtime();
 
   // we calculate the mask values at the transformed points;
   // for results: re-use the points array
@@ -1090,43 +1003,8 @@ static dt_masks_raster_result_t _circle_get_mask_roi(const dt_iop_module_t *cons
 
   // we fill the pre-initialized output buffer by interpolation;
   // we only need to take the contents of our bounding box into account
-  const int endx = MIN(width, bbXM * grid);
-  const int endy = MIN(height, bbYM * grid);
-  const float inv_grid2 = 1.0f / (grid * grid);
-  float w0[4], w1[4];
-  for(int i = 0; i < grid; i++)
-  {
-    w0[i] = (float)(grid - i);
-    w1[i] = (float)i;
-  }
-  __OMP_PARALLEL_FOR__(if((size_t)(endy - bbym * grid) * (size_t)(endx - bbxm * grid) > 50000))
-  for(int j = bbym * grid; j < endy; j++)
-  {
-    const int jj = j % grid;
-    const int mj = j / grid - bbym;
-    const float wj0 = w0[jj];
-    const float wj1 = w1[jj];
-    const size_t row_base = (size_t)mj * bbw;
-    float *const row = buffer + (size_t)j * width;
-    int ii = 0;
-    int mi = 0;
-    for(int i = bbxm * grid; i < endx; i++)
-    {
-      const size_t mindex = row_base + mi;
-      const float wii0 = w0[ii];
-      const float wii1 = w1[ii];
-      row[i] = (points[mindex * 2] * wii0 * wj0
-                + points[(mindex + 1) * 2] * wii1 * wj0
-                + points[(mindex + bbw) * 2] * wii0 * wj1
-                + points[(mindex + bbw + 1) * 2] * wii1 * wj1) * inv_grid2;
-      ii++;
-      if(ii == grid)
-      {
-        ii = 0;
-        mi++;
-      }
-    }
-  }
+  int endx = 0, endy = 0;
+  dt_masks_sample_grid_interpolate(points, &sample_grid, buffer, width, height, &endx, &endy);
 
   dt_pixelpipe_cache_free_align(points);
 

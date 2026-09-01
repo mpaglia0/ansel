@@ -65,6 +65,10 @@ typedef struct dt_masks_form_gui_points_t
   int points_count;
   float *border;   // border points in absolute coordinates in output image space
   int border_count;
+  // Self-intersection cuts of `border', out-of-band -- see dt_masks_skip_range_t. NULL/0 for
+  // every shape whose border cannot fold over itself (all but polygon today).
+  dt_masks_skip_range_t *border_skips;
+  int border_skip_count;
   float *source;   // source point in absolute coordinates in output image space
   int source_count;
   gboolean clockwise;
@@ -363,6 +367,14 @@ static inline float dt_masks_border_from_projected_handle(dt_develop_t *dev, con
 
 // Circle, ellipse and gradient creation previews all follow the same drawing sequence:
 // optional save/restore, draw the shape, then draw the border preview if present.
+/** Append a shape's outline to @p cr as the complement of its exclusion list: one cairo sub-path
+ * per run between the spans in @p skips, which are where the offset curve doubles back on itself
+ * and must not be drawn. Pass NULL and 0 for a shape with nothing to exclude. Implemented in
+ * masks/masks_gui.c -- see there for why the excluded spans travel beside the buffer and not
+ * inside it. */
+void dt_masks_draw_outline_runs(cairo_t *cr, const float *const points, const int first, const int last,
+                                const dt_masks_skip_range_t *skips, const int skip_count);
+
 static inline void dt_masks_draw_preview_shape(struct dt_develop_t *dev, cairo_t *cr, const float zoom_scale,
                                                const int num_points,
                                                float *points, const int points_count,
@@ -376,10 +388,11 @@ static inline void dt_masks_draw_preview_shape(struct dt_develop_t *dev, cairo_t
   if(save_restore) cairo_save(cr);
   if(points && points_count > 0)
     dt_draw_shape_lines(dev, DT_MASKS_NO_DASH, source, cr, num_points, FALSE, zoom_scale, points, points_count,
-                        draw_shape, shape_cap);
+                        draw_shape, shape_cap, NULL, 0);
   if(border && border_count > 0)
+    /* a creation preview is drawn while the shape is still being placed: it has no cuts yet */
     dt_draw_shape_lines(dev, DT_MASKS_DASH_STICK, source, cr, num_points, FALSE, zoom_scale, border, border_count,
-                        draw_shape, border_cap);
+                        draw_shape, border_cap, NULL, 0);
   if(save_restore) cairo_restore(cr);
 }
 
@@ -521,6 +534,31 @@ void dt_masks_draw_path_seg_by_seg(cairo_t *cr, dt_masks_form_gui_t *gui, const 
                                    const int points_count, const int node_count, const float zoom_scale,
                                    const gboolean round_ends);
 
+/**
+ * @brief How the overlay maps image coordinates onto its cairo target.
+ *
+ * @details The darkroom passes NULL and the mapping comes from the viewport -- zoom, pan, and
+ * the GUI's device pixel ratio. None of that exists outside the GUI: dt_gui_get_global() is
+ * darktable.gui, which is NULL in ansel-cli and in the test binaries, so the viewport path
+ * would dereference it. A headless caller supplies its own mapping instead, which is also what
+ * a regression test wants -- a fixed, reproducible transform rather than whatever the window
+ * happened to be showing.
+ *
+ * This exists so the OVERLAY IS DRAWN BY THE SAME CODE in both cases. The alternative -- a
+ * second drawing path for diagnostics -- would be a fork that stops agreeing with the GUI
+ * exactly when it is needed to explain a GUI problem.
+ */
+typedef struct dt_masks_overlay_transform_t
+{
+  double scale;               /**< image pixels -> target pixels */
+  double offset_x, offset_y;  /**< target-space translation, applied before the scale */
+} dt_masks_overlay_transform_t;
+
+/** @brief Draw the mask overlay with an explicit mapping; @p transform NULL means the viewport's. */
+void dt_masks_events_post_expose_with(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr,
+                                      int32_t width, int32_t height, int32_t pointerx, int32_t pointery,
+                                      const dt_masks_overlay_transform_t *transform);
+
 void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr, int32_t width, int32_t height,
                                  int32_t pointerx, int32_t pointery);
 int dt_masks_events_mouse_leave(struct dt_iop_module_t *module);
@@ -617,7 +655,6 @@ dt_masks_form_group_t *dt_masks_group_add_form_with_state(dt_develop_t *dev, dt_
                                                           dt_masks_state_t state, float opacity);
 
 /** utils functions */
-int dt_masks_point_in_form_exact(const float *pts, int num_pts, const float *points, int points_start, int points_count);
 
 /** allow to select a shape inside an iop */
 void dt_masks_select_form(dt_develop_t *dev, struct dt_iop_module_t *module, dt_masks_form_t *sel);

@@ -43,6 +43,7 @@
 #include "system/macros.h"
 #include "database/history_repository.h"
 #include "system/target_clones.h"
+#include "system/openmp.h"
 #include "system/mem_alloc.h"
 #include "common/hash.h"
 #include "common/logging.h"
@@ -116,6 +117,7 @@ void dt_masks_form_gui_points_free(gpointer data)
 
   dt_pixelpipe_cache_free_align(gui_points->points);
   dt_pixelpipe_cache_free_align(gui_points->border);
+  dt_pixelpipe_cache_free_align(gui_points->border_skips);
   dt_pixelpipe_cache_free_align(gui_points->source);
   dt_free(gui_points);
 }
@@ -216,13 +218,458 @@ int dt_masks_form_duplicate_in_group(dt_develop_t *develop, int group_id, int fo
 dt_masks_raster_result_t dt_masks_get_points_border(dt_develop_t *develop, dt_masks_form_t *mask_form,
                                float **point_buffer, int *point_count,
                                float **border_buffer, int *border_count,
+                               dt_masks_skip_range_t **border_skips, int *border_skip_count,
                                int source, dt_iop_module_t *module)
 {
+  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
+  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
+
   /* A shape type with no outline builder is a programming error, not an empty outline. */
-  if(mask_form->functions && mask_form->functions->get_points_border)
-    return mask_form->functions->get_points_border(develop, mask_form, point_buffer, point_count,
-                                                   border_buffer, border_count, source, module);
-  return DT_MASKS_RASTER_ERROR;
+  if(IS_NULL_PTR(mask_form->functions) || IS_NULL_PTR(mask_form->functions->get_points_border))
+    return DT_MASKS_RASTER_ERROR;
+
+  const dt_masks_raster_result_t status
+      = mask_form->functions->get_points_border(develop, mask_form, point_buffer, point_count,
+                                                border_buffer, border_count,
+                                                border_skips, border_skip_count, source, module);
+
+  /* THE OUTLINE BUFFERS HOLD FINITE GEOMETRY AND NOTHING ELSE.
+   *
+   * Everything a consumer must not draw travels beside the buffer, in border_skips. Nothing is
+   * encoded into the coordinates -- no NaN marking an excluded sample, no NaN,NaN ending a
+   * contour, and above all no index smuggled through a float y with a NaN x, which is what issue
+   * #1313 shipped and what the out-of-band ranges replaced. A dozen walkers downstream dropped
+   * their own NaN tests on the strength of this.
+   *
+   * It is not checked here, and that is deliberate. The invariant is STRUCTURAL: neither
+   * _brush_border_get_XY() nor _polygon_border_get_XY() can write a sentinel -- they return
+   * whether they produced a border point, and the recursions carry explicit have_* flags -- so
+   * there is no longer a code path that can violate it. A scan for something structurally
+   * impossible is not defence, it is a tax: measured at 0.24 ms per outline rebuild on the
+   * reported brush's two 52492-sample buffers, which is a third of what stroking the whole
+   * overlay costs, on the same per-frame path during a mask drag.
+   *
+   * The one place a violation would still be caught is free: dt_masks_point_in_form_exact()
+   * already visits every sample, and reports a non-finite one rather than decoding it. If a
+   * future producer regresses, that is where it will say so. */
+
+  return status;
+}
+
+static int _skip_range_cmp(const void *a, const void *b)
+{
+  const int va = ((const dt_masks_skip_range_t *)a)->jump_from;
+  const int vb = ((const dt_masks_skip_range_t *)b)->jump_from;
+  return (va > vb) - (va < vb);
+}
+
+/* ------------------------------------------------------------------------------------- */
+/* Where does a shape's border cross itself?
+ *
+ * polygon.c has answered this since forever with a pixel grid: walk the contour, stamp each cell
+ * with the index that passed through it, and call a revisited cell a crossing. That works well
+ * enough there and is left alone -- but it is an approximation with shape-specific guards (it
+ * refuses any span containing a shape extremum, and merges a new crossing into the previous one
+ * on an index-ordering test), and measured against ground truth on issue #1313's brush it missed
+ * four of the eight real crossings while finding one the local search could not.
+ *
+ * A brush needs all of them, so this answers the question exactly: bucket the segments into a
+ * coarse spatial hash, and run a real segment-segment intersection on the pairs that share a
+ * bucket. No extrema guard, no merge heuristic, and the intersection POINT falls out of the
+ * test, which is what lets the caller land its cut on the samples that sit at the crossing --
+ * cutting anywhere else leaves the two ends apart and the drawer spans the gap with a chord.
+ *
+ * Complexity is the hash's, not O(n^2): the contour is decimated to about one probe per pixel
+ * first, and only same-bucket pairs are tested. Polygon should migrate here once someone is
+ * willing to re-verify its output against the grid version; until then the two coexist
+ * deliberately, and this comment is the record of why.
+ */
+
+#define MASKS_XSECT_BUCKET 4      /* px */
+
+/** Do the two segments properly cross, and where? Endpoint touches do not count. */
+static inline gboolean _segments_cross(const float *a0, const float *a1, const float *b0, const float *b1,
+                                float *out_x, float *out_y)
+{
+  const float rx = a1[0] - a0[0], ry = a1[1] - a0[1];
+  const float sx = b1[0] - b0[0], sy = b1[1] - b0[1];
+  const float denom = rx * sy - ry * sx;
+  if(fabsf(denom) < 1e-12f) return FALSE;
+
+  const float qpx = b0[0] - a0[0], qpy = b0[1] - a0[1];
+  const float t = (qpx * sy - qpy * sx) / denom;
+  const float u = (qpx * ry - qpy * rx) / denom;
+  if(t <= 0.0f || t >= 1.0f || u <= 0.0f || u >= 1.0f) return FALSE;
+
+  *out_x = a0[0] + t * rx;
+  *out_y = a0[1] + t * ry;
+  return TRUE;
+}
+
+/** The sample in [@p from, @p to] closest to (@p x, @p y).
+ *
+ * A cut has to land on the crossing itself or its two ends do not meet, and the probes only
+ * bracket it -- they are a quarter-pixel apart at best and much coarser once the walk widens. */
+static inline int _nearest_sample_to(const float *const border, const int from, const int to,
+                              const float x, const float y)
+{
+  int best = from;
+  float best_d2 = FLT_MAX;
+  for(int t = from; t <= to; t++)
+  {
+    const float d2 = sqf(border[t * 2] - x) + sqf(border[t * 2 + 1] - y);
+    if(d2 < best_d2)
+    {
+      best_d2 = d2;
+      best = t;
+    }
+  }
+  return best;
+}
+
+/** Does the contour close a loop between probe segments @p j and @p k, and where should the cut
+ * land? Writes the two sample indices and returns TRUE when it does.
+ *
+ * A loop closes in one of two ways, and testing only for one leaves the other drawn. Two strands
+ * that CROSS meet transversally -- that is the fold. An arc sweeping all the way round a node
+ * comes back to its own starting point and meets it TANGENTIALLY: no crossing, and yet it plainly
+ * encloses a loop. Those are the node-centred circles that appear over the stroke when the join
+ * arcs are left in.
+ *
+ * The near-return test costs nothing here: both probes are already in hand and already known to
+ * share a bucket. It cannot fire on the two sides of a stroke approaching each other, because the
+ * caller only accepts short spans and a stroke that thin has no interior to protect. */
+static inline gboolean _probe_pair_closes_a_loop(const float *const border, const int *const probes,
+                                          const int j, const int k, int *const out_lo, int *const out_hi)
+{
+  float ix = 0.0f;
+  float iy = 0.0f;
+
+  if(!_segments_cross(&border[probes[j] * 2], &border[probes[j + 1] * 2],
+                      &border[probes[k] * 2], &border[probes[k + 1] * 2], &ix, &iy))
+  {
+    const float dx = border[probes[k] * 2] - border[probes[j] * 2];
+    const float dy = border[probes[k] * 2 + 1] - border[probes[j] * 2 + 1];
+    if(dx * dx + dy * dy > 2.25f) return FALSE;    // (1.5 px)^2
+    ix = border[probes[j] * 2];
+    iy = border[probes[j] * 2 + 1];
+  }
+
+  const int lo = _nearest_sample_to(border, probes[j], probes[j + 1], ix, iy);
+  const int hi = _nearest_sample_to(border, probes[k], probes[k + 1], ix, iy);
+  if(hi <= lo + 1) return FALSE;
+
+  *out_lo = lo;
+  *out_hi = hi;
+  return TRUE;
+}
+
+/** Decimate the contour to roughly one probe per quarter-pixel. See the note on the detector for
+ * why a whole pixel is too coarse. Returns how many were kept. */
+static inline int _collect_xsect_probes(const float *const border, const int header, const int border_count,
+                                 int *const probes)
+{
+  int n = 0;
+  int previous = -1;
+  for(int i = header; i < border_count; i++)
+  {
+    if(previous >= 0)
+    {
+      const float dx = border[i * 2] - border[previous * 2];
+      const float dy = border[i * 2 + 1] - border[previous * 2 + 1];
+      if(dx * dx + dy * dy < 0.0625f) continue;   // (0.25 px)^2
+    }
+    probes[n++] = i;
+    previous = i;
+  }
+  return n;
+}
+
+int dt_masks_border_find_self_intersections(const float *const border, const int border_count,
+                                            const int header, float *const crossing_pairs,
+                                            const int max_pairs)
+{
+  if(IS_NULL_PTR(border) || IS_NULL_PTR(crossing_pairs) || max_pairs <= 0) return 0;
+  if(border_count - header < 8) return 0;
+
+  int *probes = (int *)dt_alloc_align(sizeof(int) * (size_t)(border_count - header));
+  if(IS_NULL_PTR(probes)) return 0;
+
+  /* Decimate, but only to a QUARTER pixel. The border is sampled at raw-image resolution --
+   * about 13 samples per pixel on a full-size brush -- so testing every sample against every
+   * other is wasteful; but decimating to a whole pixel smooths the small loops away entirely.
+   * Measured: at one probe per pixel, four real crossings spanning 7 to 17 pixels went unseen,
+   * and each of them is a visible kink in the drawn outline. */
+  const int n = _collect_xsect_probes(border, header, border_count, probes);
+
+  if(n < 8) { dt_free_align(probes); return 0; }
+
+  /* Bucket every probe segment by the cells its bounding box covers. A hash keyed on the cell
+   * coordinates keeps this independent of where the shape sits and of how large the image is --
+   * a grid over the bounding box would be tens of megabytes for a stroke across a 50 Mpx frame. */
+  const int buckets = 1 << 14;
+  int *heads = (int *)dt_alloc_align(sizeof(int) * buckets);
+  int *next = (int *)dt_alloc_align(sizeof(int) * (size_t)(n * 4));
+  int *owner = (int *)dt_alloc_align(sizeof(int) * (size_t)(n * 4));
+  if(IS_NULL_PTR(heads) || IS_NULL_PTR(next) || IS_NULL_PTR(owner))
+  {
+    dt_free_align(probes); dt_free_align(heads); dt_free_align(next); dt_free_align(owner);
+    return 0;
+  }
+  for(int i = 0; i < buckets; i++) heads[i] = -1;
+
+  int entries = 0;
+  int found = 0;
+
+  for(int k = 0; k + 1 < n && found < max_pairs; k++)
+  {
+    const float ax = border[probes[k] * 2],     ay = border[probes[k] * 2 + 1];
+    const float bx = border[probes[k + 1] * 2], by = border[probes[k + 1] * 2 + 1];
+
+    const int cx0 = (int)floorf(MIN(ax, bx) / MASKS_XSECT_BUCKET);
+    const int cx1 = (int)floorf(MAX(ax, bx) / MASKS_XSECT_BUCKET);
+    const int cy0 = (int)floorf(MIN(ay, by) / MASKS_XSECT_BUCKET);
+    const int cy1 = (int)floorf(MAX(ay, by) / MASKS_XSECT_BUCKET);
+    /* A segment spanning many cells means the contour jumped; it is not worth indexing widely. */
+    if((cx1 - cx0) > 4 || (cy1 - cy0) > 4) continue;
+
+    for(int cy = cy0; cy <= cy1; cy++)
+      for(int cx = cx0; cx <= cx1; cx++)
+      {
+        const unsigned int h = ((unsigned int)(cx * 73856093) ^ (unsigned int)(cy * 19349663))
+                               & (unsigned int)(buckets - 1);
+        /* test against everything already in this bucket ... */
+        /* test against everything already in this bucket ... */
+        for(int e = heads[h]; e >= 0 && found < max_pairs; e = next[e])
+        {
+          const int j = owner[e];
+          if(k - j < 8) continue;   // ~2 px apart: nearer than that they share an endpoint
+
+          int lo = 0;
+          int hi = 0;
+          if(!_probe_pair_closes_a_loop(border, probes, j, k, &lo, &hi)) continue;
+
+          crossing_pairs[found * 2] = (float)lo;
+          crossing_pairs[found * 2 + 1] = (float)hi;
+          found++;
+        }
+        /* ... then add ourselves, so each pair is tested exactly once */
+        if(entries < n * 4)
+        {
+          owner[entries] = k;
+          next[entries] = heads[h];
+          heads[h] = entries;
+          entries++;
+        }
+      }
+  }
+
+  dt_free_align(probes); dt_free_align(heads); dt_free_align(next); dt_free_align(owner);
+  return found;
+}
+
+/** Is @p index inside one of the excluded spans? For a consumer that SEARCHES the outline
+ * rather than walking it forward -- a forward walk should use dt_masks_draw_outline_runs() or
+ * carry its own cursor. @p skips must be sorted and disjoint. */
+gboolean dt_masks_skip_contains(const dt_masks_skip_range_t *skips, const int skip_count, const int index)
+{
+  if(IS_NULL_PTR(skips) || skip_count <= 0) return FALSE;
+
+  int lo = 0, hi = skip_count - 1;
+  while(lo <= hi)
+  {
+    const int mid = (lo + hi) / 2;
+    if(index < skips[mid].jump_from) hi = mid - 1;
+    else if(index >= skips[mid].resume_at) lo = mid + 1;
+    else return TRUE;
+  }
+  return FALSE;
+}
+
+
+void dt_masks_points_bounding_box(const float *const points, const int num_points,
+                                  int *width, int *height, int *posx, int *posy)
+{
+  // NOTE the seeds: -FLT_MAX, not FLT_MIN. FLT_MIN is the smallest POSITIVE normal float, so
+  // seeding a running maximum with it silently clamps the box at 0 for a shape that lies
+  // entirely off the left or top edge -- an over-large box rather than a wrong one, which is
+  // why it went unnoticed, but wrong all the same.
+  float xmin = FLT_MAX, xmax = -FLT_MAX, ymin = FLT_MAX, ymax = -FLT_MAX;
+
+  for(int i = 1; i < num_points; i++) // point 0 is the centre, not part of the outline
+  {
+    xmin = fminf(points[i * 2], xmin);
+    xmax = fmaxf(points[i * 2], xmax);
+    ymin = fminf(points[i * 2 + 1], ymin);
+    ymax = fmaxf(points[i * 2 + 1], ymax);
+  }
+
+  *posx = xmin;
+  *posy = ymin;
+  *width = (xmax - xmin);
+  *height = (ymax - ymin);
+}
+
+float *dt_masks_sample_grid_backtransform(struct dt_dev_pixelpipe_t *pipe, const double iop_order,
+                                          const dt_masks_sample_grid_t *const grid,
+                                          const char *const shape, const char *const form_name)
+{
+  const int gw = grid->width;
+  const int gh = grid->height;
+  const int step = grid->step;
+  const int px = grid->px;
+  const int py = grid->py;
+  const float iscale = grid->iscale;
+  const size_t count = (size_t)gw * gh;
+
+  double start = dt_get_wtime();
+
+  float *const restrict points = dt_pixelpipe_cache_alloc_align_float_cache(2 * count, 0);
+  if(IS_NULL_PTR(points)) return NULL;
+
+  // the grid points, in module coordinates
+  __OMP_PARALLEL_FOR__(collapse(2) if(count > 50000))
+  for(int j = 0; j < gh; j++)
+    for(int i = 0; i < gw; i++)
+    {
+      const size_t index = (size_t)j * gw + i;
+      points[index * 2] = (step * (i + grid->x0) + px) * iscale;
+      points[index * 2 + 1] = (step * (j + grid->y0) + py) * iscale;
+    }
+
+  if(dt_get_debug_flags() & DT_DEBUG_PERF)
+  {
+    dt_print(DT_DEBUG_MASKS, "[masks %s] %s grid took %0.04f sec\n", form_name, shape,
+             dt_get_wtime() - start);
+    start = dt_get_wtime();
+  }
+
+  // and back to input image coordinates
+  if(!dt_dev_distort_backtransform_plus(pipe, iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, count))
+  {
+    dt_pixelpipe_cache_free_align(points);
+    return NULL;
+  }
+
+  if(dt_get_debug_flags() & DT_DEBUG_PERF)
+    dt_print(DT_DEBUG_MASKS, "[masks %s] %s transform took %0.04f sec\n", form_name, shape,
+             dt_get_wtime() - start);
+
+  return points;
+}
+
+void dt_masks_sample_grid_interpolate(const float *const points, const dt_masks_sample_grid_t *const grid,
+                                      float *const buffer, const int buf_width, const int buf_height,
+                                      int *const endx, int *const endy)
+{
+  const int step = grid->step;
+  const int gw = grid->width;
+  const int startx = grid->x0 * step;
+  const int starty = grid->y0 * step;
+
+  // the last cell contributes its far corner, so the covered rectangle ends one whole cell short
+  // of the lattice -- and is clipped to the buffer, since a bounding box may overhang the ROI
+  const int ex = MIN(buf_width, (grid->x0 + gw - 1) * step);
+  const int ey = MIN(buf_height, (grid->y0 + grid->height - 1) * step);
+
+  // the two bilinear weight ramps, one entry per position within a cell
+  float w0[DT_MASKS_GRID_MAX_STEP], w1[DT_MASKS_GRID_MAX_STEP];
+  for(int i = 0; i < step; i++)
+  {
+    w0[i] = (float)(step - i);
+    w1[i] = (float)i;
+  }
+  const float inv_step2 = 1.0f / (step * step);
+
+  __OMP_PARALLEL_FOR__(if((size_t)(ey - starty) * (size_t)(ex - startx) > 50000))
+  for(int j = starty; j < ey; j++)
+  {
+    const int jj = j % step;
+    const int mj = j / step - grid->y0;
+    const float wj0 = w0[jj];
+    const float wj1 = w1[jj];
+    const size_t row_base = (size_t)mj * gw;
+    float *const row = buffer + (size_t)j * buf_width;
+    int ii = 0;
+    int mi = 0;
+
+    for(int i = startx; i < ex; i++)
+    {
+      const size_t mindex = row_base + mi;
+      const float wii0 = w0[ii];
+      const float wii1 = w1[ii];
+      row[i] = (points[mindex * 2] * wii0 * wj0
+                + points[(mindex + 1) * 2] * wii1 * wj0
+                + points[(mindex + gw) * 2] * wii0 * wj1
+                + points[(mindex + gw + 1) * 2] * wii1 * wj1) * inv_step2;
+      ii++;
+      if(ii == step)
+      {
+        ii = 0;
+        mi++;
+      }
+    }
+  }
+
+  if(endx) *endx = ex;
+  if(endy) *endy = ey;
+}
+
+int dt_masks_skip_ranges_build(const float *crossing_pairs, const int pair_count, const int point_count,
+                               dt_masks_skip_range_t *out, int *dropped_wrapping)
+{
+  if(!IS_NULL_PTR(dropped_wrapping)) *dropped_wrapping = 0;
+  if(IS_NULL_PTR(crossing_pairs) || IS_NULL_PTR(out) || pair_count <= 0 || point_count <= 0) return 0;
+
+  int count = 0;
+  for(int i = 0; i < pair_count; i++)
+  {
+    const int v = (int)crossing_pairs[i * 2];
+    const int w = (int)crossing_pairs[i * 2 + 1];
+    if(v < 0 || v >= point_count || w < 0 || w >= point_count) continue;
+    if(v == w) continue;
+
+    /* Discovery order is not read order: the detector walks from a shape extremum, so either
+     * index of the pair can come first in the buffer. The read walk is a fixed forward
+     * rotation, so the smaller raw index is always the one it reaches first. */
+    const int jump_from = MIN(v, w);
+    const int resume_at = MAX(v, w);
+
+    /* The border is a CLOSED contour: two crossing points cut it into TWO arcs, and the fold
+     * to remove is the SHORTER one -- not whichever happens to avoid the buffer seam. When the
+     * fold straddles the seam, [min, max] names its complement (issue #1313: three such pairs
+     * each covered ~147000 of 147546 border points instead of the 330-454 their folds actually
+     * spanned, and merging swallowed the shape). A wrapping skip cannot be expressed by a
+     * forward-only range, so the seam-straddling fold is left in: a small local kink, bounded
+     * by the fold's own size, instead of a straight chord across the whole shape. */
+    if(resume_at - jump_from > point_count - (resume_at - jump_from))
+    {
+      if(!IS_NULL_PTR(dropped_wrapping)) (*dropped_wrapping)++;
+      continue;
+    }
+
+    out[count].jump_from = jump_from;
+    out[count].resume_at = resume_at;
+    count++;
+  }
+
+  if(count == 0) return 0;
+
+  /* Sort and merge overlaps into disjoint ranges. Two overlapping ranges consumed
+   * independently once trapped the read walk in a cycle between them; disjoint and sorted,
+   * every skip moves strictly forward and each border index is visited at most once. */
+  qsort(out, count, sizeof(dt_masks_skip_range_t), _skip_range_cmp);
+
+  int merged = 1;
+  for(int i = 1; i < count; i++)
+  {
+    if(out[i].jump_from <= out[merged - 1].resume_at)
+      out[merged - 1].resume_at = MAX(out[merged - 1].resume_at, out[i].resume_at);
+    else
+      out[merged++] = out[i];
+  }
+
+  return merged;
 }
 
 dt_masks_raster_result_t dt_masks_get_area(dt_iop_module_t *module, dt_dev_pixelpipe_t *pipe,
@@ -736,7 +1183,7 @@ int dt_masks_copy_used_forms_for_module(dt_develop_t *develop_dest, dt_develop_t
   const guint form_count = g_list_length(develop_src->forms);
   if(form_count == 0) return 0;
 
-  int *used_form_ids = calloc(form_count, sizeof(int));
+  int *used_form_ids = dt_calloc_align(form_count * sizeof(int));
   if(IS_NULL_PTR(used_form_ids)) return 1;
 
   _masks_fill_used_forms(develop_src->forms, source_module->blend_params->mask_id,
@@ -758,7 +1205,7 @@ int dt_masks_copy_used_forms_for_module(dt_develop_t *develop_dest, dt_develop_t
       dt_masks_form_t *new_form = dt_masks_dup_masks_form(mask_form);
       if(IS_NULL_PTR(new_form))
       {
-        dt_free(used_form_ids);
+        dt_free_align(used_form_ids);
         return 1;
       }
       develop_dest->forms = g_list_append(develop_dest->forms, new_form);
@@ -770,7 +1217,7 @@ int dt_masks_copy_used_forms_for_module(dt_develop_t *develop_dest, dt_develop_t
     }
   }
 
-  dt_free(used_form_ids);
+  dt_free_align(used_form_ids);
   return 0;
 }
 
@@ -899,7 +1346,7 @@ void dt_masks_write_masks_history_item(const int32_t image_id, const int history
   // nothing at all in that case -- the whole INSERT sat inside this test.
   if(!mask_form->functions) return;
 
-  char *const restrict point_buffer = (char *)malloc(point_count * point_struct_size);
+  char *const restrict point_buffer = (char *)dt_alloc_align(point_count * point_struct_size);
   int buffer_offset = 0;
   for(GList *point_node = mask_form->points; point_node; point_node = g_list_next(point_node))
   {
@@ -912,7 +1359,7 @@ void dt_masks_write_masks_history_item(const int32_t image_id, const int history
                                         point_count * point_struct_size, point_count,
                                         mask_form->source, 2 * sizeof(float));
 
-  dt_free(point_buffer);
+  dt_free_align(point_buffer);
 }
 
 void dt_masks_free_form(dt_masks_form_t *mask_form)
@@ -1247,21 +1694,22 @@ uint64_t dt_masks_form_get_own_hash(uint64_t hash, GList *masks, const dt_masks_
   return hash;
 }
 
-// adds formid to used array
-// if formid is a group it adds all the forms that belongs to that group
-static void _cleanup_unused_recurs(GList *form_list, int form_id, int *used_form_ids, int used_count)
+/* Marks form_id as used, and every form a group transitively contains.
+ *
+ * The set is unbounded on purpose. Its members are not a subset of form_list: every
+ * blend_params->mask_id ever recorded in history is fed in, groups of modules whose mask was
+ * since dropped included, and those ids have no form to match in the snapshot being cleaned.
+ * A fixed table sized on the snapshot's form count therefore fills up on ids that answer
+ * nothing, and the members discovered last -- the tail of the one group that IS live -- find no
+ * slot left and are silently taken for unused. Measured on a 20-step history: four departed
+ * groups ate the eight slots an 8-form snapshot allowed, and the two last shapes of the module's
+ * own mask group were deleted while the module was still using them.
+ *
+ * Re-entering an already-marked id also stops the walk here rather than after it: a group that
+ * contains itself through some chain of member groups would otherwise not terminate. */
+static void _cleanup_unused_recurs(GList *form_list, int form_id, GHashTable *used_form_ids)
 {
-  // first, we search for the formid in used table
-  for(int used_index = 0; used_index < used_count; used_index++)
-  {
-    if(used_form_ids[used_index] == 0)
-    {
-      // we store the formid
-      used_form_ids[used_index] = form_id;
-      break;
-    }
-    if(used_form_ids[used_index] == form_id) break;
-  }
+  if(!g_hash_table_add(used_form_ids, GINT_TO_POINTER(form_id))) return;
 
   // if the form is a group, we iterate through the sub-forms
   dt_masks_form_t *mask_form = dt_masks_get_from_id_ext(form_list, form_id);
@@ -1270,7 +1718,7 @@ static void _cleanup_unused_recurs(GList *form_list, int form_id, int *used_form
     for(GList *group_node = mask_form->points; group_node; group_node = g_list_next(group_node))
     {
       dt_masks_form_group_t *group_entry = (dt_masks_form_group_t *)group_node->data;
-      _cleanup_unused_recurs(form_list, group_entry->formid, used_form_ids, used_count);
+      _cleanup_unused_recurs(form_list, group_entry->formid, used_form_ids);
     }
   }
 }
@@ -1281,9 +1729,8 @@ static int _masks_cleanup_unused(dt_develop_t *dev, GList **forms_list, GList *h
   int masks_removed = 0;
   GList *forms = *forms_list;
 
-  // we create a table to store the ids of used forms
-  guint form_count = g_list_length(forms);
-  int *used_form_ids = calloc(form_count, sizeof(int));
+  // the set of ids used by the history entries we are about to walk
+  GHashTable *used_form_ids = g_hash_table_new(g_direct_hash, g_direct_equal);
 
   // check in history if the module has drawn masks and add it to used array
   int history_index = 0;
@@ -1298,7 +1745,7 @@ static int _masks_cleanup_unused(dt_develop_t *dev, GList **forms_list, GList *h
     if(blend_params)
     {
       if(blend_params->mask_id > 0)
-        _cleanup_unused_recurs(forms, blend_params->mask_id, used_form_ids, form_count);
+        _cleanup_unused_recurs(forms, blend_params->mask_id, used_form_ids);
     }
     history_index++;
   }
@@ -1308,29 +1755,23 @@ static int _masks_cleanup_unused(dt_develop_t *dev, GList **forms_list, GList *h
   while(shape_node)
   {
     dt_masks_form_t *mask_form = (dt_masks_form_t *)shape_node->data;
-    int is_used = 0;
-    for(int used_index = 0; used_index < form_count; used_index++)
-    {
-      if(used_form_ids[used_index] == mask_form->formid)
-      {
-        is_used = 1;
-        break;
-      }
-      if(used_form_ids[used_index] == 0) break;
-    }
+    const gboolean is_used = g_hash_table_contains(used_form_ids, GINT_TO_POINTER(mask_form->formid));
 
     shape_node = g_list_next(shape_node); // need to get 'next' now, because we may be removing the current node
 
-    if(is_used == 0)
+    if(!is_used)
     {
       forms = g_list_remove(forms, mask_form);
-      // and add it to allforms for cleanup
+      // This list's reference is handed over to dev->allforms rather than released: a form read
+      // from masks_history is created by dt_masks_create() and its snapshot membership is its
+      // only claim, so unref-ing here would free an object dev->forms may still be holding by
+      // address. One allforms entry per transferred claim keeps the teardown balanced.
       dev->allforms = g_list_append(dev->allforms, mask_form);
       masks_removed = 1;
     }
   }
 
-  dt_free(used_form_ids);
+  g_hash_table_destroy(used_form_ids);
 
   *forms_list = forms;
 
@@ -1344,7 +1785,7 @@ static int _masks_cleanup_unused(dt_develop_t *dev, GList **forms_list, GList *h
  * Caveat: if multiple history entries reference masks, some unused masks may remain.
  *         This is intentional so users can still jump back in history.
  */
-void dt_masks_cleanup_unused_from_list(dt_develop_t *dev, GList *history_list)
+static void _masks_cleanup_unused_from_list(dt_develop_t *dev, GList *history_list)
 {
   // a mask is used in a given hist->forms entry if it is used up to the next hist->forms
   // so we are going to remove for each hist->forms from the top
@@ -1372,8 +1813,17 @@ void dt_masks_cleanup_unused(dt_develop_t *develop)
 {
   dt_masks_change_form_gui(develop, NULL);
 
+  /* The sweep rewrites every hist->forms in place, and the async DB write job walks those same
+   * lists with history_mutex released. Its snapshot holds a reference on each history ITEM,
+   * which keeps the item alive but says nothing about the list cells g_list_remove() frees
+   * under it. Hold the writer across the sweep and the re-point that reads its result, so the
+   * job sees the image either fully swept or untouched. Order is history_mutex outer,
+   * masks_mutex (taken by dt_masks_replace_current_forms) inner -- the same way a history
+   * commit takes them. */
+  dt_pthread_rwlock_wrlock(&develop->history_mutex);
+
   // we remove the forms from history
-  dt_masks_cleanup_unused_from_list(develop, develop->history);
+  _masks_cleanup_unused_from_list(develop, develop->history);
 
   // and we save all that
   GList *forms = NULL;
@@ -1389,6 +1839,8 @@ void dt_masks_cleanup_unused(dt_develop_t *develop)
   }
 
   dt_masks_replace_current_forms(develop, forms);
+
+  dt_pthread_rwlock_unlock(&develop->history_mutex);
 }
 
 #include "detail.c"

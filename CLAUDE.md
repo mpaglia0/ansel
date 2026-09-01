@@ -1138,6 +1138,62 @@ are now refcounted (`dt_masks_form_t.refcount`, `src/develop/masks/masks_history
   already guarantees a GUI-side edit clones instead of mutating a form an in-flight pipeline run
   is holding.
 
+### The unused-shape sweep's used-set is not a subset of the snapshot it sweeps
+
+"Delete unused shapes" in the shape manager (`libs/masks.c`, `dt_masks_cleanup_unused()`) keeps a
+form when some history entry's `blend_params->mask_id` names it, or names a group that
+transitively contains it. Those ids are collected by walking history from the bottom up, and they
+are **not** a subset of the `hist->forms` snapshot being swept: a module whose drawn mask was
+since dropped keeps its old `mask_id` in every history entry it ever wrote, and no form in a
+later snapshot answers to it. The set is therefore unbounded with respect to the snapshot, and
+must live in a hash set — `_cleanup_unused_recurs()` sizing a table on `g_list_length(forms)`
+filled it with ids that match nothing and ran out of slots before the one live group's membership
+was walked, deleting shapes from the tail of that group inward while the module was still using
+them. Measured on a 20-step history: four departed groups (`colorbalancergb`, two `toneequal`, an
+older `exposure`) took four of the eight slots an 8-form snapshot allowed, the live group and its
+first three members took the rest, and the group's last two shapes were swept.
+
+Marking an id and recursing into it are now the same step, which also bounds a group that
+contains itself through a chain of member groups — the old code broke out of its scan on an
+already-seen id but recursed regardless, so such a cycle did not terminate.
+
+A swept form's snapshot reference is **handed to `dev->allforms`**, not released: a form read back
+from `masks_history` is built by `dt_masks_create()` and its snapshot membership is its only
+claim, so unref-ing at that point would free an object `dev->forms` may still hold by address. One
+`allforms` entry per transferred claim is what keeps teardown balanced; do not "fix" the missing
+unref.
+
+The sweep is history-wide by necessity: `main.masks_history` stores one row per (history step,
+form), so a shape only really leaves the database once **every** snapshot has stopped naming it —
+hence the rewrite of every `hist->forms` in place, after which `dev->forms` is re-pointed at the
+topmost surviving snapshot.
+
+That is still undoable, and the menu handler opens the undo record itself, **before** the sweep.
+`dt_dev_add_history_item()` opens one of its own, but by then every snapshot has been rewritten
+and the "before" state it would capture is the swept one; `dt_dev_history_undo_start_record()`'s
+depth counter makes the inner pair a no-op, so the recorded pair spans the whole operation. What
+makes the restore work is that `dt_history_duplicate()` copies each item's forms **list**
+(`g_list_copy` plus one reference per form) instead of aliasing it: the record owns its own
+cells, the sweep's `g_list_remove()` on the live items cannot reach them, and every swept shape
+stays alive as long as the record holds it. `_pop_undo()` rewrites the database from the restored
+history, so the `masks_history` rows come back too. Measured round trip on one image:
+65 rows / 23 forms → 70 / 22 after the sweep → 65 / 23 after undo, the swept shape restored and
+nothing else moved.
+
+That rewrite is in-memory only. `main.history` and `main.masks_history` are deleted and
+re-inserted wholesale from `dev->history` by `_write_history_from_state()`, and nothing on this
+path triggers it — so the menu handler commits a mask-manager history entry
+(`dt_dev_add_history_item(dev, NULL, FALSE, TRUE)`) after the sweep, the way every other forms
+mutation in `libs/masks.c` must. Without it the swept shapes stay in the database and come back
+on the next read, and the pipeline never resyncs. Measured on a 20-step history: 60 rows / 24
+forms before, 58 / 22 after, with exactly the two orphans gone and one extra history step.
+
+The sweep also takes `dev->history_mutex` as **writer** for its whole span. The async DB write
+job walks `hist->forms` with the lock released; its snapshot references keep each history *item*
+alive but say nothing about the list cells `g_list_remove()` frees under it. Order is
+`history_mutex` outer, `masks_mutex` (taken by `dt_masks_replace_current_forms()`) inner — the
+same way a history commit takes them.
+
 ### A form mutation that never reaches a history commit is invisible to undo/redo
 
 `dt_dev_add_history_item_ext()` (`dev_history.c`) is the only place that turns the current
@@ -1502,6 +1558,47 @@ Verify this class of layout by measuring, not by looking: build the widget in a
 `gtk_offscreen_window_new()`, pump `gtk_events_pending()`/`gtk_main_iteration()`, and print
 `gtk_widget_get_allocation()` for the cells. It answers in seconds what several rebuild-and-look
 round trips do not.
+
+### A height/width request must cover the CSS border, not just the padding
+
+A widget's size request is its whole CSS box: padding *and* border come out of the allocation
+before the content sees any of it. Code that sizes an area to fit its content therefore has to
+add both back, and `gtk_style_context_get_padding()` without the matching
+`gtk_style_context_get_border()` leaves the content short by exactly one border.
+
+Two pixels is enough to be visible, because the widgets that care answer a shortfall with a
+whole scrollbar rather than a clipped pixel. `dt_ui_scroll_wrap()` (`widgets/scroll_wrap.c`)
+sizes every list and textview in the application to `clamp(min(content, cap), min_size, 75%
+window)`, snapped to whole rows so it never shows a half-row — no slack anywhere — and its
+`GtkScrolledWindow` carries `.dt_recessed_scroll`, which the theme gives `padding: 2px` over a
+`border: 1px`. Counting the padding alone handed the viewport 123 px for 125 px of content, and
+`GTK_POLICY_AUTOMATIC` did the rest. Measured, same rows and same CSS, border omitted then
+counted: `page=123 < upper=125, scrollbar` → `page=125 = upper=125, none`.
+
+Reproduce this class of bug offscreen in seconds: build the widget with the theme's CSS on it,
+pump the main loop, then compare the scrolled window's vadjustment `page_size` against `upper`.
+A scrollbar that appears for a couple of pixels looks like a content-height miscount and is
+usually a frame the request forgot.
+
+### A UTILITY window must ask for its position, transient-for is not enough
+
+`gtk_window_set_transient_for()` ties a window to its parent for stacking and focus, but the
+window manager still decides *where* to map it. For an ordinary toplevel it places it over the
+parent; give it `GDK_WINDOW_TYPE_HINT_UTILITY` and it drops the window at the root origin
+instead — the leftmost monitor on a multi-head setup, whichever screen the application is
+actually on. Measured on X11 with two monitors (primary at x=1920), same parent and same
+transient hint throughout: transient alone lands at (2020, 129), transient + UTILITY at (0, 0),
+and the focus flags (`set_focus_on_map`, `set_accept_focus`) change nothing either way.
+
+So a UTILITY window states its position itself, `GTK_WIN_POS_CENTER_ON_PARENT`, on every
+platform — not inside a `#ifdef GDK_WINDOWING_QUARTZ` block, which is how the shape manager
+panel (`libs/masks.c`) came to open on the wrong screen while the module-order graph
+(`libs/ioporder.c`), the tag manager (`libs/tagging.c`) and the event supervisor
+(`gui/actions/supervisor_window.c`) — none of which set the UTILITY hint — opened correctly.
+
+The hint costs nothing for a panel shown and hidden repeatedly: GTK consults it on the first
+mapping only, so a window the user has dragged elsewhere keeps the place they gave it across
+later hide/show cycles.
 
 ### Modal dialogs must explicitly refocus their parent on close
 

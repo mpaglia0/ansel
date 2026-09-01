@@ -30,6 +30,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+#include "math/math.h"
 #include "system/macros.h"
 #include "system/openmp.h"
 #include "common/logging.h"
@@ -772,14 +773,14 @@ static int _gradient_get_points(dt_develop_t *dev, float x, float y, float rotat
   const float ht = geometry.raw_height;
   if(!isfinite(wd) || !isfinite(ht) || wd <= 0.0f || ht <= 0.0f) return 1;
 
-  const float scale = sqrtf(wd * wd + ht * ht);
+  const float scale = dt_fast_hypotf(wd, ht);
   const float distance = 0.1f * fminf(wd, ht);
 
   const float v = (-rotation / 180.0f) * M_PI;
   const float cosv = cosf(v);
   const float sinv = sinf(v);
 
-  const int count = sqrtf(wd * wd + ht * ht) + 3;
+  const int count = dt_fast_hypotf(wd, ht) + 3;
   *points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * count, 0);
   if(IS_NULL_PTR(*points)) return 1;
 
@@ -896,7 +897,7 @@ static int _gradient_get_pts_border(dt_develop_t *dev, float x, float y, float r
   const dt_dev_image_geometry_t geometry = dt_dev_geometry_snapshot(dev);
   const float wd = geometry.raw_width;
   const float ht = geometry.raw_height;
-  const float scale = sqrtf(wd * wd + ht * ht);
+  const float scale = dt_fast_hypotf(wd, ht);
   
   // Calculate perpendicular offsets (±90 degrees from rotation)
   const float v1 = (-(rotation - 90.0f) / 180.0f) * M_PI;
@@ -972,8 +973,13 @@ cleanup:
   return err;
 }
 
-static void _gradient_draw_shape(struct dt_develop_t *dev, cairo_t *cr, const float *pts_line, const int pts_line_count, const int nb, const gboolean border, const gboolean source)
+static void _gradient_draw_shape(struct dt_develop_t *dev, cairo_t *cr, const float *pts_line, const int pts_line_count, const int nb, const gboolean border, const gboolean source,
+                              const dt_masks_skip_range_t *skips, const int skip_count)
 {
+  /* A gradient has no self-intersections, so it never carries an exclusion list -- these are the
+   * shared shape_draw_function_t signature, not something to honour here. */
+  (void)dev; (void)nb; (void)source; (void)skips; (void)skip_count;
+
   // safeguard in case of malformed arrays of points
   if(border && pts_line_count <= 3) return;
   if(!border && pts_line_count <= 4) return;
@@ -1124,13 +1130,13 @@ static void _gradient_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks
   // draw main line
   if(gpt->points && gpt->points_count > 0)
     dt_draw_shape_lines(gui->dev, DT_MASKS_NO_DASH, FALSE, cr, nb, (seg_selected), zoom_scale, gpt->points,
-                        gpt->points_count, &dt_masks_functions_gradient.draw_shape, CAIRO_LINE_CAP_ROUND);
+                        gpt->points_count, &dt_masks_functions_gradient.draw_shape, CAIRO_LINE_CAP_ROUND, NULL, 0);
   // draw borders
   if(gui->group_selected == index)
   {
     if(gpt->border && gpt->border_count > 0)
       dt_draw_shape_lines(gui->dev, DT_MASKS_DASH_STICK, FALSE, cr, nb, (gui->border_selected), zoom_scale, gpt->border,
-                          gpt->border_count, &dt_masks_functions_gradient.draw_shape, CAIRO_LINE_CAP_ROUND);
+                          gpt->border_count, &dt_masks_functions_gradient.draw_shape, CAIRO_LINE_CAP_ROUND, NULL, 0);
   }
 
   if(gpt->points && gpt->points_count >= 3)
@@ -1140,9 +1146,14 @@ static void _gradient_events_post_expose(cairo_t *cr, float zoom_scale, dt_masks
 
 static dt_masks_raster_result_t _gradient_get_points_border(dt_develop_t *dev, dt_masks_form_t *form,
                                        float **points, int *points_count,
-                                       float **border, int *border_count, int source,
+                                       float **border, int *border_count,
+                                       dt_masks_skip_range_t **border_skips, int *border_skip_count,
+                                       int source,
                                        const dt_iop_module_t *module)
 {
+  if(!IS_NULL_PTR(border_skips)) *border_skips = NULL;
+  if(!IS_NULL_PTR(border_skip_count)) *border_skip_count = 0;
+
     // unused arg, keep compiler from complaining
   // No geometry: an empty outline is the correct result here, not a failure. See the circle.
   if(IS_NULL_PTR(form) || IS_NULL_PTR(form->points)) return DT_MASKS_RASTER_EMPTY;
@@ -1241,41 +1252,19 @@ static dt_masks_raster_result_t _gradient_get_mask(const dt_iop_module_t *const 
   const int gw = (w + grid - 1) / grid + 1;
   const int gh = (h + grid - 1) / grid + 1;
 
-  float *points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * gw * gh, 0);
+  // this path works in unscaled coordinates, which is iscale == 1 (an exact multiplication)
+  const dt_masks_sample_grid_t sample_grid
+      = { .x0 = 0, .y0 = 0, .width = gw, .height = gh,
+          .step = grid, .px = px, .py = py, .iscale = 1.0f };
+  float *points
+      = dt_masks_sample_grid_backtransform(pipe, module->iop_order, &sample_grid, "gradient", form->name);
   if(IS_NULL_PTR(points)) return DT_MASKS_RASTER_ERROR;
-  __OMP_PARALLEL_FOR__(collapse(2) if((size_t)gw * gh > 50000))
-  for(int j = 0; j < gh; j++)
-    for(int i = 0; i < gw; i++)
-    {
-      points[(j * gw + i) * 2] = (grid * i + px);
-      points[(j * gw + i) * 2 + 1] = (grid * j + py);
-    }
-
-  if(dt_get_debug_flags() & DT_DEBUG_PERF)
-  {
-    dt_print(DT_DEBUG_MASKS, "[masks %s] gradient draw took %0.04f sec\n", form->name,
-             dt_get_wtime() - start2);
-    start2 = dt_get_wtime();
-  }
-
-  // we backtransform all these points
-  if(!dt_dev_distort_backtransform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points, (size_t)gw * gh))
-  {
-    dt_pixelpipe_cache_free_align(points);
-    return DT_MASKS_RASTER_ERROR;
-  }
-
-  if(dt_get_debug_flags() & DT_DEBUG_PERF)
-  {
-    dt_print(DT_DEBUG_MASKS, "[masks %s] gradient transform took %0.04f sec\n", form->name,
-             dt_get_wtime() - start2);
-    start2 = dt_get_wtime();
-  }
+  start2 = dt_get_wtime();
 
   // we calculate the mask at grid points and recycle point buffer to store results
   const float wd = pipe->iwidth;
   const float ht = pipe->iheight;
-  const float hwscale = 1.0f / sqrtf(wd * wd + ht * ht);
+  const float hwscale = 1.0f / dt_fast_hypotf(wd, ht);
   const float ihwscale = 1.0f / hwscale;
   const float v = (-gradient->rotation / 180.0f) * M_PI;
   const float sinv = sinf(v);
@@ -1335,43 +1324,7 @@ static dt_masks_raster_result_t _gradient_get_mask(const dt_iop_module_t *const 
     return DT_MASKS_RASTER_ERROR;
   }
 
-  const float inv_grid2 = 1.0f / (grid * grid);
-  float w0[8], w1[8];
-  for(int i = 0; i < grid; i++)
-  {
-    w0[i] = (float)(grid - i);
-    w1[i] = (float)i;
-  }
-
-// we fill the mask buffer by interpolation
-  __OMP_PARALLEL_FOR__(if((size_t)w * h > 50000))
-  for(int j = 0; j < h; j++)
-  {
-    const int jj = j % grid;
-    const int mj = j / grid;
-    const float wj0 = w0[jj];
-    const float wj1 = w1[jj];
-    const size_t row_base = (size_t)mj * gw;
-    float *const row = bufptr + (size_t)j * w;
-    int ii = 0;
-    int mi = 0;
-    for(int i = 0; i < w; i++)
-    {
-      const size_t pt_index = row_base + mi;
-      const float wii0 = w0[ii];
-      const float wii1 = w1[ii];
-      row[i] = (points[2 * pt_index] * wii0 * wj0
-                + points[2 * (pt_index + 1)] * wii1 * wj0
-                + points[2 * (pt_index + gw)] * wii0 * wj1
-                + points[2 * (pt_index + gw + 1)] * wii1 * wj1) * inv_grid2;
-      ii++;
-      if(ii == grid)
-      {
-        ii = 0;
-        mi++;
-      }
-    }
-  }
+  dt_masks_sample_grid_interpolate(points, &sample_grid, bufptr, w, h, NULL, NULL);
 
   dt_pixelpipe_cache_free_align(points);
 
@@ -1406,44 +1359,18 @@ static dt_masks_raster_result_t _gradient_get_mask_roi(const dt_iop_module_t *co
   const int gw = (w + grid - 1) / grid + 1;
   const int gh = (h + grid - 1) / grid + 1;
 
-  float *points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * gw * gh, 0);
+  const dt_masks_sample_grid_t sample_grid
+      = { .x0 = 0, .y0 = 0, .width = gw, .height = gh,
+          .step = grid, .px = px, .py = py, .iscale = iscale };
+  float *points
+      = dt_masks_sample_grid_backtransform(pipe, module->iop_order, &sample_grid, "gradient", form->name);
   if(IS_NULL_PTR(points)) return DT_MASKS_RASTER_ERROR;
-  __OMP_PARALLEL_FOR__(collapse(2) if((size_t)gw * gh > 50000))
-  for(int j = 0; j < gh; j++)
-    for(int i = 0; i < gw; i++)
-    {
-
-      const size_t index = (size_t)j * gw + i;
-      points[index * 2] = (grid * i + px) * iscale;
-      points[index * 2 + 1] = (grid * j + py) * iscale;
-    }
-
-  if(dt_get_debug_flags() & DT_DEBUG_PERF)
-  {
-    dt_print(DT_DEBUG_MASKS, "[masks %s] gradient draw took %0.04f sec\n", form->name,
-             dt_get_wtime() - start2);
-    start2 = dt_get_wtime();
-  }
-
-  // we backtransform all these points
-  if(!dt_dev_distort_backtransform_plus(pipe, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_INCL, points,
-                                        (size_t)gw * gh))
-  {
-    dt_pixelpipe_cache_free_align(points);
-    return DT_MASKS_RASTER_ERROR;
-  }
-
-  if(dt_get_debug_flags() & DT_DEBUG_PERF)
-  {
-    dt_print(DT_DEBUG_MASKS, "[masks %s] gradient transform took %0.04f sec\n", form->name,
-             dt_get_wtime() - start2);
-    start2 = dt_get_wtime();
-  }
+  start2 = dt_get_wtime();
 
   // we calculate the mask at grid points and recycle point buffer to store results
   const float wd = pipe->iwidth;
   const float ht = pipe->iheight;
-  const float hwscale = 1.0f / sqrtf(wd * wd + ht * ht);
+  const float hwscale = 1.0f / dt_fast_hypotf(wd, ht);
   const float ihwscale = 1.0f / hwscale;
   const float v = (-gradient->rotation / 180.0f) * M_PI;
   const float sinv = sinf(v);
@@ -1494,43 +1421,7 @@ static dt_masks_raster_result_t _gradient_get_mask_roi(const dt_iop_module_t *co
 
   dt_pixelpipe_cache_free_align(lut);
 
-  const float inv_grid2 = 1.0f / (grid * grid);
-  float w0[8], w1[8];
-  for(int i = 0; i < grid; i++)
-  {
-    w0[i] = (float)(grid - i);
-    w1[i] = (float)i;
-  }
-
-// we fill the mask buffer by interpolation
-  __OMP_PARALLEL_FOR__(if((size_t)w * h > 50000))
-  for(int j = 0; j < h; j++)
-  {
-    const int jj = j % grid;
-    const int mj = j / grid;
-    const float wj0 = w0[jj];
-    const float wj1 = w1[jj];
-    const size_t row_base = (size_t)mj * gw;
-    float *const row = buffer + (size_t)j * w;
-    int ii = 0;
-    int mi = 0;
-    for(int i = 0; i < w; i++)
-    {
-      const size_t mindex = row_base + mi;
-      const float wii0 = w0[ii];
-      const float wii1 = w1[ii];
-      row[i] = (points[mindex * 2] * wii0 * wj0
-                + points[(mindex + 1) * 2] * wii1 * wj0
-                + points[(mindex + gw) * 2] * wii0 * wj1
-                + points[(mindex + gw + 1) * 2] * wii1 * wj1) * inv_grid2;
-      ii++;
-      if(ii == grid)
-      {
-        ii = 0;
-        mi++;
-      }
-    }
-  }
+  dt_masks_sample_grid_interpolate(points, &sample_grid, buffer, w, h, NULL, NULL);
 
   dt_pixelpipe_cache_free_align(points);
 

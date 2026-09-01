@@ -35,6 +35,7 @@
 #include "system/mem_alloc.h"
 #include "develop/geometry/geometry.h"   // dt_geometry_chain_generation()
 #include "develop/masks.h"
+#include "develop/masks_debug.h"
 #include "develop/masks_gui.h"
 #include "develop/masks_group.h"
 #include "develop/masks/masks_functions.h"
@@ -1813,7 +1814,8 @@ void dt_masks_gui_form_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
       = (dt_masks_form_gui_points_t *)g_list_nth_data(mask_gui->points, form_index);
   const dt_masks_raster_result_t border_status
       = dt_masks_get_points_border(mask_gui->dev, mask_form, &gui_points->points, &gui_points->points_count,
-                                   &gui_points->border, &gui_points->border_count, 0, NULL);
+                                   &gui_points->border, &gui_points->border_count,
+                                   &gui_points->border_skips, &gui_points->border_skip_count, 0, NULL);
 
   /* Only a genuine FAILURE may leave the cache key unset, and it must: the key covers the whole
    * group, so one unstamped shape rebuilds every shape of the group on every later expose --
@@ -1836,7 +1838,7 @@ void dt_masks_gui_form_create(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
     if(border_status == DT_MASKS_RASTER_OK && (mask_form->type & DT_MASKS_CLONE))
     {
       if(dt_masks_get_points_border(mask_gui->dev, mask_form, &gui_points->source, &gui_points->source_count,
-                                    NULL, NULL, TRUE, module)
+                                    NULL, NULL, NULL, NULL, TRUE, module)
          != DT_MASKS_RASTER_OK)
         return;
     }
@@ -2271,10 +2273,13 @@ void dt_masks_gui_form_remove(dt_masks_form_t *mask_form, dt_masks_form_gui_t *m
   if(!IS_NULL_PTR(gui_points))
   {
     gui_points->points_count = gui_points->border_count = gui_points->source_count = 0;
+    gui_points->border_skip_count = 0;
     dt_pixelpipe_cache_free_align(gui_points->points);
     gui_points->points = NULL;
     dt_pixelpipe_cache_free_align(gui_points->border);
     gui_points->border = NULL;
+    dt_pixelpipe_cache_free_align(gui_points->border_skips);
+    gui_points->border_skips = NULL;
     dt_pixelpipe_cache_free_align(gui_points->source);
     gui_points->source = NULL;
   }
@@ -3214,13 +3219,13 @@ void dt_masks_draw_source(cairo_t *cr, dt_masks_form_gui_t *mask_gui, const int 
       // From more frequent to least frequent, to get out of loop earlier. Tail first, then source.
       const float pts[4] = { tail[0], tail[1], source[0], source[1] };
       gboolean overlap = (dt_masks_point_in_form_exact(pts, 2, gui_points->points, first_point_index,
-                                                       gui_points->points_count) >= 0);
+                                                       gui_points->points_count, NULL, 0) >= 0);
       // Skip the second containment test when overlap is already detected.
       if(!overlap)
       {
         const float origin_pt[2] = { main[0], main[1] };
         overlap = (dt_masks_point_in_form_exact(origin_pt, 1, gui_points->source, first_point_index,
-                                                gui_points->source_count) >= 0);
+                                                gui_points->source_count, NULL, 0) >= 0);
       }
 
       // Update head position to be between main and source center point.
@@ -3546,7 +3551,6 @@ static gboolean _session_bbox_from_points(const dt_masks_form_gui_t *gui, double
     {
       const double x = pts->points[2 * i];
       const double y = pts->points[2 * i + 1];
-      if(isnan(x) || isnan(y)) continue;
 
       if(!any)
       {
@@ -3800,8 +3804,15 @@ static void _masks_draw_creation_session_forms(dt_develop_t *develop, dt_iop_mod
   }
 }
 
-void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr, int32_t width, int32_t height,
-                                 int32_t pointerx, int32_t pointery)
+void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr,
+                                 int32_t width, int32_t height, int32_t pointerx, int32_t pointery)
+{
+  dt_masks_events_post_expose_with(dev, module, cr, width, height, pointerx, pointery, NULL);
+}
+
+void dt_masks_events_post_expose_with(dt_develop_t *dev, struct dt_iop_module_t *module, cairo_t *cr,
+                                      int32_t width, int32_t height, int32_t pointerx, int32_t pointery,
+                                      const dt_masks_overlay_transform_t *transform)
 {
   const double post_expose_start = dt_get_wtime();
   dt_develop_t *develop = dev;
@@ -3816,7 +3827,7 @@ void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *modu
   dt_dev_get_processed_size(develop, &buffer_width, &buffer_height);
 
   if(buffer_width < 1.0 || buffer_height < 1.0) return;
-  const float zoom_scale = dt_dev_get_zoom_level(develop);
+  const float zoom_scale = IS_NULL_PTR(transform) ? dt_dev_get_zoom_level(develop) : (float)transform->scale;
 
   /* Draw into an isolated group, so that overlapping shapes composite once against the view
    * instead of once each.
@@ -3847,12 +3858,21 @@ void dt_masks_events_post_expose(dt_develop_t *dev, struct dt_iop_module_t *modu
   
   cairo_save(mask_draw);
 
-  // We rescale to input space
-  if(dt_dev_rescale_roi_to_input(develop, mask_draw, width, height))
+  // We rescale to input space -- from the viewport, or from the caller's own mapping when it
+  // supplied one (see dt_masks_overlay_transform_t: the viewport path needs GUI state).
+  if(IS_NULL_PTR(transform))
   {
-    cairo_restore(mask_draw);
-    cairo_pattern_destroy(cairo_pop_group(cr));   // discard: nothing was drawn
-    return;
+    if(dt_dev_rescale_roi_to_input(develop, mask_draw, width, height))
+    {
+      cairo_restore(mask_draw);
+      cairo_pattern_destroy(cairo_pop_group(cr));   // discard: nothing was drawn
+      return;
+    }
+  }
+  else
+  {
+    cairo_translate(mask_draw, transform->offset_x, transform->offset_y);
+    cairo_scale(mask_draw, transform->scale, transform->scale);
   }
 
   // We update the form if needed
@@ -4114,8 +4134,8 @@ void dt_masks_iop_combo_populate(GtkWidget *widget, void *data)
   const guint forms_count = g_list_length(module->dev->forms);
   const guint iop_count = g_list_length(module->dev->iop);
   guint combo_capacity = 5 + forms_count + iop_count;
-  dt_free(blend_data->masks_combo_ids);
-  blend_data->masks_combo_ids = malloc(sizeof(int) * combo_capacity);
+  dt_free_align(blend_data->masks_combo_ids);
+  blend_data->masks_combo_ids = dt_alloc_align(sizeof(int) * combo_capacity);
 
   int *combo_ids = blend_data->masks_combo_ids;
   GtkWidget *combo = blend_data->masks_combo;
@@ -4526,13 +4546,20 @@ void dt_masks_group_ungroup(dt_develop_t *dev, dt_masks_form_t *dest_group, dt_m
  * @return int Index of the first tested point found inside the form, -1 otherwise.
  */
 int dt_masks_point_in_form_exact(const float *test_points, int test_point_count,
-                                 const float *form_points, int form_points_start, int form_points_count)
+                                 const float *form_points, int form_points_start, int form_points_count,
+                                 const dt_masks_skip_range_t *skips, int skip_count)
 {
   if(IS_NULL_PTR(test_points) || test_point_count <= 0 || IS_NULL_PTR(form_points)) return -1;
   if(form_points_count <= 2 + form_points_start) return -1;
   if(form_points_start < 0 || form_points_start >= form_points_count) return -1;
+  if(IS_NULL_PTR(skips)) skip_count = 0;
 
   const int start_index = form_points_start;
+  // Once per call, not per finding: a corrupt input corrupts every test point alike, and the
+  // point of reporting is a greppable line, not a flood.
+  gboolean reported_bad_skip = FALSE;
+  gboolean reported_trapped_walk = FALSE;
+
   for(int test_index = 0; test_index < test_point_count; test_index++)
   {
     int intersection_count = 0;
@@ -4542,21 +4569,82 @@ int dt_masks_point_in_form_exact(const float *test_points, int test_point_count,
 
     for(int i = form_points_start, next = start_index + 1; i < form_points_count;)
     {
-      // The form point stream may contain NaN sentinels that jump across
-      // self-intersection cuts. Broken jump targets must not trap the GUI event
-      // loop in an endless hit-test.
       if(next < start_index || next >= form_points_count) break;
-      if(++visited_points > form_points_count - start_index + 1) break;
+      if(++visited_points > form_points_count - start_index + 1)
+      {
+        /* Unreachable over a well-formed stream: the walk visits each index at most once and
+         * wraps exactly once. Tripping it means the input is corrupt, and the crossing count
+         * below is then garbage. This used to be silent -- both historical bugs of the cut
+         * mechanism shipped as exactly this silence. */
+        if(!reported_trapped_walk)
+        {
+          dt_print(DT_DEBUG_ALWAYS,
+                   "[masks] point_in_form walk trapped after %d visits of %d points -- corrupt"
+                   " outline or skip ranges; hit-test result is unreliable\n",
+                   visited_points, form_points_count - form_points_start);
+          reported_trapped_walk = TRUE;
+        }
+        break;
+      }
+
+      /* Out-of-band self-intersection cuts: on reaching one, close the contour with a chord to
+       * its resume point. Only a skip that moves the walk STRICTLY FORWARD is followed -- a
+       * backward one would re-walk the span just left until the cap above fires, which is the
+       * cycle the old in-band encoding actually produced once. Such a range is a producer bug:
+       * ignore it and say so. */
+      gboolean jumped = TRUE;
+      int hops = 0;
+      while(jumped && hops <= skip_count)
+      {
+        jumped = FALSE;
+        for(int s = 0; s < skip_count; s++)
+        {
+          if(next != skips[s].jump_from) continue;
+          if(skips[s].resume_at <= skips[s].jump_from || skips[s].resume_at >= form_points_count)
+          {
+            if(!reported_bad_skip)
+            {
+              dt_print(DT_DEBUG_ALWAYS,
+                       "[masks] skip range [%d -> %d] does not move forward within %d points --"
+                       " ignoring it; the producer is broken\n",
+                       skips[s].jump_from, skips[s].resume_at, form_points_count);
+              reported_bad_skip = TRUE;
+            }
+          }
+          else
+          {
+            next = skips[s].resume_at;
+            jumped = TRUE;
+            hops++;
+          }
+          break;
+        }
+      }
+      if(next >= form_points_count) break;
 
       const float y1 = form_points[i * 2 + 1];
       const float y2 = form_points[next * 2 + 1];
 
-      // if we need to skip points (in case of deleted point, because of self-intersection)
       if(isnan(form_points[next * 2]))
       {
-        const int jump_index = isnan(y2) ? start_index : (int)y2;
-        if(jump_index == next || jump_index < start_index || jump_index >= form_points_count) break;
-        next = jump_index;
+        /* NOTHING should reach this. dt_masks_get_points_border() guarantees the outline holds
+         * finite geometry, and everything a consumer must not use travels beside it in the
+         * exclusion list. Both shapes of sentinel are therefore reported: a NaN x with a finite
+         * y was the in-band jump encoding, an index smuggled through a coordinate, and decoding
+         * one silently is how issue #1313 shipped; a bare NaN,NaN was a close-the-contour
+         * marker, which no builder emits any longer. This walk is also reached with buffers
+         * that never went through that entry point, which is why the check stays at all. */
+        if(!reported_bad_skip)
+        {
+          dt_print(DT_DEBUG_ALWAYS,
+                   "[masks] non-finite outline sample at %d of %d (y %s) -- the buffer should"
+                   " hold geometry only; treating the outline as ended\n", next, form_points_count,
+                   isnan(y2) ? "also NaN" : "finite, i.e. the old in-band jump encoding");
+          reported_bad_skip = TRUE;
+        }
+        break;
+        if(next == start_index) break;
+        next = start_index;
         continue;
       }
 
@@ -4912,6 +5000,292 @@ int dt_masks_form_change_opacity(dt_develop_t *dev, dt_masks_form_t *mask_form, 
   // gives back to say it consumed the event, so reporting 0 once the opacity is already pinned at
   // 0 or 1 would let that scroll step fall through and zoom the canvas instead.
   return (result == DT_MASKS_OK || result == DT_MASKS_UNCHANGED);
+}
+
+
+
+/* ------------------------------------------------------------------------------------- */
+/* The headless half of the diagnostic renderer.
+ *
+ * It lives here, and not next to dt_masks_debug_rasterise() in masks_debug.c, for one reason:
+ * compositing the overlay needs cairo, and src/develop is kept free of every toolkit type by
+ * tools/check_module_boundaries.sh so the pixel and params engines stay portable. This file is
+ * already the GUI half of masks -- and it is where dt_masks_events_post_expose_with(), the one
+ * production drawing routine this calls, already lives. There is deliberately no second
+ * drawing path: what a regression test looks at is what the darkroom paints. */
+/** Rasterise @p form and paint it under the overlay as 8-bit grey. Its own function because
+ * compositing a backdrop and drawing an overlay are two jobs, and nesting the pixel loop inside
+ * the surface bookkeeping made both harder to follow. */
+static void _paint_mask_backdrop(cairo_t *cr, dt_develop_t *dev, dt_masks_form_t *form,
+                                 const int width, const int height)
+{
+  float *const mask = dt_masks_debug_rasterise(dev, form, width, height);
+  if(IS_NULL_PTR(mask)) return;
+
+  cairo_surface_t *grey = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
+  if(cairo_surface_status(grey) == CAIRO_STATUS_SUCCESS)
+  {
+    cairo_surface_flush(grey);
+    uint8_t *const pixels = cairo_image_surface_get_data(grey);
+    const int stride = cairo_image_surface_get_stride(grey);
+    for(int y = 0; y < height; y++)
+    {
+      uint32_t *const row = (uint32_t *)(pixels + (size_t)y * stride);
+      for(int x = 0; x < width; x++)
+      {
+        const float v = mask[(size_t)y * width + x];
+        const uint32_t g = (uint32_t)(CLAMPF(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+        row[x] = (g << 16) | (g << 8) | g;
+      }
+    }
+    cairo_surface_mark_dirty(grey);
+    cairo_set_source_surface(cr, grey, 0, 0);
+    cairo_paint(cr);
+  }
+  cairo_surface_destroy(grey);
+  dt_free_align(mask);
+}
+
+gboolean dt_masks_debug_write_png(dt_develop_t *dev, dt_masks_form_t *form,
+                                  const dt_masks_debug_request_t *request, const char *path)
+{
+  if(IS_NULL_PTR(dev) || IS_NULL_PTR(request) || IS_NULL_PTR(path)) return FALSE;
+  if(IS_NULL_PTR(form)) form = dt_masks_get_visible_form(dev);
+  if(IS_NULL_PTR(form)) return FALSE;
+
+  int32_t raw_width = 0;
+  int32_t raw_height = 0;
+  if(!dt_dev_geometry_get_raw_size(dev, &raw_width, &raw_height) || raw_width <= 0 || raw_height <= 0)
+    return FALSE;
+
+  int width = request->width > 0 ? request->width : raw_width;
+  int height = request->height > 0 ? request->height
+                                   : (int)lrint((double)width * raw_height / (double)raw_width);
+  if(width <= 0 || height <= 0) return FALSE;
+
+  cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+  if(cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
+  {
+    cairo_surface_destroy(surface);
+    return FALSE;
+  }
+  cairo_t *cr = cairo_create(surface);
+
+  if(request->backdrop != DT_MASKS_DEBUG_BACKDROP_TRANSPARENT)
+  {
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    cairo_paint(cr);
+  }
+
+  if(request->backdrop == DT_MASKS_DEBUG_BACKDROP_RASTER)
+    _paint_mask_backdrop(cr, dev, form, width, height);
+
+  if(request->draw_overlay)
+  {
+    /* The overlay paints with the theme palette, which is filled from GTK at startup and is
+     * therefore all-zero -- fully transparent -- with no GUI. Drawing would "succeed" and
+     * produce an empty picture. Give every unset entry a visible fallback so a headless render
+     * shows the same geometry the darkroom would; the exact hues are the theme's business, and
+     * a diagnostic only needs to be legible. Production is untouched: with a GUI up, every
+     * entry already has a non-zero alpha and nothing here applies. */
+    GdkRGBA *const palette = dt_widget_colors();
+    if(!IS_NULL_PTR(palette))
+    {
+      for(int i = 0; i < DT_GUI_COLOR_LAST; i++)
+        if(palette[i].alpha <= 0.0) palette[i] = (GdkRGBA){ 1.0, 1.0, 1.0, 1.0 };
+    }
+
+    /* The overlay reads the visible form and the processed size off the dev, so both are
+     * published here rather than passed -- this is the same state the darkroom holds while it
+     * draws, which is the point: no second code path. */
+    if(IS_NULL_PTR(dev->form_gui))
+    {
+      dev->form_gui = (dt_masks_form_gui_t *)calloc(1, sizeof(dt_masks_form_gui_t));
+      if(!IS_NULL_PTR(dev->form_gui)) dt_masks_init_form_gui(dev, dev->form_gui);
+    }
+    if(!IS_NULL_PTR(dev->form_gui))
+    {
+      dev->form_gui->dev = dev;
+      dev->form_gui->form_visible = form;
+      dev->form_gui->formid = 0;   // force the outline cache to rebuild for this render
+      dt_dev_geometry_set_processed_size(dev, raw_width, raw_height);
+
+      const dt_masks_overlay_transform_t transform
+          = { .scale = (double)width / (double)raw_width, .offset_x = 0.0, .offset_y = 0.0 };
+      int pw = 0, ph = 0;
+      dt_dev_get_processed_size(dev, &pw, &ph);
+      dt_print(DT_DEBUG_ALWAYS, "[masks debug] overlay: visible=%p processed=%dx%d scale=%.4f\n",
+               (void *)dt_masks_get_visible_form(dev), pw, ph, transform.scale);
+      dt_masks_events_post_expose_with(dev, NULL, cr, width, height, -1, -1, &transform);
+    }
+  }
+
+  cairo_destroy(cr);
+  cairo_surface_flush(surface);
+  const gboolean ok = (cairo_surface_write_to_png(surface, path) == CAIRO_STATUS_SUCCESS);
+  cairo_surface_destroy(surface);
+
+  if(!ok) dt_print(DT_DEBUG_ALWAYS, "[masks debug] could not write %s\n", path);
+  return ok;
+}
+
+/**
+ * @brief Append a shape's outline to @p cr as the COMPLEMENT of its exclusion list.
+ *
+ * @details Samples [@p first, @p last) are emitted as one sub-path per run between the spans in
+ * @p skips, which are the places the offset curve doubles back on itself and must not be shown.
+ *
+ * There is one implementation of this walk because there was very nearly none: the encoding it
+ * replaces blanked the excluded samples to NaN inside the point buffer, which each shape then
+ * tested for in its own copy of the loop. That is an encoding hidden in a buffer of plain
+ * floats -- invisible to any consumer that does not already know, and silently wrong for one
+ * that forgets. Two consumers had forgotten: the polygon's outline drew its folds, and the
+ * brush's per-node border handle lost both its dash and its drag wherever a blanked sample was
+ * the nearest one.
+ *
+ * Emitting runs also makes a hole a hole. Skipping excluded samples with the pen down turns the
+ * next one into a line_to, so each span comes out as a straight chord across the shape --
+ * measured on issue #1313's brush at 50 to 137 pixels, one per node. A new sub-path per run
+ * cannot do that, and stroking a path of several sub-paths costs nothing.
+ *
+ * @p skips must be sorted and disjoint (dt_masks_skip_ranges_build() guarantees it); pass NULL
+ * and 0 for a shape with nothing to exclude.
+ *
+ * It lives here rather than in widgets/draw.h with the other drawing helpers because it needs
+ * both cairo and the masks vocabulary, and a widget header must not inherit the latter -- that
+ * would invert the layering. masks_gui.c already has both.
+ */
+/** Append samples [@p first, @p last) as ONE cairo sub-path, decimated to what the context can
+ * show. A sub-path per run is what makes an excluded span absent rather than a shortcut across
+ * it: skipping samples with the pen down turns the next one into a line_to, and the span comes
+ * out as a straight chord. */
+static inline void _emit_run(cairo_t *cr, const float *const points, const int first, const int last,
+                             const double min_step2)
+{
+  double last_x = points[first * 2];
+  double last_y = points[first * 2 + 1];
+  cairo_move_to(cr, last_x, last_y);
+
+  for(int i = first + 1; i < last; i++)
+  {
+    const double x = points[i * 2];
+    const double y = points[i * 2 + 1];
+    const double dx = x - last_x;
+    const double dy = y - last_y;
+    if((dx * dx + dy * dy) < min_step2) continue;
+    cairo_line_to(cr, x, y);
+    last_x = x;
+    last_y = y;
+  }
+
+  /* the run's last sample always lands, so a run ends where the geometry does and not wherever
+   * the decimation happened to stop */
+  const double x = points[(last - 1) * 2];
+  const double y = points[(last - 1) * 2 + 1];
+  if(x != last_x || y != last_y) cairo_line_to(cr, x, y);
+}
+
+void dt_masks_draw_outline_runs(cairo_t *cr, const float *const points, const int first, const int last,
+                                const dt_masks_skip_range_t *skips, const int skip_count)
+{
+  if(!cr || !points || first >= last) return;
+
+  /* One line_to per sample at RAW resolution is several per device pixel; emit at the resolution
+   * the context can actually show. See dt_draw_min_emit_step(). */
+  const double min_step = dt_draw_min_emit_step(cr);
+  const double min_step2 = min_step * min_step;
+
+  const int count = IS_NULL_PTR(skips) ? 0 : skip_count;
+
+  int at = first;
+  int next = 0;
+
+  while(at < last)
+  {
+    while(next < count && skips[next].resume_at <= at) next++;
+
+    int run_end = last;
+    if(next < count && skips[next].jump_from < last) run_end = MAX(skips[next].jump_from, at);
+
+    if(run_end > at) _emit_run(cr, points, at, run_end, min_step2);
+
+    if(next < count && skips[next].jump_from < last)
+    {
+      at = MAX(skips[next].resume_at, at + 1);
+      next++;
+    }
+    else
+      break;
+  }
+}
+
+int dt_masks_preview_add_clone_source(dt_masks_form_gui_t *gui, dt_masks_preview_buffers_t *preview)
+{
+  float source_pos[2] = { 0.0f, 0.0f };
+  dt_masks_calculate_source_pos_origin(gui, gui->pos[0], gui->pos[1], gui->pos[0], gui->pos[1],
+                                       &source_pos[0], &source_pos[1], FALSE);
+  const float center_source[2] = { source_pos[0] - gui->pos[0], source_pos[1] - gui->pos[1] };
+
+  preview->source_points = dt_pixelpipe_cache_alloc_align_float_cache((size_t)2 * preview->points_count, 0);
+  if(IS_NULL_PTR(preview->source_points)) return 1;
+
+  for(int i = 0; i < preview->points_count; i++)
+  {
+    preview->source_points[i * 2] = preview->points[i * 2] + center_source[0];
+    preview->source_points[i * 2 + 1] = preview->points[i * 2 + 1] + center_source[1];
+  }
+
+  return 0;
+}
+
+
+int dt_masks_points_shift_to_source(dt_develop_t *dev, const dt_iop_module_t *module,
+                                    float **points, int *points_count,
+                                    const float xs, const float ys, const int first_shifted)
+{
+  // every distortion that happens BEFORE the module: the TARGET outline in module input reference
+  if(!dt_dev_distort_transform_gui(dev, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_EXCL,
+                                   *points, *points_count))
+    goto error;
+
+  // the source anchor, taken to the same reference, gives the shift
+  float pts[2] = { xs, ys };
+  dt_dev_coordinates_raw_norm_to_raw_abs(dev, pts, 1);
+  if(!dt_dev_distort_transform_gui(dev, module->iop_order, DT_DEV_TRANSFORM_DIR_BACK_EXCL, pts, 1))
+    goto error;
+
+  {
+    const float dx = pts[0] - (*points)[0];
+    const float dy = pts[1] - (*points)[1];
+
+    // a shape with handle points in its header keeps them where they are and takes the anchor
+    // verbatim; one whose point 0 is just the centre lets the loop below carry it
+    if(first_shifted > 0)
+    {
+      (*points)[0] = pts[0];
+      (*points)[1] = pts[1];
+    }
+
+    __OMP_PARALLEL_FOR_SIMD__(if(*points_count > 100) aligned(points:64))
+    for(int i = first_shifted; i < *points_count; i++)
+    {
+      (*points)[i * 2] += dx;
+      (*points)[i * 2 + 1] += dy;
+    }
+  }
+
+  // and the distortions AFTER the module: the SOURCE outline in final image reference
+  if(!dt_dev_distort_transform_gui(dev, module->iop_order, DT_DEV_TRANSFORM_DIR_FORW_INCL,
+                                   *points, *points_count))
+    goto error;
+
+  return 0;
+
+error:
+  dt_pixelpipe_cache_free_align(*points);
+  *points = NULL;
+  *points_count = 0;
+  return 1;
 }
 
 // clang-format off
