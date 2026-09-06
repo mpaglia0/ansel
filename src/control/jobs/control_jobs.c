@@ -287,14 +287,18 @@ static dt_job_t *dt_control_generic_image_job_create(dt_job_execute_callback exe
 
 static int32_t dt_control_save_xmps_job_run(dt_job_t *job)
 {
-  if(!dt_image_get_xmp_mode()) return 0;
-
   dt_control_image_enumerator_t *params = dt_control_job_get_params(job);
+  const gboolean forced = (params->flag == 1);
+
+  if(!forced && !dt_image_get_xmp_mode()) return 0;
 
   for(GList *t = params->index; t; t = g_list_next(t))
   {
     const int32_t imgid = GPOINTER_TO_INT(t->data);
-    switch(dt_image_write_sidecar_file(imgid))
+    const dt_image_write_sidecar_result_t res =
+      forced ? dt_image_write_sidecar_file_forced(imgid)
+             : dt_image_write_sidecar_file(imgid);
+    switch(res)
     {
       case DT_IMAGE_WRITE_SIDECAR_OK:
         break;
@@ -302,15 +306,14 @@ static int32_t dt_control_save_xmps_job_run(dt_job_t *job)
         // xmp writing is off, or the setting changed mid-batch: nothing was attempted, nothing to report
         break;
       case DT_IMAGE_WRITE_SIDECAR_CACHE_BUSY:
-        fprintf(stdout, "cannot write XMP file for image %i: the image cache entry is busy, try again.\n", imgid);
+        dt_control_log(_("cannot write XMP file for image %i: the image cache entry is busy, try again."), imgid);
         break;
       case DT_IMAGE_WRITE_SIDECAR_NO_SOURCE_PATH:
-        fprintf(stdout, "cannot write XMP file for image %i: the original file could not be found.\n", imgid);
+        dt_control_log(_("cannot write XMP file for image %i: the original file could not be found."), imgid);
         break;
       case DT_IMAGE_WRITE_SIDECAR_IO_ERROR:
-        fprintf(stdout,
-                "cannot write XMP file for image %i: the target storage may be unavailable or read-only.\n",
-                imgid);
+        dt_control_log(_("cannot write XMP file for image %i: the target storage may be unavailable or read-only."),
+                       imgid);
         break;
     }
   }
@@ -321,7 +324,7 @@ void dt_control_write_sidecar_files()
 {
   GList *imgs = dt_act_on_get_images();
   if(IS_NULL_PTR(imgs)) return;
-  dt_control_save_xmps(imgs, FALSE);
+  dt_control_save_xmps_forced(imgs);
   g_list_free(imgs);
   imgs = NULL;
 }
@@ -1503,9 +1506,9 @@ static dt_job_t *_control_gpx_apply_job_create(const gchar *filename, int32_t fi
 void dt_control_save_xmp(const int32_t imgid)
 {
   dt_control_add_job(dt_control_get_global(), DT_JOB_QUEUE_USER_FG,
-                     dt_control_generic_images_job_create(&dt_control_save_xmps_job_run,
-                                                          N_("save history to XMP"),
-                                                          0, NULL, PROGRESS_NONE, imgid));
+                     dt_control_generic_image_job_create(&dt_control_save_xmps_job_run,
+                                                         N_("save history to XMP"),
+                                                         0, NULL, PROGRESS_NONE, imgid));
 }
 
 void dt_control_save_xmps(const GList *imgids, const gboolean check_history)
@@ -1525,6 +1528,27 @@ void dt_control_save_xmps(const GList *imgids, const gboolean check_history)
 
   params->index = g_list_copy((GList *)imgids);
   params->flag = 0;
+
+  dt_control_job_set_params(job, params, dt_control_image_enumerator_cleanup);
+  dt_control_add_job(dt_control_get_global(), DT_JOB_QUEUE_USER_FG, job);
+}
+
+void dt_control_save_xmps_forced(const GList *imgids)
+{
+  if(IS_NULL_PTR(imgids)) return;
+
+  dt_job_t *job = dt_control_job_create(&dt_control_save_xmps_job_run, "save xmp");
+  if(IS_NULL_PTR(job)) return;
+
+  dt_control_image_enumerator_t *params = dt_control_image_enumerator_alloc();
+  if(IS_NULL_PTR(params))
+  {
+    dt_control_job_dispose(job);
+    return;
+  }
+
+  params->index = g_list_copy((GList *)imgids);
+  params->flag = 1;
 
   dt_control_job_set_params(job, params, dt_control_image_enumerator_cleanup);
   dt_control_add_job(dt_control_get_global(), DT_JOB_QUEUE_USER_FG, job);
