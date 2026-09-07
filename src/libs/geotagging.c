@@ -75,6 +75,7 @@
 #include "widgets/accelerators.h"
 #include "widgets/label.h"
 #include "widgets/scroll_wrap.h"
+#include "widgets/container.h"
 
 DT_MODULE(1)
 
@@ -1582,7 +1583,7 @@ static GtkWidget *_gui_init_datetime(dt_lib_datetime_t *dt, const int type, dt_l
     }
   }
 
-  gtk_container_foreach(GTK_CONTAINER(flow), (GtkCallback)gtk_widget_set_can_focus, GINT_TO_POINTER(FALSE));
+  dt_gui_flow_box_as_layout(GTK_FLOW_BOX(flow));
 
   return flow;
 }

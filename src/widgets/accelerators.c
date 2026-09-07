@@ -315,9 +315,17 @@ void dt_shortcut_remove_closure(dt_shortcut_t *shortcut, gpointer data)
 
   if(cl)
   {
-    g_closure_unref(cl->base);
+    /* Unlink first, then release through the SAME function the list's own destroy notify uses.
+     * This used to unref the closure and dt_free() the struct inline, which skipped
+     * g_object_remove_weak_pointer(): the weak pointer registered in dt_shortcut_set_closure()
+     * records the address &pc->widget, so leaving it behind means the widget's eventual
+     * destruction writes NULL into a freed PayloadClosure. That is heap corruption, and it
+     * aborts wherever the next allocation lands rather than here -- at startup, in the sqlite3
+     * call under dt_iop_load_modules_so(), because _init_module_so() builds and immediately
+     * destroys a throwaway GUI instance for every module, which is precisely what this function
+     * is called for. */
     shortcut->closure = g_list_delete_link(shortcut->closure, link);
-    dt_free(cl);
+    _g_list_closure_unref(cl);
     // fprintf(stdout, "removing: %s at %p - %i entries remaining\n", shortcut->path, data, g_list_length(shortcut->closure));
   }
 }

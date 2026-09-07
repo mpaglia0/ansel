@@ -31,6 +31,7 @@
 #include "views/view.h"
 #include "gui/window_manager.h"
 #include "widgets/widget_settings.h"
+#include "widgets/container.h"
 
 DT_MODULE(1)
 
@@ -93,6 +94,7 @@ void gui_init(dt_lib_module_t *self)
   /* allow children to keep their natural widths (don't force uniform cells) */
   gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(d->container), FALSE);
   gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(d->container), 20);
+  dt_gui_flow_box_as_layout(GTK_FLOW_BOX(d->container));
 
   gtk_style_context_add_class(gtk_widget_get_style_context(d->container), "dt-module-toolbox");
 
@@ -149,6 +151,9 @@ static void _lib_module_toolbox_add(dt_lib_module_t *self, GtkWidget *widget, dt
     gtk_widget_set_hexpand(GTK_WIDGET(widget), FALSE);
     gtk_widget_set_halign(GTK_WIDGET(widget), GTK_ALIGN_CENTER);
     gtk_flow_box_insert(GTK_FLOW_BOX(d->container), GTK_WIDGET(widget), 0);
+    // The box was made a layout container in gui_init(), but this child is new: its own
+    // wrapper has just been created and would otherwise take the toolbar's keyboard focus.
+    dt_gui_flow_box_child_as_layout(GTK_WIDGET(widget));
 
     /* register both in child_views so view visibility logic applies */
     child_data_t *child_data = malloc(sizeof(child_data_t));

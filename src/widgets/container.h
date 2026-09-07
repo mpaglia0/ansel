@@ -47,6 +47,26 @@ void dt_gui_container_remove_children(GtkContainer *container);
 // dt_gui_container_remove_children instead; it's a bit slower but safer).
 void dt_gui_container_destroy_children(GtkContainer *container);
 
+/* Use a GtkFlowBox for its wrapping layout only, not as the selection list it is by default.
+ *
+ * A GtkFlowBox is a list widget: it wraps every child in a GtkFlowBoxChild, selects that wrapper
+ * on click, and puts it -- not the widget inside -- in the keyboard focus chain. Used as a plain
+ * container for entries or buttons, both behaviours are wrong and both are visible:
+ *
+ *  - the selected wrapper draws with the theme's selection colour. Ansel's theme styles no
+ *    flowbox, so it falls through to the stock accent, and an entry with a blue box behind it
+ *    reads as a locked field (issue #1279).
+ *  - Tab stops on the wrappers. Measured on GTK 3.24.43, the chain reports GtkFlowBoxChild,
+ *    GtkFlowBoxChild, ... and never reaches the entries or buttons inside.
+ *
+ * Call this after filling the box. For a child added later -- gtk_flow_box_insert() into a live
+ * box -- use dt_gui_flow_box_child_as_layout() on that child instead. */
+void dt_gui_flow_box_as_layout(GtkFlowBox *box);
+
+/* The per-child half of dt_gui_flow_box_as_layout(), for a child inserted after the box was set
+ * up. Takes the child that was inserted, and resolves its wrapper itself. */
+void dt_gui_flow_box_child_as_layout(GtkWidget *child);
+
 G_END_DECLS
 
 #endif // DT_WIDGETS_CONTAINER_H

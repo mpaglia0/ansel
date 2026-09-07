@@ -1177,7 +1177,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_box_pack_start(dpi_box, d->print_dpi, TRUE, TRUE, 0);
   gtk_box_pack_start(dpi_box, gtk_label_new(_("dpi")), FALSE, FALSE, 0);
   gtk_container_add(GTK_CONTAINER(d->print_size), GTK_WIDGET(dpi_box));
-  gtk_container_foreach(GTK_CONTAINER(d->print_size), (GtkCallback)gtk_widget_set_can_focus, GINT_TO_POINTER(FALSE));
+  dt_gui_flow_box_as_layout(GTK_FLOW_BOX(d->print_size));
 
   d->px_size = gtk_flow_box_new();
   gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(d->px_size), 3);
@@ -1188,7 +1188,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_box_pack_start(px_box, d->height, TRUE, TRUE, 0);
   gtk_box_pack_start(px_box, gtk_label_new(_("px")), FALSE, FALSE, 0);
   gtk_container_add(GTK_CONTAINER(d->px_size), GTK_WIDGET(px_box));
-  gtk_container_foreach(GTK_CONTAINER(d->px_size), (GtkCallback)gtk_widget_set_can_focus, GINT_TO_POINTER(FALSE));
+  dt_gui_flow_box_as_layout(GTK_FLOW_BOX(d->px_size));
 
   d->scale = gtk_entry_new();
   dt_accels_disconnect_on_text_input(d->scale);
