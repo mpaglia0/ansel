@@ -1140,6 +1140,66 @@ rules that were each paid for by a reported defect:
   went the long way round on one side of every turn. Do not "fix" the cusp tie-break to
   shortest-path: the two passes each cover one half of the tip disc, and which half is which
   is the pass's rotation. The #1313 cusp corpus, at all eight frame sizes, is the check.
+- **A border sample lies on the ENVELOPE of the discs, not on the normal.** Where the radius
+  changes along the spine, the boundary of the union is `c + r·(−r′ T + √(1 − r′²) N)`, r′ being
+  dr/ds: tilted off the normal by asin(r′). The normal sample sits inside the union by about
+  r′² r / 2 — a fraction of a pixel at a pen's rates, invisible to the eye and exactly what the
+  boundary detector (rightly) rejects, so the outline of any stroke whose radius varied lost
+  whole stretches of both sides (37% of the #1313 brush's border, reported as "discontinuities
+  in the dashed border"), and the raster's spokes, which end on the same samples, left the
+  shoulders of a fat node as a flat shelf tens of pixels deep. `dt_masks_outline_envelope_offset()`
+  (`masks_outline.c`) places every brush and polygon sample; the rate is the smoothstep's
+  derivative, zero at both ends of a segment, so caps and joint arcs are untouched and every
+  constant-radius corpus case stayed bit-identical. `DT_MASKS_OUTLINE_TILT_MAX` is 1.0, the exact
+  envelope: a first version capped the tilt at 0.7 to keep the spokes painting across the width,
+  and that cap cost a real defect — a segment whose rate peaks near 1 (a 132 px node flaring to
+  342 px over 287 px, `_MG_1074.CR2` brush #4 as the user drew it) has its union's top on the
+  rear envelope, 40 px outside the wide node's circle at a 64° tilt, which no capped sample
+  reached, so the outline lost the whole top of the shape; at the exact envelope the raster oracle
+  reports no missing pixel anywhere in the corpus. Two traps from the round that landed it: the
+  corpus judges only the samples that were
+  KEPT, so a boundary stretch the skips swallow whole passes it — measure the skipped fraction
+  (`ansel-test-masks-geometry --time-overlay` now prints it; `MASKS_DUMP_SKIPS=<dir>` dumps every
+  spoke with its range) — and an argument added to the evaluator by regex landed before the
+  radius instead of after it on two of five callers, which zeroed every segment end's spoke,
+  killed every cap, and read for an hour like a cap defect the tilt had exposed.
+- **A repeat of a boundary sample is not a boundary sample.** The walk stamps a full disc at a
+  node whose radius steps in BOTH passes and bridges joints with arcs about the same node, so a
+  flaring node's circle was traced two or three times, each copy dashed from its own phase, and
+  the copies filled each other's gaps: a near-solid line (`_MG_1074.CR2` brush #4, 4,020 kept
+  samples on a 2,114 px circumference); and where a segment leaves such a node its envelope runs
+  within the boundary tolerance of the circle for tens of pixels, a second dash over the first.
+  `_outline_sample_repeats()` drops a sample within three quarters of a pixel of an earlier one
+  that is at least `OUTLINE_REPEAT_MIN_WALK` (4 px) of border BEHIND it along the walk, whatever
+  discs the two belong to: for drawing, two boundary samples that close are one line. Five corpus
+  rounds shaped it, each measured by the harness's skipped/ranges counts before the next: keyed
+  on the disc it never fired (a disc's centre is its first sample's, half a pixel off and
+  differently per pass); on the spine point it missed the junctions; a half-pixel centre
+  tolerance fused consecutive segment discs and thinned every segment; an exclusion by sixteen
+  SAMPLES shredded every arc, because the recursion samples a hundredth of a pixel apart around
+  every integer crossing, where sixteen samples are less than a pixel — only the walked length
+  tells a run from its copy, a copy being the other pass or another stamp, thousands of pixels
+  away along it. The other side of the stroke, which the backward pass lays on the same spine
+  points, is a diameter away and never matches; `_outline_keep_specks()` keeps a dropped run of
+  one or two samples between kept ones, since hiding it changes nothing and cuts the run.
+- **The dash phase is the arc length along the whole stroke, not along each sub-path.** An
+  outline is one cairo path of many sub-paths, one per kept run between skips, and cairo (and
+  the rasteriser, at first) restarts the dash pattern at every sub-path, so dashes bunched and
+  stretched at every run boundary. `dt_stroke_raster_path()` now carries one `_dash_t` across
+  all its sub-paths: a dash is a function of the pixels of border drawn before it. A dash cut by
+  a hidden stretch shows as a stub, which that metric owes.
+- **`MASKS_DUMP_OVERLAY=<dir>` makes the darkroom write what each frame drew**: the canvas
+  before it is composited and cleared, the frame and dirty rectangles, and every cached outline
+  with its skip ranges (`outline-<n>.txt`, the harness's format). It exists because a darkroom
+  cannot be driven from this machine, and a report the harness cannot reproduce needs the
+  darkroom's own frame, not a guess at it.
+
+- **`ansel-test-masks-geometry --time-overlay` renders at fit zoom; `MASKS_OVERLAY_VIEW=
+  "scale,ox,oy[,ppd]"` renders the view the darkroom shows**, in user units with the surface's
+  device scale, which is how the 1074 report was reproduced at 100% on a 2x screen. When adding
+  a comparison surface to that harness, give it the same device scale: the first leftover check
+  at ppd 2 compared a scaled frame against an unscaled one and reported 50,000 ghost pixels that
+  were the harness's own.
 
 The corpus (`tests/masks/masks_geometry.c`) judges a brush and a polygon in **both directions** — owed
 coverage missing, and coverage no disc owes — and judges the drawn outline against the same
@@ -1898,6 +1958,59 @@ policy must be `GTK_POLICY_EXTERNAL` + `set_min_content_height(1)` +
 `last_h_scrollbar_height/last_v_scrollbar_width` to -1 so the next `size-allocate` always
 reconfigures (the table persists across view enter/leave; the guard would otherwise skip the
 reconfigure on same-size re-entry).
+
+### The mask overlay's outlines are rasterised directly, not stroked by cairo
+
+A shape's outline reaches the drawing code already sampled at one point per device pixel;
+handing it to cairo as a path to stroke twice was raster → vector → raster, 7–18 ms per shape
+per frame at fit zoom. `widgets/stroke_raster.c` paints the polyline itself (a per-segment
+capsule distance field, two passes, dashes cut by arc length, the same one-pixel ramp as
+`CAIRO_ANTIALIAS_FAST`) into the ARGB32 surface `cr` draws on — the current group's surface,
+offset included — and `dt_draw_shape_lines()` tries it before falling back to the cairo strokes
+for any other target. `masks_gui.c` draws everything into a persistent device-pixel canvas and
+composites only the painted rectangle. Nodes, handles, arrows and the creation trace stay with
+cairo, on the same canvas. `doc/overlay-raster.md` is the account; the numbers and the pixel
+comparison come from `ansel-test-masks-geometry --time-overlay` (add `MASKS_DEBUG=1` for the
+per-stage traces). Three traps: stamping discs instead of capsules scallops thin lines; inside
+a pushed group the writable surface is `cairo_get_group_target()`, not `cairo_get_target()`; and
+**cairo's device space is not the pixel grid** — `cairo_user_to_device()` stops before the
+surface's own transform (pixel = device × device_scale + device_offset), so on a 2x screen every
+pixel derived from it must be multiplied by `cairo_surface_get_device_scale()`. The first version
+did not, was correct on every 1x screen and every unit test, and drew the whole overlay at half
+size in the top-left quadrant of a HiDPI darkroom; `test_stroke_raster` and the harness's
+`hidpi placement` check now paint on device-scaled surfaces.
+
+### The darkroom centre paints into GTK's buffer, once per source frame, and a mask motion repaints a rectangle
+
+`doc/darkroom-redraw.md` prices every pass of the repaint path with cairo at a 2560x1440
+window at device scale 1 and 2. Before it, every centre repaint allocated and freed a
+full-window surface, filled two full-window backgrounds and blitted the window three times
+through two intermediate surfaces, whatever had changed: about 10 ms at 1x and 59 ms at 2x
+per frame before any overlay, and a zoom or pan while the main pipe caught up scaled the
+preview with cairo's default filter, 262 ms at 2x, because `CAIRO_FILTER_NEAREST` was set on
+the context's default source before the surface replaced it. Four rules now:
+
+- **`dt_control_expose(cr, w, h)` paints into GTK's own `cr`**, which is a double buffer
+  already and arrives clipped to what was invalidated. No intermediate surface, no pixmap.
+  A view that paints every pixel returns `VIEW_FLAGS_PAINTS_WHOLE_AREA` from `flags()` and
+  the toplevel skips its background fill under it.
+- **The darkroom composes `dev->image_surface` once per (source hash, viewport, colours,
+  border, size) key** (`_darkroom_compose_locked()` / `_darkroom_compose_fallback()`), fills
+  the background as the four bands around the image and the ISO 12646 frame as a ring, and
+  sets a scaling filter on the pattern that scales. Set `cairo_pattern_set_filter()` AFTER
+  `cairo_set_source_surface()`, never on the context's default source.
+- **A motion the masks handled invalidates a rectangle**: `dt_masks_overlay_queue_redraw()`
+  asks for the last composited overlay rectangle grown by the pointer's motion, and
+  `_overlay_damage_record()` asks for whatever a frame painted outside the expose's clip, so
+  an under-estimate costs one more small frame and never an unpainted overlay. A module's own
+  overlay knows no rectangle and keeps the full redraw.
+- **The overlay canvas is sized to the view, never to `cr`'s clip**, which a rectangle redraw
+  narrows; and a creation session's frame is bounded to the session's box and the live shape,
+  where it was the whole window before.
+
+The views are plugins: `ninja ansel` does NOT compile `src/views/*.c`. Build every target
+(`ninja`) before trusting a darkroom edit; a use of an undeclared variable in `darkroom.c`
+survived an `ansel` build here.
 
 ### A rotated GtkLabel sizes the column it sits in
 

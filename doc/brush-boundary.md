@@ -164,6 +164,98 @@ and boundary pass. Before the rework, kept outline samples that sat two to five 
 inside the union numbered 47 to 206 per case; the old display cut through self-crossings
 without stopping at all.
 
+## The border sample is on the envelope, not on the normal
+
+The boundary pass decides per sample, and it is only as good as the samples it is given. A
+border sample was placed on the normal of its spine sample, `c + r N`, and that point is on
+the boundary of the union only while the radius is constant. Where the radius changes along
+the spine the union's boundary is the envelope of the discs,
+
+    c + r · ( −r′ T ± √(1 − r′²) N ),   r′ = dr/ds
+
+tilted off the normal by asin(r′) toward the smaller radius, and the normal sample sits
+inside the union by about r′² r / 2. At the rates a pen draws that is a fraction of a pixel:
+invisible to the eye, and precisely what the boundary pass rejects. Measured on the #1313
+corpus brush at the darkroom's fit zoom, 19,785 of 53,709 border samples were skipped in 25
+ranges, most of them along both long sides of the stroke, and the dashed outline was simply
+absent there — reported as "discontinuities in the dashed border". The pixels around every
+sample were checked in the cairo render and in the rasterised one: kept samples painted,
+skipped ones not, both renders 18 pixels apart, so the drawing was never the suspect.
+
+The raster had the same defect with the same cause and nobody had noticed: the spokes end on
+the same samples, so the shoulders of a fat node — where the radius grows fastest — were
+painted only out to the normal offset, a flat shelf tens of pixels short of the round lobe
+the union of discs actually is (the #1313 brush again: 13,333 pixels brighter after, none
+darker).
+
+`dt_masks_outline_envelope_offset()` in `masks_outline.c` now places every border sample of
+the brush and of the polygon, from the tangent and the radius rate by the same parameter. The
+rate is the derivative of the smoothstep the radius follows along a segment,
+`(r2 − r1) · 6t(1 − t)`, zero at both ends, so a segment's end samples stay on the normal and
+every cap, joint arc and stamp built from them is unchanged; a limit direction (a cusp end)
+carries no speed and is given rate zero. Every constant-radius corpus case stayed
+bit-identical; the two whose radius varies moved by the crescents above and their baselines
+were regenerated.
+
+`DT_MASKS_OUTLINE_TILT_MAX` is 1.0: the exact envelope, the clamp only keeping the square root
+real where the discs nest. A first version capped the tilt at 0.7, reasoning that a family of
+spokes tilted further leans too far along the spine to paint the width. That reasoning was not
+measured, and it cost a real defect. `_MG_1074.CR2` brush #4, as the user drew it, flares from
+a 132 px node to a 342 px one over 287 px, and the radius rate along that segment peaks near 1:
+the discs almost nest, and the union's top is the rear envelope of the flare, 40 px outside the
+wide node's circle at a tilt of 64°. No capped sample reached it, the wide node's circle was
+correctly found inside, and the outline lost the whole top of the shape — found only from the
+darkroom's own frame dump (`MASKS_DUMP_OVERLAY`), since the sidecar on disk no longer held the
+shape. At the exact envelope the raster oracle reports no missing pixel on any corpus case,
+this one included, and the top closes.
+
+Two traps from the round that landed it. The corpus judges only the samples that were KEPT —
+a stretch the skips swallow whole passes the outline band check, so the skipped fraction has
+to be measured: `ansel-test-masks-geometry --time-overlay` prints it per case and
+`MASKS_DUMP_SKIPS=<dir>` dumps every spoke with the range that skips it. And a parameter added
+to the evaluator landed, by regex, before the radius instead of after it on two of its five
+callers: every segment end was evaluated at radius zero, every cap collapsed into two spirals
+through its centre, and the result read for an hour like a cap defect the tilt had exposed.
+Trace the helper's inputs before theorising about its geometry.
+
+## A copy of a boundary stretch is not a boundary sample
+
+The walk stamps a full disc at a node whose radius steps, in both passes, and bridges every
+joint with an arc about the node at the same radius. On a flaring node all of those trace the
+same circle, and the boundary pass kept them all: a copy is not strictly inside any disc. Each
+copy is stroked as its own run with its own dash phase, so the copies fill each other's gaps and
+the circle comes out as a near-solid line — `_MG_1074.CR2` brush #4, reported as a missing
+dashed border: 4,020 kept samples on a 2,114 px circumference.
+
+`_outline_sample_repeats()` drops a sample within three quarters of a pixel of an earlier one
+that lies at least four pixels of border behind it along the walk, whatever discs the two belong
+to: for drawing, two boundary samples that close are one line. The other side of the stroke,
+which the backward pass lays on the very same spine points, is a diameter away and never
+matches. The same rule takes the stretch where a segment leaves a stamped node, whose envelope
+runs within the boundary tolerance of the node's circle for tens of pixels — a second dash over
+the first — which no identity of discs or spine points could pair. A dropped run of one or two
+samples between kept ones is kept again (`_outline_keep_specks()`): hiding it changes nothing on
+screen and cuts the run in two.
+
+Five corpus rounds shaped the clauses, each measured by the harness's skipped-sample and range
+counts per case before the next. Keyed on the disc the rule never fired, because a disc's centre
+is its first sample's and a stamp's samples merge into the disc the last moving sample opened,
+half a pixel off and differently in each pass. Keyed on the spine point it dropped the copies
+and missed the junctions. With half a pixel of centre tolerance it fused consecutive discs of a
+segment, which the builder separates by exactly that much, and thinned every segment to
+fragments. Excluding the sample's own run by a count of sixteen samples shredded every arc,
+because the recursion samples a hundredth of a pixel apart around every integer crossing, where
+sixteen samples are less than a pixel; only the length of border walked between two samples
+tells a run from its copy, a copy being the other pass or another stamp, thousands of pixels
+away along the walk. The kept-sample count on the node's circle went 4,020, 3,980, 1,804; the
+zigzag's ranges 4, 2,821, 4.
+
+The dashes are the other half of the same report. The rasteriser cut them by arc length but
+restarted the pattern at every sub-path, and an outline is one sub-path per kept run, so every
+run boundary bunched or stretched a dash. The pattern's state now travels across all the
+sub-paths of one stroke: a dash is a function of the pixels of border drawn before it, and a
+dash cut by a hidden stretch shows as a stub, which that metric owes.
+
 ## What is unified, and what is not
 
 The API did not change shape: `dt_masks_functions_t.get_points_border` still returns

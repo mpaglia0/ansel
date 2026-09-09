@@ -175,6 +175,35 @@ gboolean dt_masks_outline_short_way(const float *const centre, const float *cons
 void dt_masks_outline_offset_along(const float *const centre, float dx, float dy, const float radius,
                                    float *const border);
 
+/** How far off the normal a border sample may tilt, as the sine of the angle: the rate of the
+ * radius along the spine, |dr/ds|, up to which the envelope is followed. At 1 the discs nest
+ * and there is no envelope beyond it, so this is the exact envelope and the clamp only keeps
+ * the square root real. A first version capped it at 0.7 to keep the spokes painted from the
+ * samples reaching across the stroke, on the argument that a family tilted further leans too
+ * far along the spine to paint the width. Measured, the raster oracle reports no missing pixel
+ * anywhere in the corpus at the exact envelope, while the cap left a real hole: a segment whose
+ * rate peaks near 1 -- a brush flaring from a 132 px node to a 342 px one over 287 px -- has its
+ * union's top on the rear envelope of the flare, 40 px outside the wide node's circle at a tilt
+ * of 64 degrees, and no sample reached it, so the outline lost the whole top of the shape. */
+#define DT_MASKS_OUTLINE_TILT_MAX 1.0f
+
+/** Place the border sample of a disc of @p radius centred at @p centre, when the disc belongs
+ * to a family whose centre moves along the tangent (@p dx, @p dy) -- any length, the derivative
+ * of the spine by its parameter -- and whose radius changes by @p radius_rate per unit of that
+ * same parameter.
+ *
+ * A border sample on the NORMAL of its spine sample is on the boundary of the union only while
+ * the radius is constant. Where the radius grows or shrinks along the spine the boundary is the
+ * envelope of the discs, c + r * (-r' T + sqrt(1 - r'^2) N) with r' = dr/ds, tilted off the
+ * normal by asin(r'); the normal sample sits inside the union by about r'^2 r / 2 -- a fraction
+ * of a pixel at the rates a pen draws, invisible to the eye and exactly what the boundary
+ * detector rejects, so the outline of a stroke whose radius varied lost whole stretches of both
+ * sides (a 37% skipped border on the #1313 corpus brush, most of it along the sides). The
+ * tilt is capped at DT_MASKS_OUTLINE_TILT_MAX. The normal is (dy, -dx), the side every
+ * border in this module offsets to. */
+void dt_masks_outline_envelope_offset(const float *centre, float dx, float dy, float radius, float radius_rate,
+                                      float *out);
+
 
 /** Is @p index inside one of the excluded spans? For a consumer that SEARCHES the outline rather
  * than walking it; a forward walk should use dt_masks_draw_outline_runs() instead. */
