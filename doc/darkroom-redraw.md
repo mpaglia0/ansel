@@ -87,6 +87,37 @@ the session's box and the live shape's now. The session's box covers the borders
 spines alone, which is also what a brush's dashed border, a radius outside its spine, needed
 from the pattern's clip after a pan.
 
+## The static layer: the members that did not change are not stroked again
+
+After the four rules a pipe frame still re-stroked every member of the visible group: 1 to
+8 ms a shape at fit zoom, and a drag makes a pipe frame per motion, so a mask-heavy edit paid
+tens of milliseconds of GUI thread per motion for shapes that had not moved. The members that
+are not the selected one are now stroked once into a view-sized surface, `_static_layer` in
+`masks_gui.c`, and composited under the live canvas with one blit, clipped to what the redraw
+asked for. Its key is the view matrix, the group, the selection, the overlay colours and a
+signature of every other member's outline -- its counts and every 32nd sample -- so a member
+an undo moved is caught, while the selected member, which a drag rebuilds on every motion, is
+not in it at all. A pan, a zoom or a change of selection pays one full stroke of the others,
+which is what every frame paid before; a rebuild also marks the whole frame dirty, so a
+selection change under a small invalidation gets its one full repaint.
+
+With it, cairo's own drawing -- nodes, handles, arrows -- is bounded to the selected member's
+header alone, which is all cairo draws for a group: bounding every member's header had made
+a spread-out group's dirty rectangle the whole window on every frame, and with it the
+composite, the clear and the rectangle a motion asks a redraw of.
+
+Measured by the harness's `group-11` case, every brush and polygon of the corpus in one group
+at fit zoom on a 2560x1440 surface, RelWithDebInfo, per frame, of which about 1.8 ms is the
+harness's own background paint:
+
+| group of 11, per full frame | before | after |
+| --- | ---: | ---: |
+| nothing selected | 14.1 ms | 4.0 ms |
+| one member selected | 16.4 ms | 5.7 ms |
+
+The first frame of that group, 340 ms, is the rebuild of every member's outline and is the
+next item (#1391).
+
 ## What a frame costs now
 
 | frame | before, 2x | after, 2x |
@@ -96,8 +127,49 @@ from the pattern's clip after a pan.
 | a zoom or pan while the main pipe catches up | ~320 ms | ~10 ms |
 
 The overlay itself -- the outlines rasterised directly, see `doc/overlay-raster.md` -- costs
-1 to 8 ms per shape at fit zoom and is now the largest term of a motion frame, which is where
-the next work belongs.
+1 to 8 ms per shape at fit zoom; a group's unselected members live in a static layer (below),
+so a frame strokes one shape.
+
+A drag motion also REBUILDS the dragged shape's outline, throttled to 60 Hz and 2 px: the
+whole walk, its distortion transform and the boundary pass, and on a large brush that was the
+frame, not the drawing. Two changes in `doc/brush-boundary.md`: the boundary pass streams
+sqrt-free disc arrays in bounded blocks and keeps its copy test in a sample hash (2-3x), and
+the outline is sampled at the density the screen shows instead of at one image pixel (another
+2-5x at fit zoom, in the build, the transform, the stroke and the hit test alike). Measured,
+first frame after a rebuild of the selected shape, corpus at 2560x1440:
+
+| shape | before, step 1 | after, 1:1 (step 1) | after, fit (step 2) | after, quarter (step 4) |
+| --- | ---: | ---: | ---: | ---: |
+| brush-1313-cusp | 29 ms | 18 ms | 4.7 ms | 2.9 ms |
+| brush-1074-flare | 103 ms | 33 ms | 12.9 ms | 5.4 ms |
+| brush-1360-pressure-ramp | 69 ms | 39 ms | 13.6 ms | 6.2 ms |
+| polygon-comb | 49 ms | 28 ms | 15.6 ms | 6.1 ms |
+| group of 11, every member | 459 ms | 218 ms | 80 ms | 30 ms |
+
+`-d masks -d perf` prints `[masks] boundary pass: ... probed in N ms` per rebuild, and
+`[masks] outline cache: held for geometry G at step S` says why a frame rebuilt.
+
+A pointer motion also HIT-TESTS the selected shape -- its nodes and handles, then every sample
+through the shape's `get_distance` -- and a button press hit-tests every member of the group
+to choose one. #1391's third item put that at a million distance tests per motion; measured
+with `ansel-test-masks-geometry --time-overlay`, which sweeps a 20x20 grid of positions over
+the image and times both events (`[HIT]` lines), that was a PRESS at the old raw density. After
+the density change a motion cost 0.01-0.17 ms at fit and 0.09-0.78 ms at 1:1 (the comb
+polygon), a press on the 11-member group 0.56 and 3.6 ms. Each cache entry now carries the box
+its samples span (`dt_masks_form_gui_points_t::bbox`, filled with the outline), and every
+sample-walking hit test asks it first (`dt_masks_gui_points_reach()`, the cursor grown by twice
+its radius): four comparisons answer "nothing here" for a shape the cursor is not near, which
+on a press is most of the group.
+
+| event | before, fit | after, fit | before, 1:1 | after, 1:1 |
+| --- | ---: | ---: | ---: | ---: |
+| motion, 1313 cusp selected | 0.017 ms | 0.003 ms | 0.166 ms | 0.029 ms |
+| motion, comb polygon selected | 0.165 ms | 0.099 ms | 0.78 ms | 0.51 ms |
+| press, group of 11 | 0.56 ms | 0.26 ms | 3.6 ms | 1.6 ms |
+
+The same positions hit the same shapes before and after. What remains is the shape the cursor
+IS near, walked at the screen's density; the comb spans most of the frame, so its box prunes
+little.
 
 ## Reading it
 

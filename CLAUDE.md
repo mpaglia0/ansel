@@ -1182,6 +1182,51 @@ rules that were each paid for by a reported defect:
   away along it. The other side of the stroke, which the backward pass lays on the same spine
   points, is a diameter away and never matches; `_outline_keep_specks()` keeps a dropped run of
   one or two samples between kept ones, since hiding it changes nothing and cuts the run.
+- **The boundary pass is counted, not computed, and its window is a length of walk.** A disc can
+  hide a border sample only if the two centres are within two radii in the plane, hence within
+  two radii along the spine; the near window is that much WALK either side of the sample's own
+  disc, found by bisection on the walk to each disc's centre. It used to be a count of discs
+  (four times the largest radius, plus eight), which is a different length wherever the radius
+  steps and was ten times too wide once outlines were sampled at the screen's density. The discs
+  are flat arrays (centre x, centre y, squared radius less the tolerance) tested by squared
+  distance in blocks of eight, each block carrying its centres' box and largest radius; the copy
+  test lives in a hash of the samples by pixel cell and reads nine cells, where it used to walk
+  the samples of every disc whose circle passed near the probe, with a hypot per disc. Measured:
+  the same skip ranges to the sample on the whole corpus, 4.5 ns per disc test to 2.5, the pass
+  on the 1313 cusp 19 ms to 7. `-d masks -d perf` prints `[masks] boundary pass: ...` per build.
+- **The GUI outline is sampled at the density the screen shows, not at one image pixel.** The
+  expose reads what one device pixel spans (`dt_draw_min_emit_step()` on the transformed
+  context) and publishes it with `dt_masks_gui_set_outline_density()`; `dt_masks_distort_for_gui()`
+  reads it back through `dt_masks_gui_outline_step(dev)`, so every build -- a drag's, an
+  expose's, the creation session's -- composes at the density in force without its caller
+  knowing it, and `outline_step_built` is part of the outline cache key beside the geometry
+  generation. At fit zoom on a 24 Mpx raw the old fixed step was five samples per device pixel
+  (the recursion stops on integer parts, so it lays several around every integer crossing):
+  53,917 samples for a border 10,000 px long, each paid in the transform, the boundary pass, the
+  stroke and the hit test. The pipe's walk is untouched -- its arcs and stamps stay one sample
+  per pixel through the walk's own `arc_step`, whatever spoke budget it was given -- so no
+  raster changes under a preference; the polygon's pixel threshold stays pinned at 1 for the
+  pipe's scanline fill and follows the density for the GUI. Measured, the first frame after a
+  rebuild of the selected shape: the 1074 flare 103 ms -> 33 at 1:1, 13 at fit, 5 at quarter;
+  a group of 11 members 459 -> 218 / 80 / 30. `MASKS_OUTLINE_STEP=<n>` runs the corpus's band
+  check at that density (0 inside / 0 outside at 3 and 5); the baselines are step-1 pictures
+  and are not compared at any other step. The corpus dev has no expose, so the harness
+  re-applies its density before every build: the overlay it writes beside each case goes
+  through the darkroom's expose at full resolution, which publishes 1.
+- **A hit test asks the shape's box before walking a sample.** A motion hit-tests the SELECTED
+  member only (nodes, handles, then every sample through `get_distance`), throttled to half a
+  cursor radius; a press hit-tests every member to choose one. #1391's "a million distance tests
+  per motion" was a press at the raw density; measured with `--time-overlay`'s `[HIT]` sweep
+  (20x20 positions), a motion after the density change is 0.01-0.8 ms and a press on 11 members
+  0.6-3.6 ms. `dt_masks_form_gui_points_t::bbox` spans points, border and source, filled by
+  `dt_masks_gui_points_update_bbox()` when `dt_masks_gui_form_create()` builds the entry and
+  emptied by `dt_masks_gui_form_remove()`; the four sample-walking hit tests (brush, polygon,
+  circle, ellipse) return their initialised "nothing" answers when `dt_masks_gui_points_reach()`
+  says the cursor, grown by twice its radius, cannot touch the box -- twice because the ellipse
+  tests its border at 1.5 radii. Those answers are exactly the walk's for such a cursor, which
+  is why every consumer reads the flags and none the distance. The gradient walks no samples and
+  has no box test. Measured: a motion 0.003-0.5 ms, a press on the group 0.26 ms at fit and
+  1.6 at 1:1, the same hits at every position.
 - **The dash phase is the arc length along the whole stroke, not along each sub-path.** An
   outline is one cairo path of many sub-paths, one per kept run between skips, and cairo (and
   the rasteriser, at first) restarts the dash pattern at every sub-path, so dashes bunched and
@@ -2007,6 +2052,16 @@ the context's default source before the surface replaced it. Four rules now:
 - **The overlay canvas is sized to the view, never to `cr`'s clip**, which a rectangle redraw
   narrows; and a creation session's frame is bounded to the session's box and the live shape,
   where it was the whole window before.
+- **A group's unselected members live in the static layer** (`_static_layer_ensure()`,
+  `masks_gui.c`): stroked once into a view-sized surface, composited under the live canvas with
+  one clipped blit, keyed on the view matrix, the group, the selection, the overlay colours and
+  every other member's outline signature (counts plus every 32nd sample). Only the selected member
+  is stroked per frame. A rebuild marks the whole frame dirty, so a selection change under a small
+  invalidation gets its one full repaint. Cairo's bound covers the selected member's header alone,
+  since that is all cairo draws for a group. Measured on the harness's 11-member group: 14.1 → 4.0
+  ms a full frame with nothing selected, 16.4 → 5.7 with one selected. The harness's `group-11`
+  case is the regression check; its "build" column, 340 ms, is the outline rebuild and is #1391's
+  next item.
 
 The views are plugins: `ninja ansel` does NOT compile `src/views/*.c`. Build every target
 (`ninja`) before trusting a darkroom edit; a use of an undeclared variable in `darkroom.c`
@@ -2177,6 +2232,52 @@ Fixed by giving widget shortcuts a real closure too (`_widget_shortcut_callback(
 shortcut type already uses. Any future direct caller of `gtk_widget_add_accelerator()` for a
 keyboard shortcut in this codebase has the same problem: it needs a closure the internal
 dispatcher can invoke, not just a GTK-level accelerator that no window will ever activate.
+
+### An accel path absent from the user's config is not a shortcut the user cleared
+
+`_insert_accel()` (`src/widgets/accelerators.c`) used to seed every accel path with
+`gtk_accel_map_add_entry(path, 0, 0)` and let `gtk_accel_map_load()` fill in the keys. That
+reads the user's config correctly and loses the app's own defaults: the load runs *before* any
+widget registers (`gui/application.c`), so a path the config has never heard of comes back with
+key 0, and `_update_shortcut_state()` — comparing that 0 against a non-zero app default with
+`accels->init` FALSE, i.e. "a config file exists" — files it under "the user changed this" and
+records the shortcut as permanently unbound. **Every newly added default shortcut was born dead
+for anyone with an existing `keyboardrc`**, silently, with the menu simply showing no
+accelerator.
+
+Accel pathes are built from **translated** GUI labels — that is why the config file is
+localized, one per language — so the same thing happens when a translation lands or changes for
+a label that already had a shortcut. F5 stopped applying the purple colour label in French when
+`po/fr.po` gained "⬤ Violet" for a menu entry that had been falling back to the English "⬤
+Purple" (commit `b7dcf716`): the path moved, the F5 saved under the old one was orphaned, and
+the new one was read as user-cleared. Every other colour kept its key because its translation
+had not moved. The orphaned line stays in the file — GTK has no API to delete a map entry — but
+it is inert: `_find_path_for_keys()` scans `accels->acceleratables`, not the accel map, and
+`gtk_accel_map_change_entry(..., replace=FALSE)` only reports a conflict against entries an
+accel group actually uses, so it does not block rebinding those keys either (measured, not
+assumed).
+
+Fixed by registering the app default **as the accel-map entry's own default**,
+`gtk_accel_map_add_entry(shortcut->path, shortcut->key, shortcut->mods)`. `add_entry` only sets
+the current value when it *creates* the entry, so anything the config supplied still wins; and
+it makes GTK's changed/unchanged bookkeeping mean what this code needs on the way out, since
+`gtk_accel_map_save()` comments out an entry sitting at its default and writes every other one
+as a live line. A shortcut the user cleared is therefore saved as a real `(path "")` line and
+read back as a *known* path with key 0 — still cleared, this time because the file says so
+rather than because the file is silent. `src/tests/unittests/test_accel_map_defaults.c` pins
+all four cases, including the old `(0, 0)` spelling's inability to tell the two apart.
+
+One migration cost, paid once: a config written by an older build recorded a cleared default as
+a *commented* line, which reads back as "unknown path", so such a shortcut returns to its
+default on the first run after this change. It is then saved under the new spelling and stays
+cleared from there on. There is no marker in the file to distinguish the two eras, so this is
+not avoidable — only bounded.
+
+**Do not verify this class of change by reading GTK's source or reasoning about it.** Every
+question here (does the parser register an empty entry? does `add_entry` overwrite a loaded
+value? how is a cleared entry saved?) is answered in seconds by a ten-line program calling
+`gtk_accel_map_load`/`add_entry`/`lookup_entry`/`save` and printing the file — and two
+plausible readings of that API were wrong when measured.
 
 ### A weak pointer must be removed before the struct holding it is freed
 

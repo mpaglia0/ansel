@@ -42,6 +42,8 @@
 #include "develop/masks.h"
 #include "develop/masks_debug.h"
 #include "develop/masks/masks_functions.h"
+#include "develop/masks/masks_distort.h"
+#include "widgets/widget_settings.h"
 #include "math/math.h"
 #include "system/mem_alloc.h"
 
@@ -681,6 +683,31 @@ static void _surface_diff(cairo_surface_t *const a, cairo_surface_t *const b,
 }
 
 static const char *baseline_dir = NULL;
+
+/* MASKS_OUTLINE_STEP=<n> has the corpus build every GUI outline every n image pixels -- the
+ * density the darkroom shows a zoomed-out image at -- so the band check judges what a user sees
+ * at fit zoom; unset, the corpus judges pixel-accurate outlines. The baselines are step-1
+ * pictures and are not compared at any other step. --time-overlay takes its density from its
+ * view (MASKS_OVERLAY_VIEW), the way the darkroom does: the expose publishes it from the
+ * transformed context, which is also why the corpus re-applies its own before every build --
+ * the overlay it writes beside each case is drawn at full resolution and publishes 1. */
+static int _outline_step_override = 0;
+
+/* Give @p dev a GUI state with the density its outlines are built at: the override when set,
+ * else @p image_px_per_device_px. */
+static void _outline_density_apply(dt_develop_t *dev, const double image_px_per_device_px)
+{
+  if(IS_NULL_PTR(dev->form_gui))
+  {
+    dev->form_gui = (dt_masks_form_gui_t *)calloc(1, sizeof(dt_masks_form_gui_t));
+    if(IS_NULL_PTR(dev->form_gui)) return;
+    dt_masks_init_form_gui(dev, dev->form_gui);
+  }
+  dt_masks_gui_set_outline_density(dev->form_gui, (_outline_step_override > 0) ? (double)_outline_step_override
+                                                                                 : image_px_per_device_px);
+}
+
+
 static gboolean baseline_update = FALSE;
 static gboolean time_overlay = FALSE;
 static int time_overlay_frames = 30;
@@ -691,6 +718,11 @@ static int baseline_missing = 0;
 static gboolean _baseline_check(const char *path, const char *name)
 {
   if(IS_NULL_PTR(baseline_dir)) return TRUE;
+  if(_outline_step_override > 1)
+  {
+    printf("      baseline: not compared, the outline is sampled every %d px\n", _outline_step_override);
+    return TRUE;
+  }
 
   char *base = g_strdup_printf("%s/%s.png", baseline_dir, name);
 
@@ -849,6 +881,7 @@ static _band_t _outline_band_check(dt_develop_t *dev, dt_masks_form_t *form, con
   int skip_count = 0;
   dt_masks_skip_range_t *skips = NULL;
 
+  _outline_density_apply(dev, 1.0);
   const double t0 = dt_get_wtime();
   const dt_masks_raster_result_t st = dt_masks_get_points_border(dev, form, &points, &points_count, &border,
                                                                  &border_count, &skips, &skip_count, 0, NULL);
@@ -1443,10 +1476,79 @@ static void _overlay_report(dt_develop_t *dev, const char *name, const int img_w
     _overlay_skipped(gp, &skipped, &skip_ranges);
     if(selected) _overlay_dump_skips(gp, name, transform);
   }
-  printf("[TIME] %-26s %5dx%-4d %-8s %7.2f ms/frame  (first frame incl. build %7.2f ms;"
+  printf("[TIME] %-26s %5dx%-4d %-8s %7.2f ms/frame  (first frame incl. build %7.2f ms at step %d;"
          " %d outline samples, %d border samples, %d skipped in %d ranges)\n",
-         name, img_w, img_h, selected ? "selected" : "member", timing->per_frame_ms, timing->build_ms, points, border,
-         skipped, skip_ranges);
+         name, img_w, img_h, selected ? "selected" : "member", timing->per_frame_ms, timing->build_ms,
+         dt_masks_gui_outline_step(dev), points, border, skipped, skip_ranges);
+}
+
+/* THE HIT TEST, timed. A pointer motion hit-tests the selected member only -- its nodes and
+ * handles, then its samples through get_distance -- and a button press hit-tests every member
+ * to choose one; both walk the outlines at the density they were built at. A grid of positions
+ * over the whole image says what each costs per event, and how many positions find a shape. */
+static void _time_hit_test(dt_develop_t *dev, dt_masks_form_t *form, const char *name, const int img_w,
+                           const int img_h)
+{
+  dt_masks_form_gui_t *gui = dev->form_gui;
+  const int per_axis = 20;
+  const float radius = 10.0f;
+  dt_widget_set_mouse_radius(radius, radius);
+  gui->group_selected = 0;
+  /* nothing is being dragged: a drag index of 0 would answer every motion with "node 0" */
+  dt_masks_gui_reset_dragging(gui);
+
+  GList *members = NULL;
+  if(form->type & DT_MASKS_GROUP)
+  {
+    for(const GList *node = form->points; node; node = g_list_next(node))
+    {
+      const dt_masks_form_group_t *entry = (const dt_masks_form_group_t *)node->data;
+      dt_masks_form_t *member = dt_masks_get_from_id(dev, entry->formid);
+      if(!IS_NULL_PTR(member)) members = g_list_append(members, member);
+    }
+  }
+  else
+    members = g_list_append(members, form);
+  if(IS_NULL_PTR(members)) return;
+  dt_masks_form_t *selected = (dt_masks_form_t *)members->data;
+
+  double hover_seconds = 0.0;
+  double press_seconds = 0.0;
+  int hits = 0;
+  const int positions = per_axis * per_axis;
+  for(int p = 0; p < positions; p++)
+  {
+    gui->pos[0] = (float)img_w * ((float)(p % per_axis) + 0.5f) / (float)per_axis;
+    gui->pos[1] = (float)img_h * ((float)(p / per_axis) + 0.5f) / (float)per_axis;
+    gui->raw_pos[0] = gui->pos[0];
+    gui->raw_pos[1] = gui->pos[1];
+
+    double t0 = dt_get_wtime();
+    if(!IS_NULL_PTR(selected->functions->update_hover)) selected->functions->update_hover(selected, gui, 0);
+    hover_seconds += dt_get_wtime() - t0;
+
+    t0 = dt_get_wtime();
+    int index = 0;
+    for(const GList *node = members; node; node = g_list_next(node), index++)
+    {
+      dt_masks_form_t *member = (dt_masks_form_t *)node->data;
+      if(IS_NULL_PTR(member->functions->get_distance)) continue;
+      int inside = 0;
+      int inside_border = 0;
+      int near_handle = -1;
+      int inside_source = 0;
+      float dist = FLT_MAX;
+      member->functions->get_distance(gui->pos[0], gui->pos[1], radius, gui, index, g_list_length(member->points),
+                                      &inside, &inside_border, &near_handle, &inside_source, &dist);
+      if(inside || inside_border || near_handle >= 0 || inside_source) hits++;
+    }
+    press_seconds += dt_get_wtime() - t0;
+  }
+  printf("[HIT]  %-26s hover %.3f ms/motion (%s), press %.3f ms/click (%d members), %d hits over %d positions,"
+         " at step %d\n",
+         name, 1000.0 * hover_seconds / positions, selected->name, 1000.0 * press_seconds / positions,
+         g_list_length(members), hits, positions, dt_masks_gui_outline_step(dev));
+  g_list_free(members);
 }
 
 static void _time_overlay_form(dt_develop_t *dev, dt_masks_form_t *form, const char *name, const char *dir,
@@ -1528,6 +1630,7 @@ static void _time_overlay_form(dt_develop_t *dev, dt_masks_form_t *form, const c
       failures++;
     }
   }
+  _time_hit_test(dev, form, name, img_w, img_h);
   cairo_surface_destroy(surface);
 }
 
@@ -1621,6 +1724,107 @@ static void _time_overlay_brush(dt_develop_t *dev, GList *nodes, const char *nam
   g_list_free_full(form.points, free);
 }
 
+/* A refcounted form the group can find in dev->forms, from a node list the harness built. */
+static dt_masks_form_t *_group_member(dt_develop_t *dev, const dt_masks_type_t type,
+                                      const dt_masks_functions_t *functions, GList *nodes, const int formid,
+                                      const char *name)
+{
+  dt_masks_form_t *form = dt_masks_create(type);
+  if(IS_NULL_PTR(form)) return NULL;
+  form->functions = functions;
+  form->version = 6;
+  form->formid = formid;
+  g_strlcpy(form->name, name, sizeof(form->name));
+  form->points = nodes;
+  dt_masks_append_form(dev, form);
+  return form;
+}
+
+/* The darkroom's actual frame: a group of many members, one of them selected, every one of
+ * them stroked on every full frame. The single-shape cases price a shape; this prices what a
+ * pipe frame pays for a mask-heavy edit, and what a static layer for the members that did not
+ * change saves. Eleven members: every brush and polygon of the corpus in one group. */
+static void _time_overlay_group(dt_develop_t *dev, const char *dir, const int frames)
+{
+  GList *members = NULL;
+  int id = 1000;
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table(_brush_1313, 11), id++, "brush-1313-cusp"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table(_brush_cusp_tbl, 3), id++, "brush-cusp"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table(_brush_hairpin_tbl, 3), id++, "brush-hairpin"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table(_brush_zigzag_tbl, 6), id++, "brush-zigzag"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table(_brush_selfcross_tbl, 5), id++, "brush-selfcross"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table(_brush_concave_tbl, 5), id++, "brush-concave"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table11(_brush_1360, 43), id++, "brush-1360"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table11(_brush_1352, 7), id++, "brush-1352"));
+  members = g_list_append(members, _group_member(dev, DT_MASKS_BRUSH, &dt_masks_functions_brush,
+                                                 _brush_from_table11(_brush_1074b, 8), id++, "brush-1074b"));
+  {
+    GList *nodes = NULL;
+    for(int i = 0; i < 15; i++)
+    {
+      const float *r = _polygon_1788045925[i];
+      nodes = g_list_append(nodes, _polygon_node(r[0], r[1], r[2], r[3], r[4], r[5], r[6]));
+    }
+    members = g_list_append(members, _group_member(dev, DT_MASKS_POLYGON, &dt_masks_functions_polygon, nodes, id++,
+                                                   "polygon-1788045925"));
+  }
+  {
+    GList *nodes = NULL;
+    const float radius = 0.028f;
+    for(int i = 0; i < 5; i++)
+    {
+      const float x = 0.20f + 0.13f * i;
+      nodes = g_list_append(nodes, _polygon_node(x, 0.35f, x, 0.35f, x, 0.35f, radius));
+      nodes = g_list_append(nodes, _polygon_node(x + 0.05f, 0.62f, x + 0.05f, 0.62f, x + 0.05f, 0.62f, radius));
+    }
+    nodes = g_list_append(nodes, _polygon_node(0.80f, 0.78f, 0.80f, 0.78f, 0.80f, 0.78f, radius));
+    nodes = g_list_append(nodes, _polygon_node(0.20f, 0.78f, 0.20f, 0.78f, 0.20f, 0.78f, radius));
+    members = g_list_append(members, _group_member(dev, DT_MASKS_POLYGON, &dt_masks_functions_polygon, nodes, id++,
+                                                   "polygon-comb"));
+  }
+
+  dt_masks_form_t *group = dt_masks_create(DT_MASKS_GROUP);
+  if(IS_NULL_PTR(group)) return;
+  group->formid = 999;
+  g_strlcpy(group->name, "group-11", sizeof(group->name));
+  int count = 0;
+  for(const GList *node = members; node; node = g_list_next(node))
+  {
+    const dt_masks_form_t *member = (const dt_masks_form_t *)node->data;
+    if(IS_NULL_PTR(member)) continue;
+    dt_masks_form_group_t *entry = (dt_masks_form_group_t *)calloc(1, sizeof(dt_masks_form_group_t));
+    entry->formid = member->formid;
+    entry->parentid = group->formid;
+    entry->state = DT_MASKS_STATE_USE | DT_MASKS_STATE_SHOW;
+    entry->opacity = 1.0f;
+    group->points = g_list_append(group->points, entry);
+    count++;
+  }
+  char name[64];
+  g_snprintf(name, sizeof(name), "group-%d", count);
+  _time_overlay_form(dev, group, name, dir, IMG_W, IMG_H, frames);
+
+  /* the members leave dev->forms with the list's own references; the harness's follow */
+  for(const GList *node = members; node; node = g_list_next(node))
+  {
+    dt_masks_form_t *member = (dt_masks_form_t *)node->data;
+    if(IS_NULL_PTR(member)) continue;
+    dev->forms = g_list_remove(dev->forms, member);
+    dt_masks_form_unref(member);   /* dev->forms's claim */
+    dt_masks_form_unref(member);   /* the harness's */
+  }
+  g_list_free(members);
+  dt_masks_form_unref(group);
+}
+
 static void _time_overlay_all(dt_develop_t *dev, const char *dir, const int frames)
 {
   printf("overlay timing: %dx%d screen, fit zoom, %d frames per measurement\n", OVERLAY_SCREEN_W,
@@ -1673,6 +1877,7 @@ static void _time_overlay_all(dt_develop_t *dev, const char *dir, const int fram
     _check_hidpi_placement(dev, &form, "polygon-comb", IMG_W, IMG_H);
     g_list_free_full(form.points, free);
   }
+  _time_overlay_group(dev, dir, frames);
 }
 
 int main(int argc, char *argv[])
@@ -1788,6 +1993,11 @@ int main(int argc, char *argv[])
   dt_geometry_chain_rebuild(&dev);
   printf("geometry chain authoritative: %s\n",
          dt_geometry_chain_authoritative(dev.geometry_chain) ? "yes" : "NO -- outlines will be empty");
+
+  const char *step_env = g_getenv("MASKS_OUTLINE_STEP");
+  if(!IS_NULL_PTR(step_env)) _outline_step_override = MAX(0, atoi(step_env));
+  if(!time_overlay && _outline_step_override > 0)
+    printf("GUI outlines sampled every %d px\n", _outline_step_override);
 
   if(time_overlay)
   {
