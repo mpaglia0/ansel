@@ -1460,6 +1460,28 @@ each needs to know is which tree the gesture came from. **That includes the cont
 connecting them with the module instead is what once made every menu action dereference arbitrary
 memory.
 
+**A row's module (`TREE_MODULE`) is the module of the mask the row sits in, not the owner of the
+group the row names.** It is NULL for a group in the inventory that no module renders, and the
+root mask's module for a nested group. A handler that changes a group and must refresh the module
+panels showing it asks `_modules_owning_group()` for the modules whose mask *is* that group —
+those are the ones whose "N shapes used" moved; every panel's member list is rebuilt by the
+signal anyway.
+
+**`DT_SIGNAL_MASK_CHANGED` with `DT_MASKS_EVENT_CHANGE` and ids `(0, 0)` means "rebuild".** The
+manager's handler first looks for the row the ids name; `(0, 0)` names none, so its not-found
+branch rebuilds on a CHANGE as it does on a deletion. The handlers that raise the signal instead
+of broadcasting it (adding an existing shape to a group, renaming, changing a combine operation)
+count on that rebuild; the ones that rebuild the tree themselves go through
+`_shape_manager_broadcast()`, whose `gui_reset` makes the handler's rebuild a no-op.
+
+**Whether a form can join a group is one question, `_form_can_join_group()`**, asked by a row's
+"+", by the "Attach to the group" and "Attach shape ..." menus to grey an entry, and again by each
+action, form by form, over the whole selection. A destination that cannot take anything — it
+already holds the shape at any depth, or taking a group would close a cycle — is listed greyed,
+never left out: the menu is where the user reads that a shape is already there. The groups a menu
+offers come by value from `dt_masks_group_list()` (`develop/masks_group.h`), not from a walk over
+`dev->forms`, which section 9 of `tools/check_module_boundaries.sh` counts.
+
 A module mask is shown FLAT in the inventory -- one row, no expander, its members not appended
 under it -- and expandable in the module list, which is where that subtree belongs. `_tree_row_t`
 carries the `flat` flag that stops `_shape_manager_list_recurs()` after the row itself.
@@ -1470,7 +1492,9 @@ panel's Pipeline tab already use, so a mask sits where its module does everywher
 is scoped like `_modules_owning_group()`, every module in `dev->iop` rather than only the ones
 `dt_iop_module_is_in_pipeline()` shows: the "unclaimed groups" pass afterwards skips anything
 `_group_is_module_mask()` claims, so a narrower scope here would drop a hidden instance's mask
-from both passes.
+from both passes. The order is read at each rebuild, so a reorder must trigger one: the panel
+rebuilds on `DT_SIGNAL_DEVELOP_MODULE_MOVED`, which every reorder path raises — drag and drop, an
+order preset or reset (all through `dt_iop_gui_commit_iop_order_change()`), history navigation.
 
 **Three GTK behaviours here were measured offscreen, not reasoned about, and each one contradicted
 the obvious guess:**
@@ -1496,11 +1520,43 @@ groups". `gtk_tree_view_expand_to_path()` on the found row does the same job. Th
 `collapse_all()` on the not-found branch went with it: without an `expand_all()` to undo, it would
 have destroyed the user's own expansions on any selection event that missed.
 
+**Outside the darkroom the panel is empty and insensitive.** It is a toplevel that outlives the
+view, while what its rows point at does not: the darkroom's `leave()` frees `dev->iop`, and a row
+stores its module by address (`TREE_MODULE`). `_shape_manager_recreate_list()` is the one place
+that decides it (`_shape_manager_is_active()`: the current view is the darkroom), so no path that
+rebuilds the lists — a mask signal, the develop proxy — can refill them from another view. A view
+switch reaches it through `DT_SIGNAL_VIEWMANAGER_VIEW_CHANGED`, because a `special` lib is never
+handed `view_enter()`/`view_leave()`; that signal is raised after the new view's `enter()`, so the
+darkroom's modules are loaded by the time the rows are built. The emptied lists get an empty store,
+not a NULL model: the handlers read the model without checking it.
+
 **`dev->form_gui` can be NULL while this panel is open.** It is allocated on entering darkroom and
 freed back to NULL on leaving it (`views/darkroom.c`, `views/studio_capture.c`), and this panel is
 a standalone toplevel that outlives that. `dt_masks_change_form_gui()` is NULL-safe throughout and
 does NOT allocate one, so a caller cannot assume it has one afterwards -- `_tree_selection_change()`
 dereferenced it unguarded and crashed (SIGSEGV, observed live).
+
+**Renaming takes a double-click, so the name renderer's `editable` property is NOT bound to the
+`TREE_EDITABLE` column.** GtkTreeView has a built-in behaviour: when a cell is editable, a single
+click on a row that is already selected opens the text editor. But a single click on a selected
+row is also how the user starts a drag, a Ctrl+click or a right-click, so with the property bound,
+each of those gestures could open the editor by accident. The property therefore stays FALSE, and
+`TREE_EDITABLE` only records whether a row may be renamed at all (top-level rows only).
+`_tree_start_name_editing()` is the one place that opens the editor: called on a double-click
+(`row-activated` on the name column) and for a freshly created group, it sets `editable` to TRUE,
+opens the editor with `gtk_tree_view_set_cursor_on_cell()`, and sets it back to FALSE at once.
+Measured offscreen: while the property is FALSE nothing opens the editor, and an editor opened
+this way stays open after the property goes back to FALSE and still emits `edited` when validated.
+
+**The panel takes the keyboard focus for exactly as long as a name is being edited.** It is built
+with `gtk_window_set_accept_focus(FALSE)` so its drawing tools act on the main window, which
+therefore stays the active window — and every key typed "into" the editor went there instead,
+through `dt_accels_dispatch()` and the view's `key_pressed()`: a letter fired its shortcut, Escape
+left the darkroom for the lighttable. `_tree_name_editing_started()` makes the panel accept the
+focus and presents it, and the entry's `editing-done` (Enter, Escape or focus loss alike) turns
+that off again and, if the panel still holds the focus, hands it back to the main window. Both
+main-window key handlers act only while that window is active, so nothing else needs to know an
+edit is in progress; key *releases* landing on it after the hand-back fire nothing.
 
 The graph questions live in `develop/masks_group.h`, id-keyed and by value like the rest of that
 header — `dt_masks_group_contains()` (cycle guard: wiring a group into one that already holds it
@@ -1969,6 +2025,29 @@ discarding the record frees the snapshot. That is every lighttable undo's lifeti
 is also the point of no return for data the database was the only holder of: a trip to the
 darkroom and back makes a removal permanent.
 
+### The metadata panel writes a field when it stops being edited, to the images it shows
+
+`libs/metadata.c` shows the values of the images to act on (`d->last_act_on`, refreshed by
+`_update()` when that list changes) and writes to **those same images**, never to the selection.
+The two differ exactly when it matters: with nothing selected the panel shows the image under the
+cursor, and a click on another thumbnail has already moved the selection by the time the field it
+leaves is written — writing to the selection then lands the edit on the image just clicked.
+
+A field is written as soon as it stops being edited — focus lost (a click elsewhere), another
+image taking over the panel (`_update()` commits the field still being typed in before switching
+lists), Tab, Enter or "apply" — the way any text field behaves; only Escape discards it, by
+clearing `d->editing` *before* the focus leaves. `d->editing` means "the user typed": every
+programmatic fill goes through `_set_text_buffer()`, which blocks `_textbuffer_changed()`, so
+emptying a `<leave unchanged>` field on focus never counts as an edit and never erases a value
+across the selection. `_refresh()` re-reads what the images hold; `_update()` only follows the
+list, so calling it to "redraw after a write" does nothing — the list has not changed.
+
+Escape reaches the module only because `_key_pressed()` is connected **before**
+`dt_accels_disconnect_on_text_input()`: that helper's own key handler takes Escape to hand the
+focus back (`dt_widget_refocus()`) and stops the emission, so connected first it turns every
+Escape into a plain focus-out — which, with focus-out committing, writes what Escape was meant to
+discard. Any text field that commits on focus-out and cancels on Escape owes the same order.
+
 ---
 
 ## GTK / UI
@@ -2102,6 +2181,13 @@ window)`, snapped to whole rows so it never shows a half-row — no slack anywhe
 `border: 1px`. Counting the padding alone handed the viewport 123 px for 125 px of content, and
 `GTK_POLICY_AUTOMATIC` did the rest. Measured, same rows and same CSS, border omitted then
 counted: `page=123 < upper=125, scrollbar` → `page=125 = upper=125, none`.
+
+A list that must show where it ends asks for one blank row past its content with
+`dt_ui_scroll_wrap_reserve_trailing_row()` — the shape manager's two lists do, since a list
+filled edge to edge cannot be told from one with rows hidden below. It is part of the sizing rule,
+not a resize of the window around the list: a window grown by a row right after `show_all()` is
+snapped back to its content as soon as the lists realize and compute their height, and would
+otherwise gain a row at every opening once its geometry is saved and restored.
 
 Reproduce this class of bug offscreen in seconds: build the widget with the theme's CSS on it,
 pump the main loop, then compare the scrolled window's vadjustment `page_size` against `upper`.
@@ -2376,6 +2462,9 @@ Two things about a key event that the trace has to state rather than pass throug
   modifiers (`<Primary><Mod2>`), spelling one keystroke twice. Both bits come out before naming
   and `<Primary>` is printed once, the same duplicate `_accels_keys_decode()` and
   `dt_modifier_is()` drop before matching. The raw `state` is printed alongside, in hex.
+- **A toplevel is named by its title as well as its type.** Every toplevel is a `GtkWindow`, so
+  the type alone cannot say whether a key reached the main window or a panel holding the keyboard
+  (the shape manager while a name is edited) — which is the question such a trace is read for.
 
 ---
 
