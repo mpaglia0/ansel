@@ -1010,6 +1010,53 @@ check the early-out paths there before adding another branch to it.
 
 ## Masks / forms history
 
+### "Mask" and "shape" name two different levels, and the tree does not yet say so
+
+A **mask** is what a module blends with: the raster mask, the drawn mask, the parametric mask.
+A **shape** is the level below the drawn mask — a circle, an ellipse, a brush, a polygon, a
+gradient, and a group of those. So a module has one drawn mask, that mask is a group, and what the
+group holds are shapes.
+
+New code uses that vocabulary. `form` is NOT a third level: it is the legacy darktable spelling of
+a shape, it is what the struct is called (`dt_masks_form_t`), and it stays — renaming it is not
+part of this rule.
+
+**The existing tree is not consistent with this yet**, and the sweep that makes it so is deferred
+to a commit of its own. Until then, read every existing `mask` in an identifier as saying nothing
+about which level it means, and do not take a name as evidence: `_module_create_own_mask()` makes
+a group, `mask_form` is usually a shape. What IS already right, and must stay, is `mask` wherever
+it genuinely names the blending level — `blend_params->mask_id`, `raster mask`, `parametric mask`,
+`request_mask_display`, and the persisted `masks_history` table and its XMP key, which are a
+storage format and may never be renamed at all.
+
+**`develop/masks/masks.c` holds both levels and should be split along the same seam, in the same
+pass.** Its 2000 lines are two files wearing one name, and the seam is already visible in the
+layout rather than something that has to be invented:
+
+- the SHAPE half — a shape's own life and nothing about who holds it: `dt_masks_create()` /
+  `_ext()` / `dt_masks_free_form()` / `dt_masks_dup_masks_form()`, `dt_masks_form_duplicate()`,
+  `dt_masks_duplicate_points()`, `dt_masks_form_move()`, the gravity centre, the rasterising entry
+  points (`dt_masks_get_points_border()`, `dt_masks_get_area()`, `dt_masks_get_mask()` /
+  `_roi()`), the sample-grid helpers, `dt_masks_form_get_own_hash()`, `dt_masks_version()` /
+  `dt_masks_type_name()`, and the ~360-line `dt_masks_legacy_params_v1..v6` migration block, which
+  is per-shape params and nothing else;
+- the GROUP half — membership, i.e. what a module's drawn mask is made of: the whole
+  `dt_masks_group_*` family and its `_resolve_member()` / `_find_holder()` / `_find_in_group()`
+  helpers, `_group_create()` / `_group_from_module()` / `_set_group_name_from_module()`,
+  `dt_masks_form_duplicate_in_group()`, `dt_masks_form_delete()`, `dt_masks_iop_use_same_as()`,
+  `dt_masks_copy_used_forms_for_module()` and the unused-shape sweep.
+
+Two practical notes for whoever does it. The obvious name for the second file, `masks/group.c`, is
+TAKEN — its 1000 lines are the group shape's own `dt_masks_functions_t` table: the rasteriser that
+folds the members with the combine operators, plus the group's mouse/key/expose handlers. That is
+the group at the SHAPE level (a group is a shape like any other, which is exactly why it has a
+functions table), not the membership graph; the membership half should take the name of the public
+header it implements, `masks_group.c`. And the
+DB/XMP persistence (`_read_mask_row()`, `dt_masks_read_masks_history()`,
+`dt_masks_write_masks_history_item()`) is a third thing again, belonging with neither: it
+serialises a shape's blob but is driven by the history, so it is the natural first piece to move
+out and the one that settles whether the split is two files or three.
+
 ### A brush point array records the centerline twice, and only the forward half is drawn
 
 `gui_points->points` for a brush holds, in this order: three header points per node (`ctrl1`,
@@ -1398,8 +1445,21 @@ are now refcounted (`dt_masks_form_t.refcount`, `src/develop/masks/masks_history
 
 `blend_params->mask_id` lives inside each module's own params blob, so several modules naming the
 same group is *representable* — but it is not what anything builds, and code here should not
-create it. A module owns ONE mask group of its own, named "Mask <module>", and a shape or shape
+create it. A module owns ONE mask group of its own, named "Group <module>", and a shape or shape
 group used by several modules is nested as a member of each of their masks.
+
+That name is the masks module's own convention, not the caller's: `dt_masks_group_name_for_module()`
+builds the string (published for the two consumers that have no form to write it into — the blend
+panel's name-entry placeholder, and what it puts back when the user empties the entry), and
+`dt_masks_group_set_name_from_module()` writes it, **id-keyed**, so the rename copies on write like
+every other group mutation. It is NOT translated: it goes into the form, the database and the XMP,
+so it may not depend on the language the group happened to be created in. The two creation paths
+(`libs/shape_manager.c`'s `_module_create_own_mask()`, `develop/blend_gui.c`'s
+`_blendop_masks_group_create()`) name the group AFTER `dt_masks_append_form()`, since an id resolves
+against `dev->forms` and nowhere else — and they re-resolve the group by id afterwards, because a
+fresh group already carries two claims (its creator's and the list's), so the touch inside the
+setter genuinely clones it and the pointer they created would otherwise be an orphan that
+`dt_masks_cow_touch()` leaves alone and every later mutation writes into the void.
 
 That separation is what keeps the modules independent. A module's own mask carries its own combine
 operators, opacities and member order, so attaching the same shape group to a second module cannot
