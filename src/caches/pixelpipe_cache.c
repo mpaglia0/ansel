@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "system/sys_resources.h"
+#include "caches/pixelpipe_cache_pressure.h"
 #include "develop/pixelpipe_hb.h"
 #include "caches/pixelpipe_cache.h"
 #include "common/opencl.h"
@@ -83,6 +84,10 @@ typedef struct dt_dev_pixelpipe_cache_t
   gint64 sys_probe_time_us;
   size_t sys_available_est;
   gboolean sys_probe_valid;
+  /* Kernel memory pressure: how much the cache may hold while the machine stalls, and what
+   * decides it -- caches/pixelpipe_cache_pressure.c, which this file feeds through _pressure_sink()
+   * and which never touches an entry itself. Guarded by `lock`, like the fields above. */
+  dt_pixelpipe_cache_pressure_monitor_t psi;
   dt_pthread_mutex_t lock; // mutex to protect the cache entries
   dt_cache_arena_t arena;
 } dt_dev_pixelpipe_cache_t;
@@ -1959,10 +1964,75 @@ size_t dt_pixel_cache_entry_get_size(dt_pixel_cache_entry_t *entry)
   return entry ? entry->size : 0;
 }
 
+/* Kernel memory pressure: the cache's half of it.
+ *
+ * caches/pixelpipe_cache_pressure.c decides WHEN memory must go back to the system and HOW MUCH,
+ * from the kernel counters system/memory_pressure.c reads; this is the part only the cache can
+ * answer -- what it holds, and what giving some of it back costs. Both run under `lock`, taken by
+ * whoever called into the monitor, the watcher's own thread included. */
+static size_t _pressure_held(void *user)
+{
+  return ((dt_dev_pixelpipe_cache_t *)user)->current_memory;
+}
+
+static size_t _pressure_shed(void *user, const size_t target, size_t *given_back)
+{
+  dt_dev_pixelpipe_cache_t *cache = (dt_dev_pixelpipe_cache_t *)user;
+
+  while(cache->current_memory > target && g_hash_table_size(cache->entries) > 0)
+    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+
+  // Hand the pages over now rather than when the kernel gets to MADV_FREE, and make the
+  // available-RAM valve re-read the system instead of trusting its pre-shed estimate.
+  *given_back = dt_cache_arena_trim(&cache->arena);
+  dt_invalidate_system_available_mem();
+  cache->sys_probe_time_us = 0;
+  return cache->current_memory;
+}
+
+static dt_pixelpipe_cache_pressure_sink_t _pressure_sink(dt_dev_pixelpipe_cache_t *cache)
+{
+  return (dt_pixelpipe_cache_pressure_sink_t){ .held = _pressure_held,
+                                               .shed = _pressure_shed,
+                                               .user = cache };
+}
+
+// The kernel woke the watcher, on a thread of its own: take the lock the monitor is guarded by.
+static void _pressure_wake(void *user)
+{
+  dt_dev_pixelpipe_cache_t *cache = (dt_dev_pixelpipe_cache_t *)user;
+  const dt_pixelpipe_cache_pressure_sink_t sink = _pressure_sink(cache);
+  dt_pthread_mutex_lock(&cache->lock);
+  dt_pixelpipe_cache_pressure_triggered(&cache->psi, &sink);
+  dt_pthread_mutex_unlock(&cache->lock);
+}
+
+// What allocations evict down to: the plan, or less under kernel memory pressure.
+// WARNING: non thread-safe
+static inline size_t _cache_budget_locked(const dt_dev_pixelpipe_cache_t *cache)
+{
+  return dt_pixelpipe_cache_pressure_budget(&cache->psi.budget);
+}
+
+// Close the kernel-pressure window and act on it. WARNING: non thread-safe
+static void _pressure_react_locked(dt_dev_pixelpipe_cache_t *cache)
+{
+  const dt_pixelpipe_cache_pressure_sink_t sink = _pressure_sink(cache);
+  dt_pixelpipe_cache_pressure_react(&cache->psi, &sink);
+}
+
 // WARNING: non thread-safe
 static int _free_space_to_alloc(dt_dev_pixelpipe_cache_t *cache, const size_t size, const uint64_t hash,
                                 const char *name)
 {
+  /* Under kernel memory pressure, keep to the lowered budget as far as eviction allows. It is a
+   * target, never a reason to fail: when everything left is in use the allocation still goes
+   * ahead, and only the plan below is a hard limit. */
+  _pressure_react_locked(cache);
+  const size_t budget = _cache_budget_locked(cache);
+  while(cache->current_memory + size > budget && g_hash_table_size(cache->entries) > 0)
+    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+
   // Free up space if needed to match the max memory limit
   // If error, all entries are currently locked or in use, so we cannot free space to allocate a new entry.
   int error = 0;
@@ -2230,6 +2300,7 @@ gboolean dt_dev_pixelpipe_cache_init(size_t max_memory, const gboolean verbose,
   cache->sys_probe_time_us = 0;
   cache->sys_available_est = 0;
   cache->sys_probe_valid = FALSE;
+  dt_pixelpipe_cache_pressure_monitor_init(&cache->psi, max_memory);
 
   if(IS_NULL_PTR(cache->entries) || IS_NULL_PTR(cache->external_entries))
   {
@@ -2254,8 +2325,13 @@ gboolean dt_dev_pixelpipe_cache_init(size_t max_memory, const gboolean verbose,
 
   // React within seconds when ANOTHER application's allocations push the system
   // toward memory starvation while we sit idle (the alloc-time pressure valve only
-  // runs when we allocate). No-ops when the system has RAM to spare.
-  pressure_shedding = g_timeout_add_seconds(5, (GSourceFunc)_memory_pressure_shedder, cache);
+  // runs when we allocate). No-ops when the system has RAM to spare. Every 2 s, one
+  // kernel-pressure window (DT_PIXELPIPE_CACHE_PSI_WINDOW_US).
+  pressure_shedding = g_timeout_add_seconds(2, (GSourceFunc)_memory_pressure_shedder, cache);
+
+  // And react without waiting for either, since a thrashing machine runs neither.
+  dt_pixelpipe_cache_pressure_watch_start(&cache->psi, _pressure_wake, cache);
+
   _pixelpipe_cache = cache;
   return TRUE;
 }
@@ -2264,6 +2340,10 @@ gboolean dt_dev_pixelpipe_cache_init(size_t max_memory, const gboolean verbose,
 void dt_dev_pixelpipe_cache_cleanup(void)
 {
   dt_dev_pixelpipe_cache_t *cache = _pixelpipe_cache;
+
+  // Before anything it holds goes away: the watcher takes `lock` and walks the entries.
+  dt_pixelpipe_cache_pressure_watch_stop(&cache->psi);
+
   g_hash_table_destroy(cache->external_entries);
   g_hash_table_destroy(cache->entries);
   cache->external_entries = NULL;
@@ -2827,6 +2907,14 @@ static int dt_dev_pixelpipe_cache_flush_old(dt_dev_pixelpipe_cache_t *cache)
  * ours until the kernel scavenges them, while decommitting hands them over NOW. */
 static int _memory_pressure_shedder(dt_dev_pixelpipe_cache_t *cache)
 {
+  // Kernel memory pressure first. A pipeline holding the lock is allocating, and allocations
+  // react to it themselves (_free_space_to_alloc()).
+  if(!dt_pthread_mutex_trylock(&cache->lock))
+  {
+    _pressure_react_locked(cache);
+    dt_pthread_mutex_unlock(&cache->lock);
+  }
+
   const size_t pressure_floor = dt_get_memory_pressure_floor();
   if(pressure_floor == 0) return G_SOURCE_CONTINUE;
 
@@ -3123,7 +3211,9 @@ void dt_dev_pixelpipe_cache_get_usage(size_t *current, size_t *max)
   if(IS_NULL_PTR(cache)) return;
   dt_pthread_mutex_lock(&cache->lock);
   if(current) *current = cache->current_memory;
-  if(max) *max = cache->max_memory;
+  // The budget allocations currently evict down to, so tiling plans against it -- and never
+  // under what is held, since the callers compute `max - current` unsigned.
+  if(max) *max = dt_pixelpipe_cache_pressure_reported(&cache->psi.budget, cache->current_memory);
   dt_pthread_mutex_unlock(&cache->lock);
 }
 
