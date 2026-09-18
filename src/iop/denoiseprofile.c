@@ -74,7 +74,6 @@
 #include "pixel/nlmeans_core.h"
 #include "common/noiseprofiles.h"
 #include "common/opencl.h"
-#include "develop/blend.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
@@ -754,7 +753,7 @@ void init_presets(dt_iop_module_so_t *self)
     p.y[DT_DENOISE_PROFILE_Y0][b] = 0.0f;
   }
   dt_gui_presets_add_generic(_("wavelets: chroma only"), self->op, 11, &p,
-                             sizeof(p), 1, DEVELOP_BLEND_CS_RGB_SCENE);
+                             sizeof(p), 1);
 }
 
 const char *name()

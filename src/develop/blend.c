@@ -58,6 +58,7 @@
 #include "develop/supervisor.h"
 #include "develop/tiling.h"
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
@@ -154,6 +155,36 @@ dt_develop_blend_colorspace_t dt_develop_blend_default_module_blend_colorspace(d
   return _blend_default_module_blend_colorspace(module, TRUE);
 }
 
+gboolean dt_develop_blend_colorspace_is_compatible(dt_iop_module_t *module, dt_develop_blend_colorspace_t cst)
+{
+  const dt_develop_blend_colorspace_t module_cst = dt_develop_blend_default_module_blend_colorspace(module);
+  switch(cst)
+  {
+    case DEVELOP_BLEND_CS_RAW:
+      return module_cst == DEVELOP_BLEND_CS_RAW;
+    case DEVELOP_BLEND_CS_LAB:
+    {
+      // Lab is reached through the working profile whatever the module's position, so it only means
+      // something where the pipe's own profile choice is the working one: never on camera RGB nor on
+      // the display encoding. An instance not placed in the pipe yet, parked at INT_MAX, is taken as
+      // sitting in the working space.
+      if(module_cst == DEVELOP_BLEND_CS_LAB) return TRUE;
+      if(module_cst != DEVELOP_BLEND_CS_RGB_SCENE) return FALSE;
+      if(module->iop_order == INT_MAX) return TRUE;
+      return dt_ioppr_get_module_profile_stage(module) == DT_IOPPR_PROFILE_STAGE_WORK;
+    }
+    case DEVELOP_BLEND_CS_RGB_SCENE:
+      // converted through the profile of the module's own position -- input, working or output, see
+      // dt_develop_blendif_init_masking_profile() -- so it is valid wherever the module sits; RGB
+      // (display) reads the channels as they are
+    case DEVELOP_BLEND_CS_RGB_DISPLAY:
+      return module_cst == DEVELOP_BLEND_CS_LAB || module_cst == DEVELOP_BLEND_CS_RGB_SCENE
+             || module_cst == DEVELOP_BLEND_CS_RGB_DISPLAY;
+    default:
+      return FALSE;
+  }
+}
+
 static void _blend_init_blendif_boost_parameters(dt_develop_blend_params_t *blend_params,
                                                  dt_develop_blend_colorspace_t cst)
 {
@@ -169,6 +200,13 @@ static void _blend_init_blendif_boost_parameters(dt_develop_blend_params_t *blen
     blend_params->blendif_boost_factors[DEVELOP_BLENDIF_Jz_out] = -6.64385619f;
     blend_params->blendif_boost_factors[DEVELOP_BLENDIF_Cz_out] = -6.64385619f;
   }
+}
+
+void dt_develop_blend_resolve_default_colorspace(dt_iop_module_t *module, dt_develop_blend_params_t *blend_params)
+{
+  if(blend_params->blend_cst != DEVELOP_BLEND_CS_NONE) return;
+  blend_params->blend_cst = dt_develop_blend_default_module_blend_colorspace(module);
+  _blend_init_blendif_boost_parameters(blend_params, blend_params->blend_cst);
 }
 
 void dt_develop_blend_init_blend_parameters(dt_develop_blend_params_t *blend_params,

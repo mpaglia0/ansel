@@ -1858,6 +1858,67 @@ Two things about those counters a future editor should not "improve":
   reading a masks form on the right. It is stable, so it costs nothing; chasing it would mean
   excluding the file, which would hide real writes appearing there later.
 
+### Which blending spaces a module may use follows the profile each conversion uses
+
+`dt_develop_blend_default_module_blend_colorspace()` (`develop/blend.c`) answers from the module's
+`blend_colorspace()` alone: Lab for a Lab module, RGB (scene) for an RGB one, whatever its place in
+the pipe.
+
+`dt_develop_blend_colorspace_is_compatible()` answers "may this module blend in that space" from the
+profile each conversion actually uses, not from the space's name. The Lab conversion always goes
+through the pipe's working profile (`pixelpipe_cpu.c`), so Lab is offered only to Lab modules and
+RGB modules whose position answers to the working profile. RGB (scene) takes the profile of the
+module's own position -- input, working or output, TRC included -- in
+`dt_develop_blendif_init_masking_profile()`, so it is valid everywhere, display-encoded data
+included. Which profile a position answers to is decided once, by
+`dt_ioppr_get_module_profile_stage()` (`develop/iop_profile.c`), which
+`dt_ioppr_get_pipe_current_profile_info()` also picks its profile from: the blending code asks it
+rather than comparing orders against `colorin`/`colorout` itself, so the menu cannot drift from the
+conversion. An instance parked at `INT_MAX`, not placed in the pipe yet, counts as the working
+space. Where a module sits against a tone mapper is deliberately NOT a rule:
+which module tone-maps, if any, is the edit's choice, so RGB (display) stays offered before filmic
+and RGB (scene) after it. The mask options menu (`_blendif_options_callback()`, `blend_gui.c`) lists
+all three spaces and greys out the incompatible ones, except the one the edit already uses: an edit
+loaded from an older version, or a module moved since, must still show its own space as selectable.
+
+Generated presets name no blending space: `init_presets()` is handed the module TYPE, and only an
+instance answers `blend_colorspace()`. `dt_gui_presets_add_generic()` stores
+`DEVELOP_BLEND_CS_NONE`, and `_resolve_presets_blend_colorspace()` (`develop/imageop.c`, end of
+`_init_presets()`) rewrites every such row with the space of an instance built without a pipe,
+through `dt_develop_blend_resolve_default_colorspace()` (space plus the boost factors that space
+starts from). NONE must not survive in the database: auto-applied presets are copied into history
+rows and XMP as they are, and several readers compare blend params byte for byte against a module's
+own -- `_process_history_db_entry()` clears an auto-applied preset's `DEVELOP_MASK_ENABLED` only on
+an exact match with `default_blendop_params`, and the presets menu finds the active and the default
+preset the same way.
+
+### A mask or channel preview is converted back like any output; the conversion keeps alpha
+
+The blend authors a preview in the BLENDING space so that the ordinary conversion back to the
+module's output space lands it where `gamma` expects it: Lab blending renders its grey channel
+values in RGB and converts them to Lab on purpose (`blendif_lab.c`, the `is_lab` branch of
+`blendop_display_channel`), and the mask itself rides in alpha. `pixelpipe_cpu.c` and
+`pixelpipe_gpu.c` therefore convert a preview back exactly as they convert pixels. Skipping that
+conversion for previews -- a raw copy of the blend buffer -- is correct only when the blending space
+equals the module's, and flattens every preview otherwise: a Lab module blended in RGB (scene)
+hands RGB greys to a downstream that reads them as Lab. The copy existed to dodge
+`_transform_rgb_to_lab_matrix()` (`colorprofiles/iop_profile.c`) dropping alpha, which is now
+preserved there as its Lab-to-RGB sibling and the OpenCL kernels already did. Any colorspace
+transform a preview can cross owes the same: carry channel 3 through.
+
+The picker behind the blending tabs converts the sampled buffer in two steps
+(`_color_picker_convert_buffer()`, `common/color_picker.c`): first into the family the tab derives
+from -- Lab for Lab/LCh, RGB for RGB/HSL/JzCzhz, the only step needing the profile -- then into the
+tab's space. Enumerating direct pairs missed Lab -> JzCzhz, Lab -> HSL and RGB -> LCh, i.e. every
+module blended outside its own family, and those tabs fell back to raw statistics of the wrong space.
+
+Those pickers are fed by `DT_SIGNAL_CONTROL_PICKERDATA_READY`, the same signal as a module's own
+picker, dispatched by `_iop_color_picker_data_ready_callback()` (`develop/imageop_gui.c`) to
+`blend_color_picker_apply()` first. Every module that blends subscribes, not only the ones with a
+`color_picker_apply` of their own: gated on the latter, the blend pickers of some forty modules
+(atrous, sharpen, vignette, ...) sampled on every move and never showed it, refreshing only when
+re-activated through another path.
+
 ## IOP modules
 
 ### ashift: preview buffer and crop geometry
