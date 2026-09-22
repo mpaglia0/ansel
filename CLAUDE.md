@@ -119,6 +119,39 @@ interface `dt_dev_transient_params_{set,clear,get,active}` in `dev_history.{h,c}
 
 See `doc/reorganisation.md` for the threading model (GUI diamond nodes vs. pipeline round nodes).
 
+### A stored format's version is bumped only once it has shipped in a round-numbered release
+
+Three formats outlive the build that writes them: a module's params (`DT_MODULE_INTROSPECTION`), the
+database schema (`CURRENT_DATABASE_VERSION_LIBRARY` / `_DATA`, `database/database.c`) and the XMP
+sidecar (`DT_XMP_EXIF_VERSION`, `common/xmp_sidecar.cc`). Bump one only if its current version was
+distributed in a round-numbered release: Ansel 1.0, 2.0, … or, for a version inherited from
+darktable, a darktable release. A version that has not shipped in one is still open, and a change
+goes into it without a bump. For the database schema and the XMP, the bump itself is made as late
+as possible, just before Ansel's version number changes.
+
+A bump rejects nothing: the build that makes it converts every older version (`legacy_params()`,
+the schema migration steps, the readers of older XMP versions). What it adds is permanent, since
+each version keeps its conversion code for good, so versions follow round-numbered releases instead
+of piling up one per change in nightlies.
+
+Changing an open version in place has its own conditions, since nightlies have already written it:
+
+- **Module params**: append, never insert. The conversions from older versions commonly copy the
+  old layout as a prefix over the defaults, so existing members keep their offsets. A blob of the
+  same version but another size makes `_sync_params()` call `legacy_params(N, N)`, which is not
+  told the stored size and has no branch for it, so the step is dropped: an edit saved with the
+  shorter layout loses that module. `_sync_params()` does not fall back to copying the common
+  prefix.
+- **Database schema**: a library already at version N never re-runs the step that brought it there
+  (`_upgrade_library_schema_step()`), so what is added to N in place must also be applied,
+  idempotently, to a library already at N: `_sanitize_db()` runs at every open.
+- **XMP**: a new key is optional, its absence meaning the default, and an existing key keeps its
+  meaning: a sidecar written earlier under the same version still reads, and an older build
+  reading a newer one skips what it does not know.
+
+Schema 36, data 9 and XMP 5 come from darktable releases. The bumps planned for Ansel 1.0 (schema
+37, XMP 6) wait on the `masks-history-dedup` branch, see `doc/masks_history_dedup.md`.
+
 ---
 
 ## Preferences system
@@ -1970,23 +2003,37 @@ undo/DB churn. History is written only at the real commit. Crop/ashift use `resy
 two must NOT be mixed — routing crop's geometry through `_sync_focused_in_place` (partial)
 mishandles the warm cropped→uncropped geometry change.
 
-### retouch: the pixel-processing callback must resolve shapes through `pipe->forms`, not `self->dev->forms`
+### retouch and spots: everything on the pipeline thread resolves shapes through `pipe->forms`, never `self->dev->forms`
 
-`rt_process_forms()`/`rt_process_forms_cl()` (`iop/retouch.c`) are the `dwt_decompose()`/
-`dwt_decompose_cl()` callbacks that actually apply each shape's clone/heal/blur/fill at every
-wavelet scale — they run on the pipeline/worker/CL thread, not the GUI thread. They resolve the
-module's mask group and each shape by id through `dt_masks_get_from_id_ext(pipe->forms, id)` —
-the refcounted, frozen snapshot `dt_dev_pixelpipe_process()` takes once per run (see "Forms are
-refcounted, not deep-copied" above) — never through `dt_masks_get_from_id(self->dev, id)`. The
-latter reads the live, GUI-owned `dev->forms` with no lock and no reference held, which is safe
-enough while `self->dev` is the long-lived darkroom `dev` continuously driven by the same GUI
-thread, but not for a `dev` that is created, populated, and torn down around one pipeline run —
-`imageio_core.c`'s export `dev` and `dev_snapshot.c`'s `frozen` both fit that shape. `commit_params()`
-and `rt_resynch_params()` already followed the `pipe->forms`-first pattern (falling back to a
-lock-guarded `self->dev->forms` only when `pipe->forms` is not yet populated); the two processing
-callbacks are the only per-pixel consumers and must use the same source. `rt_masks_form_is_in_roi()`,
-`rt_masks_get_delta_to_destination()`, `dt_masks_get_area()` and `dt_masks_get_mask()` all take an
-already-resolved `dt_masks_form_t*` and don't re-lookup by id, so they need no equivalent change.
+Two families of retouch code run on the pipeline/worker/CL thread, not the GUI thread: the
+`dwt_decompose()`/`dwt_decompose_cl()` callbacks `rt_process_forms()`/`rt_process_forms_cl()`, which
+apply each shape's clone/heal/blur/fill, and the ROI planning behind `modify_roi_in()`
+(`rt_compute_roi_in()`, `rt_extend_roi_in_for_clone()`, `rt_extend_roi_in_from_source_clones()`),
+which widens the input to cover every source area. Both resolve the module's mask group and each
+shape in `pipe->forms` — the refcounted, frozen snapshot of the run (see "Forms are refcounted, not
+deep-copied" above) — through `dt_masks_get_from_id_in_pipe()` (`develop/masks.h`), wrapped by
+`rt_pipe_group_members()` and `rt_pipe_member_form()`, and read the group id from
+`piece->blendop_data`, never from `self->blend_params`. `iop/spots.c`'s `modify_roi_in()` and
+`_process()` (which `distort_mask()` reuses) follow the same rule with the same resolver. The CPU and OpenCL callbacks share their whole per-shape preamble (lookup,
+scale and layer checks, mask, source offset) through `rt_prepare_shape()`, so the two paths cannot
+drift on which shapes they apply.
+
+`dt_masks_get_from_id(self->dev, id)` reads the live, GUI-owned `dev->forms` with no lock and no
+reference held, and that is unsafe even for the long-lived darkroom `dev`: while the user edits a
+shape, the GUI thread's copy-on-write replaces it in `dev->forms` and drops the old one, so a
+pipeline walking that shape's `points` reads freed memory. That is how the ROI planning crashed, in
+`g_list_length()` under `_polygon_get_area()`, while the GUI thread was committing the image's
+history. Export and snapshot devs (`imageio_core.c`, `dev_snapshot.c`'s `frozen`) are the other
+reason: they are built and torn down around a single run.
+
+The snapshot exists during ROI planning because the pipeline guarantees it there:
+`dt_dev_pixelpipe_process()` takes it BEFORE `dt_dev_pixelpipe_get_roi_in()`, so planning and
+processing see the same shapes, and `dt_dev_pixelpipe_get_roi_in()` itself takes a temporary one
+for the length of the walk when called with none (the darkroom's `_update_darkroom_roi` path in
+`develop.c` plans outside any run). `commit_params()` and `rt_resynch_params()` run on the GUI side
+and fall back to a lock-guarded `self->dev->forms` when `pipe->forms` is not populated.
+`rt_masks_form_is_in_roi()`, `rt_masks_get_delta_to_destination()`, `dt_masks_get_area()` and
+`dt_masks_get_mask()` take an already-resolved `dt_masks_form_t*` and do not look up by id.
 
 ### dev_snapshot.c: the `history_override` path must resync `frozen->forms` too, not just `frozen->history`
 
@@ -2020,6 +2067,31 @@ deep-copied"), so this is a cheap re-point, not a copy. `duplicate.c`'s call sit
 (`dt_dev_snapshot_capture(&d->preview, dev, imgid, NULL, NULL, -1)`) passes no override and never
 enters this block — it already gets correct forms from `dt_dev_load_image()`'s normal DB read, since
 it is snapshotting an already-saved image, not a live in-progress edit.
+
+### retouch: the "Square root" heal algorithm interpolates in the square-root domain, and only where there is a level
+
+`dt_heal()` (`pixel/heal.c`) solves Laplace on the destination − source difference and adds the
+harmonic correction back to the source. The "Linear" algorithm (`DT_HEAL_DOMAIN_LINEAR`) does it on
+scene-linear values, so a source brighter than its target keeps its *absolute* noise on a darker
+base; the display encoding is steeper in the shadows, and the patch comes out visibly noisier than
+what surrounds it. Measured on a heal whose source was ~2× brighter in linear: high-pass noise ×1.49 /
+×1.35 / ×1.34 (R/G/B) against the target, matching the predicted `(Ls/Lt)^(1 − 1/2.4)` exactly.
+
+The "Square root" algorithm (`DT_HEAL_DOMAIN_SQRT`) does the same on `sqrt(max(x, 0) + 1e-3)`, the
+variance-stabilising transform of shot noise, which brought that patch's noise back to the target's
+own (0.0208 vs 0.0214). A log (multiplicative) domain was measured too and rejected: it scales noise by the level
+ratio rather than its square root and smooths the patch (0.016). The fourth channel stays linear,
+and a negative source value keeps its negative part.
+
+`heal_algorithm` is a module parameter (combobox "Linear"/"Square root", default Square root);
+`legacy_params()` maps every older params version to Linear, so an existing edit renders
+bit-identically. v4 has shipped in no round-numbered release, so it is still open (see the
+stored-format version rule under "Architectural rules"): a new param is appended to the end of v4,
+and every conversion in `legacy_params()` starts from the defaults, so it needs no change there.
+`rt_heal_domain()` applies the square root only to scale 0 and the wavelet residual: detail scales
+and merged layers are signed, zero-mean differences, and they heal linearly whatever the algorithm.
+The OpenCL path runs the same CPU `dt_heal()`, so it takes the domain as an argument rather than a
+kernel of its own.
 
 ### retouch: combining the mask/wavelet-scale/suppress preview toggles
 
