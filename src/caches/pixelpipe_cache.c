@@ -2399,6 +2399,27 @@ static dt_pixel_cache_entry_t *_cache_try_rekey_reuse_locked(dt_dev_pixelpipe_ca
   if(cache_entry->size < size) return NULL;
   if(_non_threadsafe_cache_get_entry(cache, cache->entries, new_hash)) return NULL;
 
+  /* Anybody else holding this entry keeps it: the same `refcount > 0' the LRU, the vRAM flush
+   * and the removal path all refuse to touch, now applied to reuse as well.
+   *
+   * The write lock below makes a rekey safe against someone READING the pixels, and that is a
+   * different question from whether the entry may be rekeyed at all. Rekeying moves it to a new
+   * hash, so the hash it was published under stops resolving -- and the backbuffer's consumers
+   * find their frame by exactly that hash. Reuse the entry currently on screen and there is a
+   * window, from here until the replacement frame is published, where the published hash names
+   * nothing: `dt_dev_lock_pipe_surface()' misses, keeps the previous surface by design, and the
+   * canvas alternates between the frame being drawn and the one before it. That is what this
+   * looked like in the darkroom -- a shape flashing on and off while painting -- and no amount
+   * of locking fixes it, because nothing was ever read at the wrong time.
+   *
+   * With the guard the producer simply takes another entry, so a held cacheline is republished
+   * rather than overwritten, and the two the backbuffer alternates between each keep their own
+   * pinned OpenCL payload: the reuse this exists for survives, measured at 99%.
+   *
+   * A transient output nobody holds -- every module that is not published to a consumer -- has
+   * refcount 0 here and is rekeyed exactly as before. */
+  if(dt_atomic_get_int(&cache_entry->refcount) > 0) return NULL;
+
   _non_thread_safe_cache_ref_count_entry(cache, TRUE, cache_entry);
   dt_dev_pixelpipe_cache_wrlock_entry(TRUE, cache_entry);
 
@@ -2528,6 +2549,7 @@ dt_dev_pixelpipe_cache_get_writable(const uint64_t hash,
                                     const size_t size, const char *name, const int id,
                                     const gboolean alloc, const gboolean allow_rekey_reuse,
                                     const dt_pixel_cache_entry_t *reuse_hint,
+                                    const dt_pixel_cache_entry_t *reuse_hint_prev,
                                     void **data,
                                     dt_pixel_cache_entry_t **entry)
 {
@@ -2567,7 +2589,13 @@ dt_dev_pixelpipe_cache_get_writable(const uint64_t hash,
 
   if(allow_rekey_reuse)
   {
+    /* Two candidates, most recent first. The second only ever answers for an output a consumer
+     * holds across frames -- the backbuffer -- where the first is refused by the guard inside
+     * because it is the cacheline currently on screen. Anything nobody holds is served by the
+     * first and never reaches the second, so no module keeps a cacheline alive on its account. */
     cache_entry = _cache_try_rekey_reuse_locked(cache, hash, size, reuse_hint);
+    if(IS_NULL_PTR(cache_entry))
+      cache_entry = _cache_try_rekey_reuse_locked(cache, hash, size, reuse_hint_prev);
     if(!IS_NULL_PTR(cache_entry))
     {
       dt_pthread_mutex_unlock(&cache->lock);
@@ -3086,6 +3114,14 @@ void dt_dev_pixelpipe_cache_auto_destroy_apply(dt_pixel_cache_entry_t *cache_ent
   }
   
   dt_pthread_mutex_unlock(&cache->lock);
+}
+
+void dt_dev_pixelpipe_cache_unref_entry(dt_pixel_cache_entry_t *entry)
+{
+  /* No cache lock and no lookup: the caller names the entry it referenced, and holding a
+   * reference is what guarantees that object is still there to be named. */
+  if(IS_NULL_PTR(entry)) return;
+  dt_dev_pixelpipe_cache_ref_count_entry(FALSE, entry);
 }
 
 void dt_dev_pixelpipe_cache_unref_hash(const uint64_t hash)

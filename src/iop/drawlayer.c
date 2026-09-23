@@ -207,10 +207,19 @@ static void _sync_cached_brush_colors(dt_iop_module_t *self, const float display
   g->ui.brush_color_valid = TRUE;
 }
 
-static void _fill_input_brush_settings(dt_iop_module_t *self, dt_drawlayer_paint_raw_input_t *input)
+/**
+ * @brief Re-resolve the brush from conf into the GUI-side cache.
+ *
+ * Every read here parses a string (`dt_conf_get_float` -> `dt_calculator_solve`), so this
+ * runs when something CHANGES the brush, not when the pointer moves. Its three runtime
+ * writers are `_sync_params_from_gui` (every widget), the colour setter, and `scrolled()`;
+ * `gui_update`, `change_image` and `gui_focus` invalidate as well, so a path nobody
+ * enumerated still refills on the next non-motion event.
+ */
+static void _refresh_brush_settings_cache(dt_iop_drawlayer_gui_data_t *g)
 {
-  if(IS_NULL_PTR(self) || IS_NULL_PTR(input)) return;
-  dt_iop_drawlayer_gui_data_t *g = (dt_iop_drawlayer_gui_data_t *)dt_iop_gui_data(self);
+  if(IS_NULL_PTR(g)) return;
+  dt_drawlayer_brush_settings_t *const c = &g->ui.brush_settings;
 
   uint32_t map_flags = 0u;
   if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_PRESSURE_SIZE)) map_flags |= DRAWLAYER_INPUT_MAP_PRESSURE_SIZE;
@@ -225,6 +234,53 @@ static void _fill_input_brush_settings(dt_iop_module_t *self, dt_drawlayer_paint
   if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_OPACITY)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_OPACITY;
   if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_FLOW)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_FLOW;
   if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_SOFTNESS)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_SOFTNESS;
+
+  c->map_flags = map_flags;
+  c->pressure_profile = (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_PRESSURE_PROFILE);
+  c->tilt_profile = (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_TILT_PROFILE);
+  c->accel_profile = (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_ACCEL_PROFILE);
+  c->distance_percent = _conf_distance() / 100.0f;
+  c->smoothing_percent = _conf_smoothing() / 100.0f;
+  c->brush_radius = _conf_size();
+  c->brush_opacity = _conf_opacity() / 100.0f;
+  c->brush_flow = _conf_flow() / 100.0f;
+  c->brush_hardness = _conf_hardness();
+  c->brush_sprinkles = _conf_sprinkles() / 100.0f;
+  c->brush_sprinkle_size = _conf_sprinkle_size();
+  c->brush_sprinkle_coarseness = _conf_sprinkle_coarseness() / 100.0f;
+  c->brush_shape = _conf_brush_shape();
+  c->brush_mode = _conf_brush_mode();
+  g->ui.brush_settings_valid = TRUE;
+}
+
+void dt_drawlayer_invalidate_brush_settings_cache(dt_iop_drawlayer_gui_data_t *g)
+{
+  if(!IS_NULL_PTR(g)) g->ui.brush_settings_valid = FALSE;
+}
+
+static void _fill_input_brush_settings(dt_iop_module_t *self, dt_drawlayer_paint_raw_input_t *input)
+{
+  if(IS_NULL_PTR(self) || IS_NULL_PTR(input)) return;
+  dt_iop_drawlayer_gui_data_t *g = (dt_iop_drawlayer_gui_data_t *)dt_iop_gui_data(self);
+  if(!IS_NULL_PTR(g) && !g->ui.brush_settings_valid) _refresh_brush_settings_cache(g);
+
+  /* Only reachable without GUI data, where there is nowhere to cache. */
+  uint32_t map_flags = 0u;
+  if(IS_NULL_PTR(g))
+  {
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_PRESSURE_SIZE)) map_flags |= DRAWLAYER_INPUT_MAP_PRESSURE_SIZE;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_PRESSURE_OPACITY)) map_flags |= DRAWLAYER_INPUT_MAP_PRESSURE_OPACITY;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_PRESSURE_FLOW)) map_flags |= DRAWLAYER_INPUT_MAP_PRESSURE_FLOW;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_PRESSURE_SOFTNESS)) map_flags |= DRAWLAYER_INPUT_MAP_PRESSURE_SOFTNESS;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_TILT_SIZE)) map_flags |= DRAWLAYER_INPUT_MAP_TILT_SIZE;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_TILT_OPACITY)) map_flags |= DRAWLAYER_INPUT_MAP_TILT_OPACITY;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_TILT_FLOW)) map_flags |= DRAWLAYER_INPUT_MAP_TILT_FLOW;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_TILT_SOFTNESS)) map_flags |= DRAWLAYER_INPUT_MAP_TILT_SOFTNESS;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_SIZE)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_SIZE;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_OPACITY)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_OPACITY;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_FLOW)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_FLOW;
+    if(dt_conf_get_bool(DRAWLAYER_CONF_MAP_ACCEL_SOFTNESS)) map_flags |= DRAWLAYER_INPUT_MAP_ACCEL_SOFTNESS;
+  }
 
   float display_rgb[3] = { 0.0f };
   float pipeline_rgb[3] = { 0.0f };
@@ -251,21 +307,22 @@ static void _fill_input_brush_settings(dt_iop_module_t *self, dt_drawlayer_paint
     }
   }
 
-  input->map_flags = map_flags;
-  input->pressure_profile = (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_PRESSURE_PROFILE);
-  input->tilt_profile = (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_TILT_PROFILE);
-  input->accel_profile = (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_ACCEL_PROFILE);
-  input->distance_percent = _conf_distance() / 100.0f;
-  input->smoothing_percent = _conf_smoothing() / 100.0f;
-  input->brush_radius = _conf_size();
-  input->brush_opacity = _conf_opacity() / 100.0f;
-  input->brush_flow = _conf_flow() / 100.0f;
-  input->brush_hardness = _conf_hardness();
-  input->brush_sprinkles = _conf_sprinkles() / 100.0f;
-  input->brush_sprinkle_size = _conf_sprinkle_size();
-  input->brush_sprinkle_coarseness = _conf_sprinkle_coarseness() / 100.0f;
-  input->brush_shape = _conf_brush_shape();
-  input->brush_mode = _conf_brush_mode();
+  const dt_drawlayer_brush_settings_t *const c = IS_NULL_PTR(g) ? NULL : &g->ui.brush_settings;
+  input->map_flags = c ? c->map_flags : map_flags;
+  input->pressure_profile = c ? c->pressure_profile : (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_PRESSURE_PROFILE);
+  input->tilt_profile = c ? c->tilt_profile : (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_TILT_PROFILE);
+  input->accel_profile = c ? c->accel_profile : (uint8_t)_conf_mapping_profile(DRAWLAYER_CONF_ACCEL_PROFILE);
+  input->distance_percent = c ? c->distance_percent : _conf_distance() / 100.0f;
+  input->smoothing_percent = c ? c->smoothing_percent : _conf_smoothing() / 100.0f;
+  input->brush_radius = c ? c->brush_radius : _conf_size();
+  input->brush_opacity = c ? c->brush_opacity : _conf_opacity() / 100.0f;
+  input->brush_flow = c ? c->brush_flow : _conf_flow() / 100.0f;
+  input->brush_hardness = c ? c->brush_hardness : _conf_hardness();
+  input->brush_sprinkles = c ? c->brush_sprinkles : _conf_sprinkles() / 100.0f;
+  input->brush_sprinkle_size = c ? c->brush_sprinkle_size : _conf_sprinkle_size();
+  input->brush_sprinkle_coarseness = c ? c->brush_sprinkle_coarseness : _conf_sprinkle_coarseness() / 100.0f;
+  input->brush_shape = c ? c->brush_shape : _conf_brush_shape();
+  input->brush_mode = c ? c->brush_mode : _conf_brush_mode();
   input->color[0] = pipeline_rgb[0];
   input->color[1] = pipeline_rgb[1];
   input->color[2] = pipeline_rgb[2];
@@ -599,7 +656,8 @@ static inline __attribute__((always_inline)) gboolean _refresh_piece_base_cache(
     }
 
     gboolean warm_loaded = FALSE;
-    if(have_sidecar && info.found)
+    const gboolean load_attempted = have_sidecar && info.found;
+    if(load_attempted)
     {
       dt_drawlayer_io_patch_t warm_patch = { 0 };
       dt_drawlayer_cache_patch_wrlock(&data->process.base_patch);
@@ -621,6 +679,23 @@ static inline __attribute__((always_inline)) gboolean _refresh_piece_base_cache(
       data->process.cache_layer_order = info.found ? info.index : params->layer_order;
       dt_drawlayer_paint_runtime_state_reset(&data->process.cache_dirty_rect);
       return TRUE;
+    }
+
+    /* A fresh arena page is NOT zeroed -- `dt_drawlayer_cache_patch_alloc_shared` allocates,
+     * it does not clear -- and below we are about to publish it as a valid canvas. When the
+     * load ran it already memset its destination before touching the file, so the only
+     * uncleared case is the one where it never ran. Clear exactly that one: the GUI-side twin
+     * (`dt_drawlayer_ensure_layer_cache`) has always cleared here, and the two loaders had
+     * diverged. Both key the same cache entry, so an uncleared page created by the pipeline is
+     * adopted by the GUI as the layer's content and a later sidecar write makes it permanent.
+     * Do NOT move this into the allocator: the rekey-conflict caller memcpys the whole buffer
+     * on its next statement and would pay a dead full-canvas memset. */
+    if(!load_attempted)
+    {
+      dt_drawlayer_cache_patch_wrlock(&data->process.base_patch);
+      dt_drawlayer_cache_clear_transparent_float(data->process.base_patch.pixels,
+                                                 (size_t)layer_width * layer_height);
+      dt_drawlayer_cache_patch_wrunlock(&data->process.base_patch);
     }
 
     data->process.cache_valid = TRUE;
@@ -952,6 +1027,15 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
                            && _drawlayer_map_source_damage_to_target(&process->cache_dirty_rect, target_roi,
                                                                      source_roi, &target_damage);
 
+  /* Localise the composite's cost. Measured on a 10.4 s stroke, `Drawing' cost 37.5 ms a frame
+   * with a 23 ms FLOOR -- something runs unconditionally -- against a total frame of 109.5 ms.
+   * A per-module total cannot say whether that is the source upload, the resample or the
+   * kernel, and the three have very different fixes. */
+  const gboolean trace_stages = (dt_get_debug_flags() & DT_DEBUG_PERF) != 0;
+  const gint64 stage_t0 = trace_stages ? g_get_monotonic_time() : 0;
+  gint64 stage_source = stage_t0;
+  gint64 stage_layer = stage_t0;
+
   drawlayer_cl_image_handle_t source = { 0 };
   drawlayer_cl_image_handle_t layer = { 0 };
   cl_mem dev_layer_partial = NULL;
@@ -965,6 +1049,7 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
   else if(!_drawlayer_acquire_source_image(devid, layer_pixels, resolved_entry, force_device_copy, realtime_reuse,
                                            source_w, source_h, process, &source))
     goto cleanup;
+  if(trace_stages) stage_source = g_get_monotonic_time();
 
   if(partial)
   {
@@ -1027,12 +1112,19 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
       }
     }
     result = TRUE;
+    if(trace_stages)
+      dt_print(DT_DEBUG_PERF,
+               "[drawlayer] composite partial win=%dx%d src=%.2f ms kernel=%.2f ms total=%.2f ms\n",
+               dw, dh, (stage_source - stage_t0) / 1000.0,
+               (g_get_monotonic_time() - stage_source) / 1000.0,
+               (g_get_monotonic_time() - stage_t0) / 1000.0);
     goto cleanup;
   }
 
   if(!_drawlayer_acquire_layer_image(devid, resolved_entry, realtime_reuse, direct_copy, source.mem, source_w,
                                      source_h, target_roi, source_roi, &layer, &err))
     goto cleanup;
+  if(trace_stages) stage_layer = g_get_monotonic_time();
 
   if(use_preview_bg)
   {
@@ -1061,6 +1153,7 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
   err = _drawlayer_run_premult_over_kernel(devid, kernel_premult_over, dev_background, layer.mem, dev_out,
                                            target_roi->width, target_roi->height, 0, 0);
   if(err != CL_SUCCESS) goto cleanup;
+  const gint64 stage_kernel = trace_stages ? g_get_monotonic_time() : 0;
 
   /* The realtime display source is the host-backed full-resolution cache.
    * When imported as CL_MEM_USE_HOST_PTR, queued GPU reads may still touch that
@@ -1076,6 +1169,15 @@ static int _blend_layer_over_input_cl(const int devid, const int kernel_premult_
   }
 
   result = TRUE;
+  if(trace_stages)
+    dt_print(DT_DEBUG_PERF,
+             "[drawlayer] composite FULL out=%dx%d src=%dx%d src_up=%.2f ms resample=%.2f ms "
+             "kernel=%.2f ms finish=%.2f ms total=%.2f ms pinned=%d\n",
+             target_roi->width, target_roi->height, source_w, source_h,
+             (stage_source - stage_t0) / 1000.0, (stage_layer - stage_source) / 1000.0,
+             (stage_kernel - stage_layer) / 1000.0,
+             (g_get_monotonic_time() - stage_kernel) / 1000.0,
+             (g_get_monotonic_time() - stage_t0) / 1000.0, source.is_pinned ? 1 : 0);
 
 cleanup:
   if(dev_layer_partial) dt_opencl_release_mem_object(dev_layer_partial);
@@ -2656,6 +2758,11 @@ void dt_drawlayer_begin_gui_stroke_capture(dt_iop_module_t *self, const dt_drawl
   g->stroke.stroke_event_index = event_index;
   g->stroke.last_dab_valid = FALSE;
   dt_drawlayer_worker_reset_live_publish(g->stroke.worker);
+  /* Hand the worker its own params blob for this stroke's heartbeats. Nothing may change
+   * `self->params` while a stroke is live -- every GUI writer of it runs `_commit_dabs(self,
+   * FALSE)` first, which waits for the worker -- so one snapshot here is valid for the whole
+   * stroke, and the worker never has to read a blob the GUI thread owns. */
+  dt_drawlayer_worker_snapshot_params(g->stroke.worker, (const dt_iop_drawlayer_params_t *)self->params);
   dt_iop_gui_leave_critical_section(self);
 }
 
@@ -3241,6 +3348,11 @@ void gui_update(dt_iop_module_t *self)
   dt_iop_drawlayer_gui_data_t *g = (dt_iop_drawlayer_gui_data_t *)dt_iop_gui_data(self);
   dt_iop_drawlayer_params_t *params = (dt_iop_drawlayer_params_t *)self->params;
   if(IS_NULL_PTR(g)) return;
+
+  /* Belt and braces beside the three enumerated writers: any refresh of the panel refills
+   * the resolved brush on the next pointer event, so a conf path nobody found cannot leave
+   * the cache stale for longer than one non-motion event. */
+  dt_drawlayer_invalidate_brush_settings_cache(g);
 
   _sanitize_params(self, params);
 
@@ -3949,6 +4061,9 @@ int scrolled(dt_iop_module_t *self, double x, double y, int up, uint32_t state)
   const gboolean increase = dt_mask_scroll_increases(up);
   const float factor = increase ? 1.1f : 0.9f;
   const float new_size = CLAMP(_conf_size() * factor, 1.0f, 2048.0f);
+  /* The wheel changes the brush mid-stroke, which is exactly the case a per-event cache
+   * must not miss. */
+  dt_drawlayer_invalidate_brush_settings_cache((dt_iop_drawlayer_gui_data_t *)dt_iop_gui_data(self));
   dt_conf_set_float(DRAWLAYER_CONF_SIZE, new_size);
 
   if(dt_iop_gui_data(self))
@@ -4049,6 +4164,12 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
 
   dt_drawlayer_runtime_source_t source = { 0 };
   if(!fallback) fallback = !_update_runtime_state(&runtime_request, &source);
+  /* Everything above -- bind_piece, _refresh_piece_base_cache, the runtime state machine and
+   * _update_runtime_state's source resolution -- is prologue. The pipeline reports `Drawing'
+   * at 53 ms a frame while the composite inside it measures 15, so ~38 ms is somewhere else:
+   * either here, or in the blend op the pipe runs AFTER process_cl returns. Splitting the two
+   * is the difference between optimising drawlayer and optimising blend.c. */
+  const gint64 prologue_end = g_get_monotonic_time();
   if(!fallback)
   {
     const gboolean realtime = dt_dev_pixelpipe_get_realtime(pipe);
@@ -4078,10 +4199,17 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
     const gboolean g_hash = pstate && layer_hash != 0 && pstate->last_composite_layer_hash == layer_hash;
     const gboolean g_roi = pstate && !memcmp(&pstate->last_composite_target_roi, &target_roi, sizeof(dt_iop_roi_t));
     const gboolean allow_partial = realtime && g_valid && g_devout && g_hash && g_roi;
-    if(realtime && pstate && !allow_partial && (dt_get_debug_flags() & DT_DEBUG_VERBOSE))
+    /* Once per composite, not per dab, so it belongs under -d perf rather than -d verbose:
+     * asking for verbose to find out why a frame was slow also turns on a per-dab print, and
+     * at the default 1 px spacing that is thousands of lines a second drowning the answer.
+     * Which of the four conditions declined is the whole diagnosis when the full path runs
+     * every frame. */
+    if(realtime && pstate && !allow_partial)
       dt_print(DT_DEBUG_PERF,
-               "[drawlayer] partial gate declined: valid=%d devout=%d hash=%d roi=%d\n",
-               g_valid, g_devout, g_hash, g_roi);
+               "[drawlayer] partial gate declined: valid=%d devout=%d hash=%d roi=%d "
+               "(cache_on_ram=%d bypass=%d)\n",
+               g_valid, g_devout, g_hash, g_roi, piece->cache_output_on_ram ? 1 : 0,
+               piece->bypass_cache ? 1 : 0);
 
     gboolean ok = _blend_layer_over_input_cl(
         pipe->devid, global->kernel_premult_over, dev_out, dev_in, scratch, source_pixels, source_entry, NULL,
@@ -4111,8 +4239,11 @@ int process_cl(struct dt_iop_module_t *self, const dt_dev_pixelpipe_t *pipe, con
       .process = runtime_request.process_state,
       .source = &source,
     };
-    if(dt_get_debug_flags() & DT_DEBUG_VERBOSE)
-      dt_print(DT_DEBUG_PERF, "[drawlayer] process_cl step=blend-base total=%.3f ok=%d\n",
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      dt_print(DT_DEBUG_PERF,
+               "[drawlayer] process_cl prologue=%.2f ms composite+epilogue=%.2f ms total=%.2f ms ok=%d\n",
+               (prologue_end - process_t0) / 1000.0,
+               (g_get_monotonic_time() - prologue_end) / 1000.0,
                (g_get_monotonic_time() - process_t0) / 1000.0, ok ? 1 : 0);
     dt_drawlayer_runtime_manager_update(manager, &process_post, &runtime_manager);
     return ok;

@@ -554,7 +554,7 @@ gboolean _resync_pipe_with_history(dt_develop_t *dev, dt_dev_pixelpipe_t *pipe, 
 {
   // When in realtime mode, preview pipe gets paused at the benefit of main pipeline.
   // This is a transient state.
-  if(pipe->pause) return FALSE;
+  if(dt_atomic_get_int(&pipe->pause)) return FALSE;
 
   // We recompute if history hash changed or ROI has changed.
   // If we know history changed, ensure at least the last step is resynced.
@@ -876,14 +876,23 @@ void dt_dev_darkroom_pipeline(dt_develop_t *dev)
           dt_dev_resync_mipmap_cache(dev, pipe, roi);
       }
 
-      // Allow some breathing room to the OS and GPU
-      dt_iop_nap(10000); // 10 ms
+      /* Breathing room for the OS and the GPU, sized against the work just done rather than
+       * fixed. A realtime stroke paces itself upstream -- the publisher only republishes once
+       * per measured pipe runtime -- so a constant here is not what stops this loop spinning;
+       * it is pure latency added to every frame. Two 10 ms naps were ~15% of a 130 ms frame
+       * when this was written and are 41% of a 29 ms one, which is how a constant ages when
+       * the thing it sits beside gets three times faster. */
+      if(!dt_dev_pixelpipe_get_realtime(pipe)) dt_iop_nap(10000);
     }
 
+    /* Nap only when this turn found nothing to do. Having serviced a pipe, go straight back and
+     * look again: the publish throttle decides how often there is new work, and sleeping past
+     * its next publish just moves the stroke further behind the pointer. */
+    const gboolean serviced = pipe_needs_update[0] || pipe_needs_update[1];
     if(dt_dev_pixelpipe_get_realtime(pipes[0]) || dt_dev_pixelpipe_get_realtime(pipes[1]))
-      dt_iop_nap(10000);
+      dt_iop_nap(serviced ? 500 : 10000);
     else
-      dt_iop_nap(50000);
+      dt_iop_nap(serviced ? 1000 : 50000);
   }
 
   for(size_t i = 0; i < G_N_ELEMENTS(pipes); i++)
@@ -2129,6 +2138,31 @@ void dt_dev_update_mouse_effect_radius(dt_develop_t *dev)
   dt_print(DT_DEBUG_MASKS,
            "[mouse] effect_radius=%0.3f effect_radius_clamped=%0.3f zoom_level=%0.4f ppd=%0.4f\n",
            radius, clamped, zoom_level, dt_screen_ppd());
+}
+
+void dt_dev_backbuf_take_keepalive(dt_backbuf_t *backbuf, struct dt_pixel_cache_entry_t *entry)
+{
+  if(IS_NULL_PTR(backbuf)) return;
+  /* Idempotent: a republication resolving to the same cacheline must not stack references, and
+   * must not drop the one it holds either -- which an unconditional release-then-take would do
+   * for a moment, long enough for the LRU to take the entry the screen is showing. */
+  if(backbuf->keepalive == entry) return;
+
+  dt_dev_backbuf_release_keepalive(backbuf);
+  if(!IS_NULL_PTR(entry))
+  {
+    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, entry);
+    backbuf->keepalive = entry;
+  }
+}
+
+void dt_dev_backbuf_release_keepalive(dt_backbuf_t *backbuf)
+{
+  if(IS_NULL_PTR(backbuf) || IS_NULL_PTR(backbuf->keepalive)) return;
+  /* By POINTER. This reference was taken by pointer, and an entry's hash is not stable under
+   * rekey reuse -- see dt_dev_pixelpipe_cache_unref_entry() for what releasing by hash costs. */
+  dt_dev_pixelpipe_cache_unref_entry(backbuf->keepalive);
+  backbuf->keepalive = NULL;
 }
 
 void dt_dev_set_backbuf(dt_backbuf_t *backbuf, const int width, const int height, const size_t bpp, 

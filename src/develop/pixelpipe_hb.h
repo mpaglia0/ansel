@@ -158,6 +158,20 @@ typedef struct dt_dev_pixelpipe_iop_t
   // fails before producing a valid output for the new hash.
   dt_pixel_cache_entry_t cache_entry;
 
+  /** The cacheline written the run BEFORE `cache_entry`, offered as a second reuse candidate.
+   *
+   * It exists for one case: an output a consumer holds across frames, i.e. the backbuffer. Such
+   * an entry is refused by the rekey guard while it is on screen, and with a single hint the
+   * producer then had nothing to fall back on and allocated a new cacheline every frame --
+   * measured, 122 distinct host buffers over 122 frames, each re-pinning 12.2 MB for OpenCL.
+   * Two slots let it alternate: the one from two runs ago has been released by then, so the
+   * frame being displayed is republished rather than overwritten and both keep their payload.
+   *
+   * It costs nothing for every other module. `cache_entry` is tried first and, with nothing
+   * holding it, succeeds -- so this slot is never consulted and no second cacheline is kept
+   * alive on its account. */
+  dt_pixel_cache_entry_t cache_entry_prev;
+
   // Set to TRUE for modules that should mandatorily cache their output to RAM
   // even when running on OpenCL. This is a processing-policy flag authored
   // during synchronization and then consumed by one recursion step; it does not
@@ -225,7 +239,25 @@ typedef struct dt_backbuf_t
 
   /** Odd while a publication is in flight, even once it has settled. See ::dt_dev_backbuf_snapshot. */
   dt_atomic_uint64 generation;
+
+  /** The ONE cache reference that keeps the published cacheline alive, held by pointer.
+   *
+   * Private to whoever publishes this backbuffer -- never read by a consumer, and deliberately
+   * NOT part of ::dt_backbuf_state_t, which is the coherent snapshot consumers take. It is a
+   * pointer rather than the hash it used to be released by, because rekey reuse moves a live
+   * entry to a new hash in place: released by the hash it was taken at, the reference would
+   * never be found again and never dropped. Managed only through
+   * ::dt_dev_backbuf_take_keepalive and ::dt_dev_backbuf_release_keepalive. */
+  struct dt_pixel_cache_entry_t *keepalive;
 } dt_backbuf_t;
+
+/** @brief Take the keepalive reference on @p entry, releasing whatever this backbuffer held.
+ *  Idempotent for the same entry, so a republication that resolves to the same cacheline does
+ *  not stack references. */
+void dt_dev_backbuf_take_keepalive(dt_backbuf_t *backbuf, struct dt_pixel_cache_entry_t *entry);
+
+/** @brief Release this backbuffer's keepalive reference, if it holds one. Safe to call twice. */
+void dt_dev_backbuf_release_keepalive(dt_backbuf_t *backbuf);
 
 /** @brief One coherent publication, by value. */
 typedef struct dt_backbuf_state_t
@@ -525,8 +557,12 @@ typedef struct dt_dev_pixelpipe_t
   // and can lead to memory pressure (RAM buffers + OpenCL pinned/device buffers).
   gboolean no_cache;
 
-  // Temporarily pause the infinite loop of pipeline
-  gboolean pause;
+  // Temporarily pause the infinite loop of pipeline.
+  // Written by drawlayer from BOTH the GUI thread and its paint worker, polled by the
+  // darkroom loop -- so it is atomic, like `running`, `shutdown` and `realtime` beside it.
+  // The pause path happened to be fenced by the `shutdown` store that followed it; the
+  // RESUME path had no atomic after it at all.
+  dt_atomic_int pause;
 
   // Run a self-setting pipeline that will update history for each module
   // depending on its input if it implements the autoset() method

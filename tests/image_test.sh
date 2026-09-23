@@ -267,14 +267,12 @@ find_cli() {
   # over guessing a repo-relative layout below.
   local from_path
   from_path="$(command -v ansel-cli 2>/dev/null)" && { printf '%s\n' "$from_path"; return 0; }
-  # Fallback for a build that was never `--install`ed system-wide (e.g. a
-  # relocatable "cmake --install <builddir> --prefix <builddir>" done by hand):
-  # ansel-cli resolves its plugin moduledir relative to its own binary path,
-  # which only lines up correctly once install has populated <builddir>/bin +
-  # <builddir>/lib together. The raw ninja output in build*/src/cli/ansel-cli
-  # looks for its bundled plugins (views/libs/imageio backends) in the wrong
-  # place and silently fails to init (e.g. "can't init develop system") --
-  # kept below only as a last resort.
+  # Everything below names an INSTALLED binary, and that is the whole rule: a raw
+  # ninja binary resolves its plugin moduledir relative to itself, so it looks for
+  # <its own dir>/../lib/ansel/views/modules.manifest -- a layout only `install`
+  # ever creates. It starts, prints its version, and then refuses the first export
+  # with "can't init develop system, aborting". Offering one as a last resort buys
+  # nothing but a CRASH verdict on a bank that passes, blamed on the raws.
   local candidates=(
     "$REPO_ROOT/build/bin/ansel-cli"
     "$REPO_ROOT/install/bin/ansel-cli"
@@ -284,16 +282,22 @@ find_cli() {
     "$REPO_ROOT/build_debug/bin/ansel-cli"
     "$REPO_ROOT/build_ASAN/bin/ansel-cli"
     "$REPO_ROOT/install_ASAN/bin/ansel-cli"
-    "$REPO_ROOT/build/src/cli/ansel-cli"
-    "$REPO_ROOT/build_Release/src/cli/ansel-cli"
-    "$REPO_ROOT/build_Debug/src/cli/ansel-cli"
-    "$REPO_ROOT/build_release/src/cli/ansel-cli"
-    "$REPO_ROOT/build_debug/src/cli/ansel-cli"
-    "$REPO_ROOT/build_ASAN/src/cli/ansel-cli"
+    # build.sh's own INSTALL_PREFIX_DEFAULT, same value on every platform.
+    "/opt/ansel/bin/ansel-cli"
   )
   local c
   for c in "${candidates[@]}"; do
     [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  # Last, ask each build tree where IT was installed. This is what keeps a custom
+  # --prefix reachable -- a build installed under $HOME by someone without sudo,
+  # so nothing landed in /usr/local/bin and none of the well-known paths above
+  # match. `installed_cli_for` takes any path inside the tree and reads the
+  # CMAKE_INSTALL_PREFIX its CMakeCache.txt recorded.
+  local d
+  for d in "$REPO_ROOT"/build "$REPO_ROOT"/build_*; do
+    [ -f "$d/CMakeCache.txt" ] || continue
+    c="$(installed_cli_for "$d/CMakeCache.txt")" && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
   done
   return 1
 }
@@ -330,9 +334,14 @@ toolchain_bin_dir_for() {
   # unrelated /mingw64 vs. a standalone C:\msys64\ucrt64 build) -- guessing a
   # flavor dir name off the current shell's own PATH doesn't reliably land on the
   # right install, so read the compiler path CMake recorded for this exact build.
-  local bin="$1" d cache compiler compiler_dir
+  local bin="$1" d prev="" cache compiler compiler_dir
   d="$(dirname "$bin")"
-  while [ "$d" != "/" ] && [ -n "$d" ]; do
+  # Stop when dirname stops making progress, not only at "/". A path can be
+  # drive-rooted on Windows ("C:/msys64/..."), and dirname's fixed point there is
+  # "C:" -- never "/", never empty -- so a walk guarded on "/" alone spins
+  # forever, forking one dirname per turn. The pre-commit hook hands this script
+  # exactly such a path, since git rev-parse --show-toplevel answers in that form.
+  while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "$prev" ]; do
     cache="$d/CMakeCache.txt"
     if [ -f "$cache" ]; then
       compiler="$(sed -n 's/^CMAKE_C_COMPILER:FILEPATH=//p' "$cache")"
@@ -342,6 +351,7 @@ toolchain_bin_dir_for() {
       printf '%s\n' "$compiler_dir"
       return 0
     fi
+    prev="$d"
     d="$(dirname "$d")"
   done
   return 1
@@ -356,9 +366,10 @@ installed_cli_for() {
   # can't find its views/libs/imageio plugins. If this build was ever installed
   # (CMAKE_INSTALL_PREFIX recorded in its CMakeCache.txt has a populated bin/),
   # prefer that binary over the raw, not-installed one found by find_cli().
-  local bin="$1" d cache prefix prefix_dir candidate
+  local bin="$1" d prev="" cache prefix prefix_dir candidate
   d="$(dirname "$bin")"
-  while [ "$d" != "/" ] && [ -n "$d" ]; do
+  # Same termination rule as toolchain_bin_dir_for() above, for the same reason.
+  while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "$prev" ]; do
     cache="$d/CMakeCache.txt"
     if [ -f "$cache" ]; then
       prefix="$(sed -n 's/^CMAKE_INSTALL_PREFIX:PATH=//p' "$cache")"
@@ -370,6 +381,7 @@ installed_cli_for() {
       done
       return 1
     fi
+    prev="$d"
     d="$(dirname "$d")"
   done
   return 1
@@ -377,7 +389,7 @@ installed_cli_for() {
 
 CLI_WAS_EXPLICIT=no
 [ -n "$CLI_BIN" ] && CLI_WAS_EXPLICIT=yes
-CLI_BIN="$(find_cli)" || { err "ansel-cli not found; build it or pass --cli <path>"; exit 1; }
+CLI_BIN="$(find_cli)" || { err "no installed ansel-cli found; run build.sh --install, or pass --cli <path>"; exit 1; }
 # toolchain_bin_dir_for() below needs the raw build tree (it walks up looking for
 # CMakeCache.txt) -- capture it before installed_cli_for() potentially swaps
 # CLI_BIN to an installed binary that lives outside any build tree entirely.

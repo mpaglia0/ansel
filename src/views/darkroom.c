@@ -1568,6 +1568,31 @@ gboolean _switch_to_prev_picture(GtkAccelGroup *accel_group, GObject *accelerabl
   return TRUE;
 }
 
+/**
+ * @brief Re-settle every node against the preferences that were just changed.
+ *
+ * A module settles its effective contract in commit_params(), and several read application
+ * preferences there rather than per frame -- iop/colorbalancergb.c and iop/gamma.c both do,
+ * for the same mask-preview appearance. Nothing carries those values in history, so only a
+ * resync re-reads them, and the four "Mask preview settings" writers below each trigger one
+ * themselves for exactly that reason.
+ *
+ * The Preferences dialog had no such path. A key reachable only from it -- `channel_display',
+ * which picks false colour against greyscale for the channel display -- would therefore keep
+ * whatever it held at the last resync: toggling the channel display raises TOP_CHANGED, which
+ * re-commits the focused node alone and never reaches iop/gamma.c, so the preference read as
+ * doing nothing until an unrelated edit happened to resync the pipe.
+ *
+ * One resync per dialog interaction, which is the same cost the render-size and mask
+ * rasterisation combos in this file already pay for a settings change.
+ */
+static void _preferences_changed(gpointer instance, gpointer user_data)
+{
+  dt_develop_t *dev = (dt_develop_t *)user_data;
+  if(IS_NULL_PTR(dev)) return;
+  dt_dev_pixelpipe_resync_history_all(dev);
+}
+
 static void _preview_pipe_finished(gpointer instance, gpointer user_data)
 {
   // Get the mip size that is at most as big as our pipeline backbuf
@@ -1687,6 +1712,10 @@ void gui_init(dt_view_t *self)
 
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED,
                                   G_CALLBACK(_preview_pipe_finished), self);
+
+  // Both resync entry points early-out on !dev->gui_attached, so this is inert outside darkroom.
+  DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_PREFERENCES_CHANGE,
+                                  G_CALLBACK(_preferences_changed), dev);
 
   dt_accels_new_darkroom_action(_switch_to_next_picture, self, NULL, N_("Darkroom/Actions"),
                                 N_("Switch to the next picture"), GDK_KEY_Right, GDK_MOD1_MASK, _("Triggers the action"));
@@ -2163,13 +2192,13 @@ void leave(dt_view_t *self)
   // before destroying the actual modules being referenced.
   dt_pthread_mutex_lock(&dev->pipe->busy_mutex);
   dt_dev_pixelpipe_cleanup_nodes(dev->pipe);
-  dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&dev->pipe->backbuf));
+  dt_dev_backbuf_release_keepalive(&dev->pipe->backbuf);
   dt_dev_set_backbuf(&dev->pipe->backbuf, 0, 0, 0, DT_PIXELPIPE_CACHE_HASH_INVALID, DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_pthread_mutex_unlock(&dev->pipe->busy_mutex);
 
   dt_pthread_mutex_lock(&dev->preview_pipe->busy_mutex);
   dt_dev_pixelpipe_cleanup_nodes(dev->preview_pipe);
-  dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&dev->preview_pipe->backbuf));
+  dt_dev_backbuf_release_keepalive(&dev->preview_pipe->backbuf);
   dt_dev_set_backbuf(&dev->preview_pipe->backbuf, 0, 0, 0, DT_PIXELPIPE_CACHE_HASH_INVALID,
                      DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_pthread_mutex_unlock(&dev->preview_pipe->busy_mutex);
@@ -2219,13 +2248,13 @@ void leave(dt_view_t *self)
   dt_dev_get_global()->image_storage.id = -1;
 
   // Release the cache entries for histogram buffers
-  dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&dev->raw_histogram));
+  dt_dev_backbuf_release_keepalive(&dev->raw_histogram);
   dt_dev_backbuf_set_hash(&dev->raw_histogram, -1);
 
-  dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&dev->output_histogram));
+  dt_dev_backbuf_release_keepalive(&dev->output_histogram);
   dt_dev_backbuf_set_hash(&dev->output_histogram, -1);
 
-  dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&dev->display_histogram));
+  dt_dev_backbuf_release_keepalive(&dev->display_histogram);
   dt_dev_backbuf_set_hash(&dev->display_histogram, -1);
 
   /* GUI backbuffers were already released when each pipeline was quiesced above. Keep the view-side teardown

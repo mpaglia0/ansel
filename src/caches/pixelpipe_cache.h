@@ -271,6 +271,7 @@ dt_dev_pixelpipe_cache_get_writable(const uint64_t hash,
                                     const size_t size, const char *name, const int id,
                                     const gboolean alloc, const gboolean allow_rekey_reuse,
                                     const struct dt_pixel_cache_entry_t *reuse_hint,
+                                    const struct dt_pixel_cache_entry_t *reuse_hint_prev,
                                     void **data,
                                     struct dt_pixel_cache_entry_t **entry);
 
@@ -791,6 +792,22 @@ void dt_dev_pixelpipe_cache_auto_destroy_apply(struct dt_pixel_cache_entry_t *en
  * @param hash 
  */
 void dt_dev_pixelpipe_cache_unref_hash(const uint64_t hash);
+
+/**
+ * @brief Release one reference held on @p entry, by POINTER.
+ *
+ * Use this wherever the reference was TAKEN by pointer
+ * (`dt_dev_pixelpipe_cache_ref_count_entry(TRUE, entry)`), which is every long-lived claim in
+ * the tree. `dt_dev_pixelpipe_cache_unref_hash()` resolves the entry by looking its hash up in
+ * the cache, so the two are only interchangeable while an entry's hash never changes under its
+ * holder -- and it does: `_cache_try_rekey_reuse_locked()` moves a live entry to a new hash in
+ * place, which is the whole point of rekey reuse. Released by the old hash afterwards, the
+ * lookup finds nothing, the reference is never dropped, and the entry becomes permanently
+ * unevictable while its refcount stops meaning anything.
+ *
+ * A NULL @p entry is a no-op, so a holder can release unconditionally.
+ */
+void dt_dev_pixelpipe_cache_unref_entry(struct dt_pixel_cache_entry_t *entry);
 
 /**
  * @brief Change the hash/key of an existing cache line in place, without

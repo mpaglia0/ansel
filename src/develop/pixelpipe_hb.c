@@ -558,7 +558,7 @@ void dt_dev_pixelpipe_cleanup(dt_dev_pixelpipe_t *pipe)
   {
     /* Backbuffer ownership belongs to the pipeline, not its GUI consumers. Once the pipe itself is
      * torn down, always release that keepalive ref and invalidate the published backbuffer metadata. */
-    dt_dev_pixelpipe_cache_unref_hash(old_backbuf_hash);
+    dt_dev_backbuf_release_keepalive(&pipe->backbuf);
 
     if(pipe->no_cache)
     {
@@ -1036,15 +1036,42 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   gboolean cache_ram_output
       = piece->cache_output_on_ram && (!_bypass_cache(pipe, piece) || keep_final_output);
 
-  /* `piece->cache_entry` is only valid as a writable-reuse hint for transient outputs that will
-   * be fully overwritten later. As soon as we keep the current output as a published cacheline in
-   * RAM, rekey reuse must stop for that piece so later runs cannot overwrite a long-term state in
-   * place just because the pipe is running in realtime. */
-  const gboolean allow_rekey_reuse = !(dt_get_debug_flags() & DT_DEBUG_NOCACHE_REUSE) && !cache_ram_output;
+  /* `piece->cache_entry` is the writable-reuse hint: the cacheline this piece wrote last time,
+   * offered back so the next run rekeys it in place instead of taking a fresh arena slot.
+   *
+   * This used to exclude any output published to RAM (`&& !cache_ram_output'), because such an
+   * output is what a GUI consumer displays and nothing stopped a later run from overwriting it
+   * mid-frame. Taking a new slot every time kept the pipe out of the GUI's way by never reusing
+   * anything -- measured on the backbuffer, 65 frames gave 65 distinct host pointers, and 0%
+   * reuse of its output device buffer against 92-96% for every module that does rekey. That is
+   * what made the pipe re-register 12.2 MB of pinned host pages every frame: 5.6 ms of a 26 ms
+   * frame, for a buffer it threw away immediately.
+   *
+   * Both halves of the protection that replaces it are now explicit, and neither existed when
+   * this exclusion was written:
+   *  - LIFETIME: a displayed cacheline is refcounted by the consumer displaying it
+   *    (views/dev_backbuf.c), and refcount > 0 is what the LRU, the vRAM flush and the removal
+   *    path all refuse to touch. It used to borrow the pipeline's keepalive, which covered it
+   *    only until the pipeline published the next frame.
+   *  - EXCLUSION: dt_dev_render_locked_surface() read-locks the entry around its cairo blit and
+   *    the rekey takes the entry's WRITE lock -- held from here until this module publishes, at
+   *    the release further down -- so a run reusing the displayed line waits for the blit, and a
+   *    blit starting mid-render waits for the publish.
+   *
+   * The third thing this needed was not a lock at all: every long-lived reference is taken by
+   * pointer, and releasing it by hash silently lost it once rekey could move that hash. See
+   * dt_dev_pixelpipe_cache_unref_entry() -- without that, this line would leak one reference per
+   * frame on the very entry it is meant to reuse.
+   *
+   * The wait is mutual and bounded by one module's render: measured at 3.10 ms for the
+   * backbuffer's producer, against the 7.68 ms the GUI already spends painting a frame. If that
+   * ever reads as a stall rather than a wait, the answer is a try-read-lock on the GUI side, not
+   * going back to allocating a buffer per frame to avoid the question. */
+  const gboolean allow_rekey_reuse = !(dt_get_debug_flags() & DT_DEBUG_NOCACHE_REUSE);
   const dt_dev_pixelpipe_cache_writable_status_t acquire_status
       = dt_dev_pixelpipe_cache_get_writable(hash, bufsize, name, pipe->type,
                                             cache_ram_output, allow_rekey_reuse,
-                                            &piece->cache_entry,
+                                            &piece->cache_entry, &piece->cache_entry_prev,
                                             &output, &output_entry);
   dt_free(name);
   if(acquire_status == DT_DEV_PIXELPIPE_CACHE_WRITABLE_EXACT_HIT)
@@ -1206,6 +1233,9 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
 
   if(!IS_NULL_PTR(output_entry))
   {
+    /* Shift, so the slot the next run falls back on is the cacheline from two runs ago -- by
+     * then released by whoever was displaying it, where the one just published is not. */
+    piece->cache_entry_prev = piece->cache_entry;
     piece->cache_entry = *output_entry;
   }
   else
@@ -1354,7 +1384,7 @@ static void _update_backbuf_cache_reference(dt_dev_pixelpipe_t *pipe, dt_iop_roi
      || entry_hash == DT_PIXELPIPE_CACHE_HASH_INVALID
      || entry_hash != requested_hash)
   {
-    dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&pipe->backbuf));
+    dt_dev_backbuf_release_keepalive(&pipe->backbuf);
     dt_dev_set_backbuf(&pipe->backbuf, 0, 0, 0, DT_PIXELPIPE_CACHE_HASH_INVALID,
                        dt_dev_pixelpipe_get_history_hash(pipe));
     return;
@@ -1363,12 +1393,11 @@ static void _update_backbuf_cache_reference(dt_dev_pixelpipe_t *pipe, dt_iop_roi
   // Keep exactly one cache reference to the last valid output ("backbuf") for display.
   // This prevents the cache entry from being evicted while still in use by the GUI,
   // without leaking references on repeated cache hits.
-  const gboolean hash_changed = (dt_dev_backbuf_get_hash(&pipe->backbuf) != entry_hash);
-  if(hash_changed)
-  {
-    dt_dev_pixelpipe_cache_unref_hash(dt_dev_backbuf_get_hash(&pipe->backbuf));
-    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, entry);
-  }
+  /* Keyed on the ENTRY, not on the hash it currently answers to. A rekey-reused entry keeps
+   * its identity while its hash moves, so "same cacheline, new hash" must not re-take a
+   * reference -- and "new cacheline" must release the old one by pointer, since the hash it was
+   * taken at may no longer resolve to it. The helper is idempotent, so this is unconditional. */
+  dt_dev_backbuf_take_keepalive(&pipe->backbuf, entry);
 
   /* The backbuf advertises the ROI THIS RUN ASKED FOR, paired with whatever cacheline it
    * resolved. Those two are supposed to describe the same image, and every consumer trusts that

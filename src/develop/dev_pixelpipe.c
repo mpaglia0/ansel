@@ -275,12 +275,18 @@ static gboolean _sync_focused_in_place(dt_dev_pixelpipe_t *pipe, const dt_dev_hi
   // taken so the slot lock is not held across commit_params(); never the live GUI module->params.
   dt_iop_params_t *params = hist->params;
   void *tbuf = NULL;
+  uint64_t transient_serial = 0;
+  gboolean used_transient = FALSE;
   if(transient && focus->params_size > 0)
   {
     tbuf = g_malloc0(focus->params_size);
     if(!IS_NULL_PTR(tbuf)
-       && dt_dev_transient_params_get(dev, focus, tbuf, (size_t)focus->params_size, NULL, 0, NULL))
+       && dt_dev_transient_params_get(dev, focus, tbuf, (size_t)focus->params_size, NULL, 0, NULL,
+                                      &transient_serial))
+    {
       params = (dt_iop_params_t *)tbuf;
+      used_transient = TRUE;
+    }
     else
       dt_free(tbuf);
   }
@@ -290,6 +296,26 @@ static gboolean _sync_focused_in_place(dt_dev_pixelpipe_t *pipe, const dt_dev_hi
   piece->detail_mask = !IS_NULL_PTR(hist->blend_params) && hist->blend_params->details != 0.0f;
   dt_iop_commit_params(focus, params, hist->blend_params, pipe, piece);
   dt_free(tbuf);
+
+  /* `dt_iop_commit_params()` hands the params we pass to `module->commit_params()`, so the piece
+   * PROCESSES the transient blob -- but it derives the piece's identity from
+   * `dt_iop_compute_module_hash()`, which hashes `module->params`. That function says so itself:
+   * "WARNING: doesn't take into account parameters dynamically set at runtime". So a transient
+   * edit changed the pixels a recompute would produce without changing the hash that decides
+   * whether to recompute at all, and `dt_dev_pixelpipe_process()` exact-hit the cache and
+   * republished the previous frame. Drawlayer used to hide this by bumping `module->params`
+   * from its paint worker -- which is the very cross-thread write on GUI-owned state that the
+   * transient channel exists to avoid.
+   *
+   * The transient serial advances once per publish and is fetched under the same lock as the
+   * blob, so folding it in makes the piece's identity describe exactly the params it committed.
+   * Do this BEFORE `dt_pixelpipe_get_global_hash()` below, which folds the piece hashes into the
+   * cumulative pipe hash the cache is probed with. */
+  if(used_transient)
+  {
+    piece->hash = dt_hash(piece->hash, (const char *)&transient_serial, sizeof(transient_serial));
+    piece->global_hash = piece->hash;
+  }
   _refresh_pipe_detail_mask_state(pipe);
   if(previous_want_detail_mask != (pipe->want_detail_mask != DT_DEV_DETAIL_MASK_NONE)) return FALSE;
 
@@ -411,9 +437,34 @@ static void _seal_opencl_cache_policy(dt_dev_pixelpipe_t *pipe)
                                                        .active_in_gui = active_in_gui,
                                                        .has_autoset = has_autoset };
 
+    const gboolean was_cached_on_ram = piece->cache_output_on_ram;
     piece->cache_output_on_ram
         = dt_dev_pipe_cache_policy_decide(&inputs, current_output_must_cache_host,
                                           &current_output_must_cache_host);
+
+    /* THE TRANSITION, and the reason the policy above can stay lean.
+     *
+     * A node that did NOT have to publish host data leaves its cacheline with whatever host
+     * bytes that line held in a previous life -- the buffers are reused in place by rekey. If
+     * its requirement then turns back on (a CPU-only consumer downstream re-enabled, a picker
+     * opened, the module gaining focus), the line is found by hash, looks valid, and hands
+     * out those stale bytes. That is the defect the old transitive OR was hiding by keeping
+     * every host copy fresh everywhere, forever -- at 152 MB a frame.
+     *
+     * Invalidate the line instead, exactly on the edge where it becomes readable from RAM.
+     * `piece->global_hash` still names the PREVIOUS resync's line here (the new hashes are
+     * computed after this seal), which is precisely the line that would be reused. Entries
+     * still referenced or locked are left alone by the cache, so this cannot pull a published
+     * backbuffer out from under another pipe. */
+    if(!was_cached_on_ram && piece->cache_output_on_ram
+       && piece->global_hash != DT_PIXELPIPE_CACHE_HASH_INVALID)
+    {
+      const uint64_t stale = piece->global_hash;
+      dt_dev_pixelpipe_cache_invalidate_hashes(&stale, 1);
+      dt_print(DT_DEBUG_PIPE,
+               "[pixelpipe] %s now needs its output in RAM: dropped its cacheline so the host "
+               "copy cannot be served stale\n", module->op);
+    }
   }
 }
 

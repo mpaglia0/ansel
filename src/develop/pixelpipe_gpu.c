@@ -196,6 +196,19 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
                              dt_pixel_cache_entry_t *input_entry, dt_pixel_cache_entry_t *output_entry)
 {
   dt_iop_module_t *module = piece->module;
+  /* The module's timed region is exactly this function, so a module that costs more than its
+   * own process_cl() is spending the difference in here -- input colourspace transform, buffer
+   * acquisition, blend, readback. Split the prologue from the kernel so the log says which. */
+  const gint64 gpu_stage_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
+  /* The prologue's two candidate costs, split out because guessing between them has already
+   * been wrong once: borrowing the upstream vRAM payload, and allocating this node's own host
+   * output -- the latter going through the cache allocator, which evicts to make room. */
+  double gpu_in_borrow_ms = 0.0;
+  double gpu_out_alloc_ms = 0.0;
+  double gpu_in_prepare_ms = 0.0;
+  double gpu_out_cl_ms = 0.0;
+  double gpu_cst_ms = 0.0;
+  gboolean gpu_out_cl_reused = FALSE;
   float *input = input_entry ? dt_pixel_cache_entry_get_data(input_entry) : NULL;
   void *output = dt_pixel_cache_entry_get_data(output_entry);
   void *cl_mem_input = NULL;
@@ -218,9 +231,12 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   // except for basebuffer module which takes no input
   if(!(piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT))
   {
+    const gint64 borrow_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
     cl_mem_input = dt_dev_pixelpipe_cache_borrow_cl_payload(input_entry, pipe->devid,
                                             piece->roi_in.width, piece->roi_in.height,
                                             actual_input_dsc.bpp);
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      gpu_in_borrow_ms = (g_get_monotonic_time() - borrow_t0) / 1000.0;
     borrowed_cl_mem_input = (!IS_NULL_PTR(cl_mem_input));
     if(IS_NULL_PTR(cl_mem_input))
       dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] %s could not get a cached vRAM input buffer.\n", module->name());
@@ -279,7 +295,10 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   if(!possible_cl || !fits_on_device) *cache_output = TRUE;
   if(*cache_output && IS_NULL_PTR(output))
   {
+    const gint64 alloc_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
     output = dt_pixel_cache_alloc(output_entry);
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      gpu_out_alloc_ms = (g_get_monotonic_time() - alloc_t0) / 1000.0;
     if(IS_NULL_PTR(output)) goto error;
   }
 
@@ -313,21 +332,33 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
   if(fits_on_device)
   {
     // Alloc input GPU buffer if we didn't already borrow it
+    const gint64 inprep_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
     if(!(piece->module->flags() & IOP_FLAGS_TAKE_NO_INPUT))
       if(dt_dev_pixelpipe_cache_prepare_cl_input(pipe, module, input, &cl_mem_input,
                               &piece->roi_in, piece->dsc_in.bpp, input_entry,
                               &locked_input_entry, NULL))
         goto error;
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      gpu_in_prepare_ms = (g_get_monotonic_time() - inprep_t0) / 1000.0;
 
     cl_mem_process_input = cl_mem_input;
 
+    /* The output DEVICE buffer. Suspected of being where display encoding's prologue goes:
+     * its output is 4 bpp, the only such size in a 16 bpp pipe, so it can never be served by
+     * a device buffer another module just released -- unlike colorout, whose prologue is a
+     * twentieth of it. Measured rather than assumed, because the two obvious candidates
+     * before it (the input borrow, the host output allocation) both came back at 0.00. */
+    const gint64 outcl_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
     // Alloc output GPU buffer - non-optional
     cl_mem_output = dt_dev_pixelpipe_cache_get_cl_buffer(pipe->devid, output, &piece->roi_out, piece->dsc_out.bpp, module,
                                                          "output", output_entry,
-                                                         NULL, cl_mem_input);
+                                                         &gpu_out_cl_reused, cl_mem_input);
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      gpu_out_cl_ms = (g_get_monotonic_time() - outcl_t0) / 1000.0;
     if(IS_NULL_PTR(cl_mem_output)) goto error;
     
     const int cst_before_cl = process_input_dsc.cst;
+    const gint64 cst_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
     if(process_input_dsc.cst != piece->dsc_in.cst
        && !(dt_iop_colorspace_is_rgb(process_input_dsc.cst) && dt_iop_colorspace_is_rgb(piece->dsc_in.cst)))
     {
@@ -348,6 +379,8 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
     {
       process_input_dsc.cst = piece->dsc_in.cst;
     }
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      gpu_cst_ms = (g_get_monotonic_time() - cst_t0) / 1000.0;
     const int cst_after_cl = process_input_dsc.cst;
 
     dt_dev_pixelpipe_debug_dump_module_io(pipe, module, "pre", TRUE, &piece->dsc_in, &piece->dsc_out,
@@ -355,12 +388,32 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
                                           process_input_dsc.bpp, piece->dsc_out.bpp,
                                           cst_before_cl, cst_after_cl);
 
-      if(!module->process_cl(module, pipe, piece, cl_mem_process_input, cl_mem_output))
+    const gint64 gpu_prologue_end = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
+    if(!module->process_cl(module, pipe, piece, cl_mem_process_input, cl_mem_output))
       goto error;
+    if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      dt_print(DT_DEBUG_PERF,
+               "[dev_pixelpipe] %s gpu prologue=%.2f ms"
+               " (inbuf=%.2f outalloc=%.2f inprep=%.2f outcl=%.2f cst=%.2f) process_cl=%.2f ms"
+               " (in %dx%d bpp=%" G_GSIZE_FORMAT " -> out bpp=%" G_GSIZE_FORMAT
+               " cache_out=%d outcl_reused=%d host=%p)\n",
+               module->op, (gpu_prologue_end - gpu_stage_t0) / 1000.0,
+               gpu_in_borrow_ms, gpu_out_alloc_ms, gpu_in_prepare_ms, gpu_out_cl_ms, gpu_cst_ms,
+               (g_get_monotonic_time() - gpu_prologue_end) / 1000.0,
+               piece->roi_in.width, piece->roi_in.height, process_input_dsc.bpp, piece->dsc_out.bpp,
+               *cache_output ? 1 : 0, gpu_out_cl_reused ? 1 : 0, output);
 
     *pixelpipe_flow |= PIXELPIPE_FLOW_PROCESSED_ON_GPU;
     *pixelpipe_flow &= ~(PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING);
 
+    /* Measured on a painting stroke: the pipeline reports `Drawing' at 47.6 ms a frame while
+     * the module's own process_cl measures 22.0 -- so ~25 ms is spent between process_cl
+     * returning and this module being declared done. Both blend early-outs should fire when
+     * nothing is blended (`transform_for_blend' returns NONE on DEVELOP_MASK_DISABLED, and
+     * `dt_develop_blend_process_cl' returns on !top_enabled), so the candidates are the
+     * colourspace temps around the blend, the blend kernel itself, or the CPU simply blocking
+     * here on kernels process_cl only ENQUEUED. Those have nothing in common as fixes. */
+    const gint64 blend_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
     if(module->flags() & IOP_FLAGS_SUPPORTS_BLENDING)
     {
       const dt_pixelpipe_blend_transform_t blend_transforms
@@ -425,8 +478,18 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
         }
       }
 
+      const gint64 blend_pre = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
       if(dt_develop_blend_process_cl(module, pipe, piece, cl_mem_blend_input, cl_mem_blend_output))
         goto error;
+      if(dt_get_debug_flags() & DT_DEBUG_PERF)
+      {
+        const dt_develop_blend_params_t *const bp = (const dt_develop_blend_params_t *)piece->blendop_data;
+        dt_print(DT_DEBUG_PERF,
+                 "[blend] %s transforms_in+out=%.2f ms kernel=%.2f ms mask_mode=%u transforms=%d\n",
+                 module->op, (blend_pre - blend_t0) / 1000.0,
+                 (g_get_monotonic_time() - blend_pre) / 1000.0,
+                 bp ? bp->mask_mode : 0u, (int)blend_transforms);
+      }
 
       // a mask or channel preview is converted like any output, see pixelpipe_cpu.c
       if((blend_transforms & DT_DEV_PIXELPIPE_BLEND_TRANSFORM_OUTPUT)
@@ -443,10 +506,23 @@ int pixelpipe_process_on_GPU(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_io
 
     if(*cache_output)
     {
+      const gint64 readback_t0 = (dt_get_debug_flags() & DT_DEBUG_PERF) ? g_get_monotonic_time() : 0;
       if(dt_dev_pixelpipe_cache_sync_cl_buffer(pipe->devid, output, cl_mem_output, &piece->roi_out, CL_MAP_READ,
                                 piece->dsc_out.bpp, module,
                                 "output to cache"))
         goto error;
+      /* This readback is inside the module's timed region, so it is charged to the module in
+       * the "processed `X'" line although the module did not ask for it: the seal sets
+       * cache_output_on_ram from a DOWNSTREAM consumer's need for host data. On a painting
+       * stroke it accounted for ~25 of `Drawing''s 47.6 ms a frame -- a 48.9 MB device->host
+       * copy of a 2144x1427 float4 buffer -- and the same flag separately disables the
+       * output cacheline's in-place rekey, which is what makes drawlayer's damage-limited
+       * composite gate report devout=0 and fall back to a full resample every frame. One flag,
+       * both costs, and neither visible without asking. */
+      if(dt_get_debug_flags() & DT_DEBUG_PERF)
+        dt_print(DT_DEBUG_PERF, "[dev_pixelpipe] %s output readback %dx%d bpp=%" G_GSIZE_FORMAT " took %.2f ms\n",
+                 module->op, piece->roi_out.width, piece->roi_out.height, piece->dsc_out.bpp,
+                 (g_get_monotonic_time() - readback_t0) / 1000.0);
       dt_print(DT_DEBUG_OPENCL, "[dev_pixelpipe] output memory was copied to cache for %s\n", module->name());
     }
   }
