@@ -23,8 +23,11 @@ years, each one a header trailing-including a header that includes it back (see
 instead of invisible.
 
 Enforcement: `python3 tools/pragma_once_to_guards.py --verify` exits non-zero if any
-`#pragma once` reappears. `python3 tools/include_graph.py --summary` must keep reporting
-`cycles 0`.
+`#pragma once` reappears, and runs in CI's "Check include hygiene" step. It sweeps every
+header spelling — `.h`, `.hh`, `.hpp`, `.hxx` — from the repository root the tool itself sits
+in, not from the working directory: a sweep restricted to `.h`, or one run from the wrong
+directory, is a gate that passes by finding nothing. `python3 tools/include_graph.py
+--summary` must keep reporting `cycles 0`.
 
 **`darktable.h` (at `src/`, not in a module) has no guard either — it has a TRIPWIRE.** It ends up included by
 at most one path per translation unit (an entry point calling `dt_init()`, or a subsystem
@@ -2208,6 +2211,27 @@ Drag-and-drop of lighttable images onto tree rows was attempted and abandoned �
 with a manual `gtk_drag_dest_set` reliably receives motion but does not deliver the drop on tree
 models. DnD was removed entirely at the maintainer's request; do not re-add without a
 non-tree drop target or `tagging.c`-style full source+dest.
+
+### A GtkTreeView holds ONE deferred scroll target, and expanding a row defers it
+
+`gtk_tree_view_scroll_to_cell()` scrolls immediately only when the rows it needs are already
+validated; expanding a row invalidates everything below it, so a scroll asked for right after an
+expansion is *stored* instead, and the next such call **replaces** the stored one. The last
+request wins, whatever its alignment.
+
+That is what makes the folder tree's two ways of opening a folder one question, not two. Clicking
+the expander only expands, so `_view_row_expanded()` — which top-aligns the node so its children
+come on screen — is the only request. Clicking the folder *name* goes through `row_activated()` →
+`update_view()` → `tree_expand()`, whose exact-match branch expands the node itself and then asks
+for a minimal scroll (`use_align == FALSE`) to reveal the row: that second request displaces the
+handler's reveal and then does nothing at all, the row being visible already — the user just
+clicked it. So `tree_expand()` issues its minimal scroll only when it did NOT expand a folder with
+children, and the reveal is left to the one handler that owns it.
+
+Measure this class of thing offscreen rather than reading it out of the source: a
+`gtk_offscreen_window_new()` holding the treeview, the row scrolled into the middle, then the
+expansion, then the vertical adjustment printed — it separates "no scroll was asked for" from "the
+scroll was asked for and replaced" in seconds.
 
 ### After an import: which image opens, and which folder the library shows
 
