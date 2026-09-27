@@ -227,6 +227,36 @@ identity test within one session, not a key.
 Anything else folded into a cache key owes the same test: would two sessions editing the same
 image, with the same history, produce the same value?
 
+### A module memoising its own intermediates keys them on `upstream_hash`, never on `global_hash`
+
+`piece->global_hash` folds the module's own parameters, so it moves on every frame of a drag and
+is useless as the key of anything the drag does not change. `piece->upstream_hash`
+(`pixelpipe_hb.h`) is the other half: the cumulative hash of the PARAMETERS of the enabled
+modules above this one, and of nothing else — no ROI, not this piece. It identifies the
+transformation chain a drawn shape is back-transformed through, which is what a mask
+rasterisation depends on, so a memo keyed on it survives an edit of the parameter being dragged.
+
+Three things it has to get right, and each one is a way to key a memo on a lie:
+
+- **It is published by a pass of its own** (`_publish_upstream_hashes()`, `dev_pixelpipe.c`),
+  called from `dt_dev_pixelpipe_get_roi_in()` as well as from `dt_pixelpipe_get_global_hash()`.
+  ROI planning is its first consumer and runs BEFORE the global hash is built, so a
+  `modify_roi_in()` reading it would otherwise find either the value `dt_iop_commit_params()`
+  invalidated or one describing a chain that has since changed. It reads no ROI, so running it
+  twice per plan costs a walk and answers the same.
+- **It is deliberately ROI-free**, for the same reason: what a consumer reads during ROI planning
+  still describes the previous plan's ROI. It never describes the previous plan's *parameters*,
+  since every commit path runs a hash pass before any planning.
+- **It folds `dt_dev_pixelpipe_activemodule_disables_currentmodule()` per upstream piece.** That
+  is GUI state, not history, so it is in no `piece->hash` — yet it decides whether a module takes
+  part in `dt_dev_distort_transform_plus()`. Focusing crop moves every drawn shape's box without
+  moving any parameter.
+
+Because it carries no ROI and no pipe identity, the same value comes out for the FULL, preview
+and export pipes of one image, and anything keyed on it that is genuinely pipe-independent — a
+shape's bounding box in sensor coordinates — is computed once for all of them. Anything laid out
+in the module's own ROI must fold that ROI into its own key on top; `iop/retouch.c` does both.
+
 ### The host-memory fit probe evicts: ask it only when its answer chooses something
 
 `dt_tiling_piece_fits_host_memory()` (`develop/tiling.c`) is not a pure question. To answer "does
@@ -2005,6 +2035,108 @@ undo/DB churn. History is written only at the real commit. Crop/ashift use `resy
 (full, all pipes); drawlayer heartbeat raises `TOP_CHANGED` + redraw (fast, non-geometry). The
 two must NOT be mixed — routing crop's geometry through `_sync_focused_in_place` (partial)
 mishandles the warm cropped→uncropped geometry change.
+
+### retouch: what a shape costs per frame is its geometry, and most of it is ROI planning
+
+Nothing about a shape's rasterisation reads a pixel. Its bounding box, its clone source's box and
+its mask resampled into the layer are pure functions of the shape's own geometry and of the
+transformation chain above the module, so moving ONE shape leaves every other shape's answers
+bit-identical. They were recomputed anyway, on every frame, in both pipes — and at full sensor
+resolution whatever the zoom, since `_circle_get_area()` and friends work in
+`pipe->iwidth`/`iheight`: a 500 px shape back-transforms 250 000 points through every distorting
+module above, for a mask that `rt_fill_scaled_mask()` then samples at one pixel in a hundred.
+
+**The cost is dominated by `modify_roi_in()`, not by `process()`**, and that is the part the
+obvious reading of the module misses. `rt_extend_roi_in_for_clone()` calls
+`rt_extend_roi_in_from_source_clones()` per shape, which walks the shapes again: O(shapes²) calls
+to `dt_masks_get_source_area()`, and for a brush or a polygon each one regenerates the whole
+outline. Measured on a 141-shape image exported at 2000 px, with `-d perf -d masks`: 3.5 s of
+mask rasterisation, 3.1 s of it in ROI planning, and a second export of the same image in the
+same process still paid the 3.1 s although the module's output was served from the cache.
+
+Two memos, both in the shared pixelpipe cache, both keyed on `rt_geometry_base_hash()` —
+`piece->upstream_hash` plus this module's `iop_order`, `pipe->iwidth`/`iheight` and
+`pipe->mask_rasterization_step`, which reach no hash of the pipeline's own — and then on the
+shape's own `dt_masks_form_get_own_hash()`:
+
+- **the two boxes** (`rt_shape_box()`), one entry per shape. Keyed on nothing pipe-specific, so
+  the FULL, preview and export pipes share it. It is what turns that O(shapes²) inner loop into
+  arithmetic.
+- **the scaled mask** (`rt_shape_scaled_mask()`), one entry per shape, per ROI, per source
+  offset. Its entry carries the area it was rasterised from in a `RT_MASK_MEMO_HEADER`-wide
+  header ahead of the pixels, so a hit answers without calling `dt_masks_get_area()` at all —
+  the point being that for a brush that call *is* the outline generation, i.e. most of what the
+  memo exists to avoid. The header is a cache line wide so the pixels keep their alignment.
+
+Same measurement afterwards: 0.34 s on the first export, 0 on the second. Exports are
+bit-identical, CPU and OpenCL alike.
+
+Four things a reviewer would otherwise change:
+
+- **Without a memo, compute only the box that was asked for.** `rt_shape_box()` takes an
+  `rt_box_t`; the entry holds both because another pass over the same shapes wants the other one,
+  but a caller that cannot memoise must not pay for a second outline nothing will read. Computing
+  both unconditionally doubled the measurement above, exactly, before this was split.
+- **There is no separate "is the shape in this layer" test any more.** `rt_scaled_mask_roi()`
+  intersects the shape's area with the layer, source offset included, and a shape that draws
+  nothing there comes out too small to have an effect — the same answer
+  `dt_masks_form_is_in_roi()` gave, reached without rasterising the area a second time.
+- **A hash identifies content, never a size.** A mask entry is used only when the header is sane
+  and the line is large enough for the ROI derived from it; the arena rounds a request up, so the
+  test is `>=`, never `==`.
+- **The mask buffer is read-only and shared.** Every consumer reads it through a `const float *`,
+  which is what lets several pipes hold the same line; `rt_release_shape()` is the only place that
+  hands it back, dropping the read lock and the reference for a memoised one and freeing a local
+  buffer otherwise.
+
+**`-d perf` prints what a frame cost, in two lines the pipeline's own timings cannot give.** One
+per ROI planning pass and one per render, per pipe:
+
+```
+[retouch] FULL     modify_roi_in: 1 stabilisation pass(es), boxes 10010 (10009 memo / 1 rasterised), 0.017 s
+[retouch] PREVIEW  process on GPU 823x885: 140 shape(s), masks 140 (139 memo / 1 rasterised),
+                   boxes 1 (1 memo / 0 rasterised), algorithms 0.471 s, total 0.520 s
+```
+
+The pipeline's `processed \`Retouch'` line covers `process()` only, so on its own it hides the
+half of the cost that used to dominate. The counters are built only when the channel is on
+(`rt_perf_enabled()`, `ctx->stats` NULL otherwise), and `boxes 1` in a render line is how you see
+the mask memo's header paying: the 139 memoised masks needed no area of their own.
+
+**`algorithms` is a sum, and a sum cannot say which shape is expensive.** A drag re-solves the
+moved shape at a new position while every other one is bit-identical, and `_heal_laplace_loop()`
+(`pixel/heal.c`) runs Gauss-Seidel to `max_iter` but breaks once the squared residual falls under
+its threshold, so one shape's cost follows the content it lands on: measured at a working zoom, the
+same three shapes cost between 18 and 178 ms per frame, of which the dragged one alone is 9 to
+168 ms while the two beside it are 8 to 30 ms together. Nothing in this line separates the two.
+Before concluding from it that memoising the static shapes would pay, record the costliest single
+member -- a few lines around the existing `algo_start` timing, kept only as long as the question
+is open. Reading the sum as if it described the static shapes is how the figure of 86-88 % below
+came about.
+
+Measured on the 141-shape image, dragging one shape in the darkroom: ROI planning down to 1-18 ms
+with every box answered from the memo, and the mask memo answering 139 of 140 whenever the layer
+ROI holds still.
+
+**What is left is not worth memoising, and the arithmetic says so at the zoom people retouch at.**
+A drag at 1:1 to 4:1 puts only a handful of shapes inside the viewport -- three of a hundred and
+forty, measured -- and of those three the cost is the one being dragged, whose heal is re-solved
+at a new position every frame: `dt_heal()`'s Gauss-Seidel loop stops on convergence
+(`pixel/heal.c`), so it swings between 9 and 168 ms with the content it lands on, while the static
+shapes beside it cost 8 to 30 ms together. The module is then 5 % of a 550 ms frame, 92 % of which
+is a downstream `diffuse or sharpen` instance doing legitimate work. A memo of each shape's
+*result* would buy those 8 to 30 ms, for a transitive dependency key and patches in the shared
+cache. `doc/retouch-result-memo.md` is the design, the measurements and the verdict; the short
+version is that the dependency graph is ROI-relative, so it shrinks with the very zoom that makes
+the memo worth having, and the two effects cancel.
+
+**Two traps in reading `-d perf` here**, both of which cost a wrong conclusion before the counter
+was fixed. The aggregate `algorithms` figure cannot tell "the static shapes are expensive" from
+"the one being dragged is", which is why the line also reports the costliest single shape and the
+sum of the others. And the FULL and preview pipes do NOT both render per drag frame: only FULL
+does, the preview rendering once when the button comes up -- so a preview figure is a per-gesture
+cost, not a per-frame one. An earlier reading of these lines put the algorithms at 86-88 % of a
+drag frame; that was a fit-zoom aggregate read as if it were the interactive case.
 
 ### retouch and spots: everything on the pipeline thread resolves shapes through `pipe->forms`, never `self->dev->forms`
 
