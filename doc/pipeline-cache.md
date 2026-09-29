@@ -34,6 +34,31 @@ Two consequences matter for everything below:
   module, fetch the output of `dt_dev_pixelpipe_get_prev_enabled_piece(pipe, piece)`, not the
   module's own cacheline.
 
+### A module's cacheline is reused in place, and what that leaves in RAM
+
+A piece keeps the metadata of the cacheline it wrote last (`piece->cache_entry`). When its hash
+changes, `dt_dev_pixelpipe_cache_get_writable()` moves that same cacheline to the new hash instead
+of allocating another one (*rekey reuse*): same arena slot, same OpenCL buffers, no allocation per
+frame. Two consequences follow, each with its rule.
+
+**The host buffer outlives the pixels it held.** An OpenCL output that is not read back to RAM
+leaves the previous hash's pixels in the rekeyed cacheline's host buffer. The rekey marks it
+(`dt_pixel_cache_entry_t.host_stale`), and until the host buffer is written for the new hash
+`dt_pixel_cache_entry_get_data()` returns NULL, exactly as for a device-only cacheline. Readers
+need nothing else: a CPU consumer copies the device payload back, a GUI reader reports a miss.
+The producer clears the mark with `dt_dev_pixelpipe_cache_flag_host_written()` when it ran on the
+CPU, tiled, or read its output back; every device-to-host copy clears it too. Only the producer
+reaches the raw buffer, through `dt_pixel_cache_entry_get_buffer()`, since it still backs the
+output's pinned OpenCL image.
+
+**Reusing in place forgets the previous state.** That is right for a slider drag or a pan, whose
+previous states do not come back, and wrong for a module toggle, an undo or a jump in history,
+after which going back is the likely next step. Those raise `DT_DEV_PIPE_SWITCHED`, which sets
+`pipe->keep_outputs` for the run that renders the new state: it writes every output into a new
+cacheline, so the outputs of the state just left are still there, and switching back is a chain of
+exact hits. The flag drops when that run completes. Only the source of a change knows it is a
+switch; the pipe's change status does not (`SYNCH` also carries slider commits on masked modules).
+
 ### Raster masks are dedicated side-band cachelines
 
 A module may also publish raster masks for downstream modules or multi-page export. These masks
@@ -104,8 +129,28 @@ missed because the input cacheline was not retained, and never recovered.
 this document.
 
 Backend code that must keep a cacheline past the lookup uses
-`dt_dev_pixelpipe_cache_ref_entry_by_hash()`. Raster-mask retrieval follows this contract: retain
-under the cache mutex, read-lock while copying, then release the temporary reference.
+`dt_dev_pixelpipe_cache_ref_entry_by_hash()`, or `dt_dev_pixelpipe_cache_ref_host_entry_by_hash()`
+when it needs host pixels and must not wait on a line still being written. Raster-mask retrieval,
+the raw-detail mask, the drawn-mask group's cached-prefix resume (`develop/masks/group.c`) and the
+publication of the backbuffer follow this contract: the lookup itself takes the reference, under the
+cache mutex; it is then kept as the long-lived one, or released once the pixels are copied (under a
+read lock) or once the long-lived reference is taken.
+
+**A peek retains nothing, so nothing may be released after one.** An entry nobody holds sits at
+refcount 0, and any thread's eviction can free it between `dt_dev_pixelpipe_cache_peek()` returning
+and the caller's next step, read lock included. Releasing a reference that was never taken is worse
+than a leak: it drives the count below the number of real holders, the LRU then sees a held entry as
+free and frees it under them, and every long-lived reference is released by pointer
+(`dt_dev_pixelpipe_cache_unref_entry()`), so the holder's own release writes into freed memory --
+wherever the allocator has put something else by then. The crash surfaces in that other object, far
+from the release that caused it.
+
+**Nor may one be referenced after one.** The eviction can fall between the lookup and the
+reference, which then counts up freed memory; a backbuffer keepalive taken that way is released by
+pointer at the next publication. `dt_dev_pixelpipe_cache_get_entry()` is the same kind of lookup:
+it serves only the producer-to-consumer handoff inside one run, where the reference is already
+held. When `dt_dev_pixelpipe_cache_get_writable()` finds the hash already published, it returns
+that entry referenced for the same reason.
 
 ## 3. Requesting a partial recompute
 
@@ -503,7 +548,8 @@ Host-residency requirements (`piece->cache_output_on_ram`, set by
 `_seal_opencl_cache_policy()` — a color picker or histogram starting to sample a piece,
 `active_in_gui` turning on, etc.) are otherwise only consulted when *creating* a cache
 entry. So the `EXACT_HIT` branch also compares `cache_ram_output` against the entry's
-current residency: when a host copy is wanted and the entry has none, it calls
+current residency: when a host copy is wanted and the entry has none -- or only the stale one a
+rekey left behind, which `dt_pixel_cache_entry_get_data()` reports as none -- it calls
 `dt_dev_pixelpipe_cache_restore_host_payload(cache, exact_entry, pipe->devid, &data)` —
 the same helper `dt_dev_pixelpipe_cache_peek()` uses for its own device-owning callers —
 to read the GPU payload back to host in place, without recomputing the module.

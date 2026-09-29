@@ -943,7 +943,8 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   }
   else if(existing_cache)
   {
-    /* ref_entry_by_hash succeeded but data was NULL (device-only entry); undo the ref. */
+    /* ref_entry_by_hash succeeded but reported no host pixels (device-only entry, or a host buffer
+     * still holding the hash it was rekeyed from); undo the ref. */
     dt_dev_pixelpipe_cache_ref_count_entry(FALSE, existing_cache);
   }
 
@@ -1068,7 +1069,9 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
    * backbuffer's producer, against the 7.68 ms the GUI already spends painting a frame. If that
    * ever reads as a stall rather than a wait, the answer is a try-read-lock on the GUI side, not
    * going back to allocating a buffer per frame to avoid the question. */
-  const gboolean allow_rekey_reuse = !(dt_get_debug_flags() & DT_DEBUG_NOCACHE_REUSE);
+  /* Not after a switch between history states (pipe->keep_outputs): this cacheline then holds
+   * the output of the state the user is likely to switch back to. */
+  const gboolean allow_rekey_reuse = !(dt_get_debug_flags() & DT_DEBUG_NOCACHE_REUSE) && !pipe->keep_outputs;
   const dt_dev_pixelpipe_cache_writable_status_t acquire_status
       = dt_dev_pixelpipe_cache_get_writable(hash, bufsize, name, pipe->type,
                                             cache_ram_output, allow_rekey_reuse,
@@ -1080,24 +1083,12 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
     /* Another pipe already owns a cacheline for this exact hash. If that cacheline is
      * still write-locked, this is not a processing error: it only means the concurrent
      * publisher has not finished exposing the exact-hit payload yet. Wait for that
-     * publication to complete instead of aborting the whole recursion. */
-    dt_pixel_cache_entry_t *exact_entry
-        = dt_dev_pixelpipe_cache_get_entry(hash);
-    if(IS_NULL_PTR(exact_entry))
-    {
-      dt_print(DT_DEBUG_DEV,
-               "[pipeline] module=%s exact-hit entry missing output_hash=%" PRIu64 "\n",
-               module->op, hash);
-      if(input_entry)
-        dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
-      return 1;
-    }
-
-    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, exact_entry);
+     * publication to complete instead of aborting the whole recursion.
+     * The cache hands the entry back referenced: that reference is the one this output reserves
+     * for its consumer. */
+    dt_pixel_cache_entry_t *exact_entry = output_entry;
     dt_dev_pixelpipe_cache_rdlock_entry(TRUE, exact_entry);
     dt_dev_pixelpipe_cache_rdlock_entry(FALSE, exact_entry);
-    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, exact_entry);
-    dt_dev_pixelpipe_cache_ref_count_entry(TRUE, exact_entry);
 
     dt_print(DT_DEBUG_DEV,
              "[pipeline] module=%s writable-exact-hit output_hash=%" PRIu64 " has_host_data=%d"
@@ -1106,7 +1097,8 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
              pipe->devid);
 
     /* This entry may predate the current run's host-caching requirement: it was created device-only
-     * (OpenCL, no RAM copy) back when nothing needed a host copy of it, and an exact-hash hit here
+     * (OpenCL, no RAM copy) back when nothing needed a host copy of it, or rekeyed from another hash
+     * and left device-only, its host buffer still holding the old pixels. An exact-hash hit here
      * short-circuits without ever re-running the module, so `cache_ram_output` newly turning TRUE
      * (e.g. a color picker or histogram just started sampling this piece) would otherwise never take
      * effect on an already-cached entry. Materialize the host copy now from the device payload we
@@ -1195,6 +1187,13 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
 #endif
 
   dt_pixelpipe_cache_set_current_module(prev_module);
+
+  // Every CPU and tiled path writes the host buffer, and the OpenCL path copies its output back
+  // when `cache_ram_output` asked for it (or when it had to fall back and raised it).
+  if(!error
+     && ((pixelpipe_flow & (PIXELPIPE_FLOW_PROCESSED_ON_CPU | PIXELPIPE_FLOW_PROCESSED_WITH_TILING))
+         || cache_ram_output))
+    dt_dev_pixelpipe_cache_flag_host_written(output_entry);
   output = dt_pixel_cache_entry_get_data(output_entry);
 
   _print_perf_debug(pipe, pixelpipe_flow, piece, module,
@@ -1373,6 +1372,7 @@ static void _print_opencl_errors(int error, dt_dev_pixelpipe_t *pipe)
   }
 }
 
+/* `entry` must be held by the caller: this reads it and takes the backbuffer's keepalive from it. */
 static void _update_backbuf_cache_reference(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi, dt_pixel_cache_entry_t *entry)
 {
   const uint64_t requested_hash = dt_dev_pixelpipe_get_hash(pipe);
@@ -1607,23 +1607,21 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
     }
   }
 
-  void *buf = NULL;
-
   /* GUI cache requests can target either the final backbuffer or one module output in the middle of the
      current synchronized graph. Exact-hit checks must therefore look at the requested target instead of
      always assuming the run goes to the pipe end. */
   const uint64_t requested_hash = requested_backbuf ? dt_dev_pixelpipe_get_hash(pipe)
                                                     : requested_piece ? requested_piece->global_hash
                                                                       : DT_PIXELPIPE_CACHE_HASH_INVALID;
+  /* Retained: the hit may be an output nobody holds, such as the state a module toggle switches back
+   * to, and the backbuffer takes its keepalive from it. */
   dt_pixel_cache_entry_t *entry = NULL;
   if(!_bypass_cache(pipe, requested_piece)
-     && requested_hash != DT_PIXELPIPE_CACHE_HASH_INVALID
-     && dt_dev_pixelpipe_cache_peek(requested_hash, &buf, &entry,
-                                    pipe->devid, NULL)
-     && !IS_NULL_PTR(buf))
+     && dt_dev_pixelpipe_cache_ref_host_entry_by_hash(requested_hash, NULL, &entry))
   {
     if(requested_backbuf)
       _update_backbuf_cache_reference(pipe, roi, entry);
+    dt_dev_pixelpipe_cache_unref_entry(entry);
 
     /* A GUI consumer explicitly requested this target (color picker, histogram, autoset) and is
      * blocked on it in the cache-wait manager. The output is already host-cached, so the run stops
@@ -1769,18 +1767,21 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
     }
     else if(!dt_dev_pixelpipe_has_shutdown(pipe))
     {
+      // The state switched to is now rendered: the next run may overwrite its outputs again.
+      if(!err) pipe->keep_outputs = FALSE;
+
       // No opencl errors, no killswitch triggered: we should have a valid output buffer now.
+      /* Retained too: the run's own reference covers this entry only while the planned hash is still
+       * the one it produced. */
       dt_pixel_cache_entry_t *final_entry = NULL;
-      void *final_buf = NULL;
       if(!requested_backbuf)
       {
         dt_dev_pixelpipe_cache_unref_hash(final_hash);
       }
-      else if(dt_dev_pixelpipe_cache_peek(dt_dev_pixelpipe_get_hash(pipe), &final_buf,
-                                          &final_entry, pipe->devid, NULL)
-              && !IS_NULL_PTR(final_buf))
+      else if(dt_dev_pixelpipe_cache_ref_host_entry_by_hash(dt_dev_pixelpipe_get_hash(pipe), NULL, &final_entry))
       {
         _update_backbuf_cache_reference(pipe, roi, final_entry);
+        dt_dev_pixelpipe_cache_unref_entry(final_entry);
         dt_dev_pixelpipe_cache_unref_hash(final_hash);
       }
       else

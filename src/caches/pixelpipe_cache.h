@@ -11,6 +11,7 @@
     Copyright (C) 2022 Hanno Schwalm.
     Copyright (C) 2022 Martin Bařinka.
     Copyright (C) 2023, 2025-2026 Aurélien PIERRE.
+    Copyright (C) 2026 Guillaume Stutin.
     
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -170,6 +171,10 @@ typedef struct dt_pixel_cache_entry_t
   dt_dev_pixelpipe_cache_t *cache; // reference to parent cache object
   GList *cl_mem_list;       // reusable OpenCL pinned buffers tied to this entry
   dt_pthread_mutex_t cl_mem_lock;
+  /* TRUE while `data` holds the pixels of a hash this entry no longer answers to: set when a
+   * writable acquisition rekeys the entry in place, cleared once the host buffer is rewritten for
+   * the new hash (dt_dev_pixelpipe_cache_flag_host_written(), or a device->host copy). */
+  dt_atomic_int host_stale;
 } dt_pixel_cache_entry_t;
 
 /**
@@ -238,17 +243,22 @@ int dt_dev_pixelpipe_cache_get(const uint64_t hash, const size_t size,
  *
  * The cache then resolves how to provide that writable line:
  * - if an entry already exists at `hash`, that hash is already published and must not be overwritten.
- *   The caller must exact-hit it instead of recomputing,
+ *   The caller must exact-hit it instead of recomputing. The entry is returned with its refcount
+ *   incremented, under the same hold of the cache lock as the lookup, and without a lock of its own:
+ *   its producer may still be writing it,
  * - else, if `allow_rekey_reuse` is TRUE and `reuse_hint` still points to a live cacheline with the right size,
- *   that old cacheline is rekeyed to `hash`, write-locked, and returned,
+ *   that old cacheline is rekeyed to `hash`, write-locked, and returned. Its host buffer still holds the
+ *   previous hash's pixels, so it reports none until the caller calls
+ *   `dt_dev_pixelpipe_cache_flag_host_written()`,
  * - else, a new cacheline is created.
  *
- * In all successful cases:
+ * When the entry is created or rekeyed:
  * - the returned entry refcount is incremented,
  * - the returned entry is write-locked,
  * - and `alloc` may materialize the host buffer if requested.
  *
- * The caller must later release the write lock and refcount from the same control flow.
+ * The caller must later release the refcount, and the write lock when it holds one, from the same
+ * control flow.
  *
  * @param cache Pixelpipe cache.
  * @param hash Target output hash for the module output.
@@ -259,7 +269,8 @@ int dt_dev_pixelpipe_cache_get(const uint64_t hash, const size_t size,
  * @param allow_rekey_reuse Whether the cache may reuse the piece-local cached output line by rekeying it.
  * @param reuse_hint Snapshot of the previously attached piece cacheline metadata, or NULL.
  * @param[out] data Returned host pointer when available.
- * @param[out] entry Returned cache entry.
+ * @param[out] entry Returned cache entry, referenced for every status except
+ *        `DT_DEV_PIXELPIPE_CACHE_WRITABLE_ERROR`.
  * @return dt_dev_pixelpipe_cache_writable_status_t `DT_DEV_PIXELPIPE_CACHE_WRITABLE_CREATED`
  *         when creating a new entry, `DT_DEV_PIXELPIPE_CACHE_WRITABLE_REKEYED` when rekeying
  *         `reuse_hint`, `DT_DEV_PIXELPIPE_CACHE_WRITABLE_EXACT_HIT` when a published entry already
@@ -588,8 +599,33 @@ gboolean dt_dev_pixelpipe_cache_ref_host_entry_by_hash(const uint64_t hash,
                                                        void **data,
                                                        struct dt_pixel_cache_entry_t **entry);
 
-/** Peek the host data pointer of a cache entry without allocating. */
+/**
+ * @brief Peek the host pixels a cache entry holds for its current hash, without allocating.
+ *
+ * @return NULL when the entry has no host buffer, and also when its host buffer still holds the
+ * pixels of the hash it was rekeyed from (see dt_pixel_cache_entry_t.host_stale). A consumer
+ * treats both alike: the pixels, if any, are on the device and must be copied back first.
+ */
 void *dt_pixel_cache_entry_get_data(struct dt_pixel_cache_entry_t *entry);
+
+/**
+ * @brief The host buffer of a cache entry, whatever hash its content describes.
+ *
+ * @details For the producer holding the write lock from dt_dev_pixelpipe_cache_get_writable()
+ * only: a rekeyed entry's buffer is about to be overwritten, and it still backs the pinned
+ * OpenCL image of an output that is not copied back to RAM. Everyone else reads pixels through
+ * dt_pixel_cache_entry_get_data().
+ */
+void *dt_pixel_cache_entry_get_buffer(struct dt_pixel_cache_entry_t *entry);
+
+/**
+ * @brief Record that the host buffer of @p entry now holds the pixels of its current hash.
+ *
+ * @details Called by the producer before it releases the write lock, when it wrote the host
+ * buffer or copied its device output back into it. Without it, an entry rekeyed in place keeps
+ * reporting no host pixels (dt_pixel_cache_entry_get_data() returns NULL).
+ */
+void dt_dev_pixelpipe_cache_flag_host_written(struct dt_pixel_cache_entry_t *entry);
 
 /**
  * @brief Peek the size (in bytes) reserved for the host buffer of a cache entry.
