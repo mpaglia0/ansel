@@ -166,9 +166,6 @@ typedef struct dt_drawlayer_controls_t
   GtkWidget *attach_layer;
   GtkWidget *create_background;
   GtkWidget *save_layer;
-  GtkWidget *fill_white;
-  GtkWidget *fill_black;
-  GtkWidget *fill_transparent;
   GtkWidget *map_pressure_size;
   GtkWidget *map_pressure_opacity;
   GtkWidget *map_pressure_flow;
@@ -257,7 +254,6 @@ typedef struct dt_drawlayer_runtime_manager_t
 {
   gboolean realtime_active;
   gboolean painting_active;
-  gboolean background_job_running;
   dt_drawlayer_runtime_private_t *priv;
 } dt_drawlayer_runtime_manager_t;
 
@@ -347,7 +343,6 @@ typedef struct dt_drawlayer_runtime_source_t
   dt_pixel_cache_entry_t *cache_entry;
   int width;
   int height;
-  gboolean direct_copy;
   dt_iop_roi_t target_roi;
   dt_iop_roi_t source_roi;
   dt_drawlayer_runtime_buffer_t tracked_buffer;
@@ -393,4 +388,37 @@ void dt_drawlayer_runtime_manager_bind_piece(dt_drawlayer_runtime_manager_t *hea
                                              dt_drawlayer_runtime_manager_t **runtime_manager,
                                              dt_drawlayer_process_state_t **runtime_process,
                                              gboolean *runtime_display_pipe);
+/** @brief How many input axes the tablet mapping offers (pressure, tilt, acceleration). */
+#define DT_DRAWLAYER_MAPPING_ROWS 3
+/** @brief How many brush properties each axis can drive (size, opacity, flow, hardness). */
+#define DT_DRAWLAYER_MAPPING_TARGETS 4
+
+/** @brief One cell of the tablet-mapping grid: a widget slot and the conf key it mirrors. */
+typedef struct dt_drawlayer_mapping_cell_t
+{
+  GtkWidget **widget;
+  const char *conf_key;
+} dt_drawlayer_mapping_cell_t;
+
+/** @brief One input axis: the four properties it can drive, and its response curve. */
+typedef struct dt_drawlayer_mapping_row_t
+{
+  dt_drawlayer_mapping_cell_t targets[DT_DRAWLAYER_MAPPING_TARGETS];
+  dt_drawlayer_mapping_cell_t profile;
+} dt_drawlayer_mapping_row_t;
+
+/**
+ * @brief Pair every tablet-mapping widget with the configuration key it mirrors.
+ *
+ * Three places walk this grid and each used to spell it out: the builder that creates the
+ * fifteen widgets, gui_update reading conf into them, and sync_params_from_gui writing them
+ * back. Three unrolled copies of one list is how a fourth input axis gets added to two of
+ * them. The labels are NOT here -- they are the GUI's and are translated at build time.
+ *
+ * `dt_drawlayer_conf_ensure_defaults()` deliberately does not use this: its keys carry
+ * one-off migrations from the older `map_speed_*` spellings, so its list is not uniform.
+ */
+void dt_drawlayer_mapping_rows(dt_iop_drawlayer_gui_data_t *g,
+                                    dt_drawlayer_mapping_row_t rows[DT_DRAWLAYER_MAPPING_ROWS]);
+
 #endif // DT_IOP_DRAWLAYER_RUNTIME_H

@@ -51,6 +51,7 @@
     Copyright (C) 2022 Nicolas Auffray.
     Copyright (C) 2022 Philipp Lutz.
     Copyright (C) 2024-2025 Alynx Zhou.
+    Copyright (C) 2026 Guillaume Stutin.
     
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -574,9 +575,6 @@ static void _lens_gui_update_sensitivity(dt_iop_module_t *self);
 
 typedef struct dt_iop_lensfun_global_data_t
 {
-  gboolean db_tried;
-  /** Pre-warm thread, see _lensfun_db_warm(). Joined by cleanup_global(). */
-  GThread *db_warm;
   int kernel_lens_distort_bilinear;
   int kernel_lens_distort_bicubic;
   int kernel_lens_distort_mitchell;
@@ -597,7 +595,8 @@ typedef struct dt_iop_lensfun_global_data_t
  * Reading is lock-free by construction -- `mode=ro&immutable=1` with SQLITE_OPEN_NOMUTEX,
  * so SQLite takes no file lock, no shared-memory segment and no mutex. The price is ONE
  * HANDLE PER THREAD, so the handle is thread-local and closed by its destructor when the
- * thread ends. Threads that never touch a lens never open it.
+ * thread ends, or by cleanup_global() for the thread unloading the modules. Threads that never
+ * touch a lens never open it.
  *
  * The one-entry caches beside it stand in for the two process-wide memo hash tables:
  * commit_params() resolves the camera and the lens on every pipe resync, for every pipe,
@@ -623,7 +622,8 @@ typedef struct _ls_tls_t
 /* Closed when the thread that opened it exits, which is the whole reason this is a GPrivate
  * and not a plain __thread pointer: the handle has to be RELEASED, and nothing else in C
  * runs code at thread exit. iop/drawlayer.c holds its per-thread scratch buffers the same
- * way, for the same reason. */
+ * way, for the same reason. The main thread ends in exit(), which runs no such destructor:
+ * cleanup_global() releases the block of the thread that unloads the modules. */
 static void _ls_tls_free(gpointer data)
 {
   _ls_tls_t *tls = (_ls_tls_t *)data;
@@ -2489,9 +2489,9 @@ void cleanup_global(dt_iop_module_so_t *module)
 {
   dt_iop_lensfun_global_data_t *gd = (dt_iop_lensfun_global_data_t *)module->data;
 
-  /* Before anything is freed: the pre-warm thread may still be building the database. */
-  /* No database to tear down and no thread to join. Each thread's handle closes itself
-   * when that thread ends, and the one-entry caches beside it die with it. */
+  /* Each thread's handle closes when that thread ends, except the one of the thread unloading
+   * the modules: the main thread ends in exit(), which runs no thread-local destructor. */
+  g_private_replace(&_ls_tls_key, NULL);
 
   dt_opencl_free_kernel(gd->kernel_lens_distort_bilinear);
   dt_opencl_free_kernel(gd->kernel_lens_distort_bicubic);

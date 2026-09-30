@@ -2,6 +2,8 @@
 
 [TOC]
 
+> **First checked 2026-09-29.** This file was mechanically checked against `8f4638a04e` on 2026-09-29 — every `file:line` citation resolved, every backticked symbol looked up in the tree, every OPEN/planned status claim tested, and every gate or baseline number it quotes compared with `tools/check_module_boundaries.sh` and `tools/include_baseline.txt`. **No per-claim semantic read was done**: a citation that resolves can still describe the wrong thing, so this is a floor, not a verification. Nothing was found wrong by those checks.
+
 The **thumbtable** is the widget that lays out image thumbnails for the whole application. A single
 type, @ref dt_thumbtable_t, backs two visually and behaviourally different frontends:
 
@@ -78,7 +80,7 @@ A handful of struct fields are read directly by external code and are therefore 
 surface:
 
 - `parent_overlay` — the root widget the views pack into their panels (`window_manager.c`);
-- `grid` — the content widget, used for focus grabs (`gui/gtk.c`);
+- `grid` — the content widget, used for focus grabs (`gui/dtgtk/thumbtable.c:1960-1972`);
 - `scroll_window` — the `GtkScrolledWindow`, used to wire a scroll-event handler
   (`libs/tools/lighttable.c`);
 - `thumb_width` / `thumb_height` — the current thumbnail size (`gui/actions/run.c`).

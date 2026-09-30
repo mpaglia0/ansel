@@ -221,18 +221,14 @@ static int _abort_module_shutdown_cleanup(dt_dev_pixelpipe_t *pipe, dt_dev_pixel
 
   _reset_piece_cache_entry(piece);
 
-  if(!IS_NULL_PTR(input_entry))
-  {
-    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
-    dt_dev_pixelpipe_cache_auto_destroy_apply(input_entry);
-  }
+  // An input its producer flagged disposable goes with this release.
+  if(!IS_NULL_PTR(input_entry)) dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
 
+  // Flagged while still held, so its last release removes it.
   if(!IS_NULL_PTR(output_entry))
   {
+    dt_dev_pixelpipe_cache_flag_auto_destroy(output_entry);
     dt_dev_pixelpipe_cache_ref_count_entry(FALSE, output_entry);
-
-    if(dt_dev_pixelpipe_cache_remove(TRUE, output_entry))
-      dt_dev_pixelpipe_cache_flag_auto_destroy(output_entry);
   }
 
   if(output) *output = NULL;
@@ -557,19 +553,11 @@ void dt_dev_pixelpipe_cleanup(dt_dev_pixelpipe_t *pipe)
   if(old_backbuf_hash != DT_PIXELPIPE_CACHE_HASH_INVALID)
   {
     /* Backbuffer ownership belongs to the pipeline, not its GUI consumers. Once the pipe itself is
-     * torn down, always release that keepalive ref and invalidate the published backbuffer metadata. */
+     * torn down, always release that keepalive ref and invalidate the published backbuffer metadata.
+     * A pipe that keeps no cache takes its last frame with it: flagged while the keepalive still
+     * holds it, so the release removes it. */
+    if(pipe->no_cache) dt_dev_pixelpipe_cache_flag_auto_destroy(pipe->backbuf.keepalive);
     dt_dev_backbuf_release_keepalive(&pipe->backbuf);
-
-    if(pipe->no_cache)
-    {
-      dt_pixel_cache_entry_t *old_backbuf_entry
-          = dt_dev_pixelpipe_cache_get_entry(old_backbuf_hash);
-      if(old_backbuf_entry)
-      {
-        dt_dev_pixelpipe_cache_flag_auto_destroy(old_backbuf_entry);
-        dt_dev_pixelpipe_cache_auto_destroy_apply(old_backbuf_entry);
-      }
-    }
   }
   dt_dev_set_backbuf(&pipe->backbuf, 0, 0, 0, DT_PIXELPIPE_CACHE_HASH_INVALID, DT_PIXELPIPE_CACHE_HASH_INVALID);
   dt_dev_pixelpipe_reset_cache_request(pipe);
@@ -961,8 +949,6 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
     return 1;
   }
 
-  KILL_SWITCH_ABORT;
-
   // Child recursion just published or exact-hit returned this hash with one ref already reserved for
   // this immediate consumer. Reopen the live cache entry directly instead of going through exact-hit
   // lookup, because exact-hit intentionally rejects auto-destroy entries while the parent recursion
@@ -979,6 +965,13 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
              module->op, input_hash, hash, 
              !IS_NULL_PTR(previous_piece) ? previous_piece->module->op : "", 
              !IS_NULL_PTR(previous_piece) ? previous_piece->global_hash : -1);
+    return 1;
+  }
+
+  // Aborting here hands back the reference the upstream module reserved for this one.
+  if(dt_dev_pixelpipe_has_shutdown(pipe))
+  {
+    if(!IS_NULL_PTR(input_entry)) dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
     return 1;
   }
   input = input_entry ? dt_pixel_cache_entry_get_data(input_entry) : NULL;
@@ -1212,17 +1205,12 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
     _trace_cache_owner(pipe, module, "error-cleanup", "output", hash, output, output_entry, FALSE);
     // Ensure we always release locks and cache references on error, otherwise cache eviction/GC will stall.
     _reset_piece_cache_entry(piece);
+    // No point in keeping garbled output: flagged while still held and before the write lock goes,
+    // so it is never published as a regular line, and its last release removes it.
+    dt_dev_pixelpipe_cache_flag_auto_destroy(output_entry);
     dt_dev_pixelpipe_cache_wrlock_entry(FALSE, output_entry);
-    if(input_entry)
-    {
-      dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
-      dt_dev_pixelpipe_cache_auto_destroy_apply(input_entry);
-    }
-
-    // No point in keeping garbled output
+    if(!IS_NULL_PTR(input_entry)) dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
     dt_dev_pixelpipe_cache_ref_count_entry(FALSE, output_entry);
-    if(dt_dev_pixelpipe_cache_remove(TRUE, output_entry))
-      dt_dev_pixelpipe_cache_flag_auto_destroy(output_entry);
     return 1;
   }
 
@@ -1289,14 +1277,6 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   
   KILL_SWITCH_AND_FLUSH_CACHE;
 
-  // Decrease reference count on input and flush it if it was flagged for auto destroy previously
-  _trace_cache_owner(pipe, module, "release", "input", input_hash, input, input_entry, FALSE);
-  if(input_entry)
-  {
-    dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
-    dt_dev_pixelpipe_cache_auto_destroy_apply(input_entry);
-  }
-
   // Print min/max/Nan in debug mode only
   if((dt_get_debug_flags() & DT_DEBUG_NAN) && strcmp(module->op, "gamma") != 0 && !IS_NULL_PTR(output))
   {
@@ -1306,6 +1286,11 @@ static int dt_dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
   }
 
   KILL_SWITCH_AND_FLUSH_CACHE;
+
+  // Released past the last abort point, which releases it itself. An input its producer flagged
+  // disposable goes with this release.
+  _trace_cache_owner(pipe, module, "release", "input", input_hash, input, input_entry, FALSE);
+  if(!IS_NULL_PTR(input_entry)) dt_dev_pixelpipe_cache_ref_count_entry(FALSE, input_entry);
 
   *out_hash = hash;
   *out_piece = piece;
@@ -1751,6 +1736,9 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
     // remark: opencl errors can come in two ways: pipe->opencl_error is TRUE (and err is TRUE) OR oclerr is
     // TRUE
     keep_running = (oclerr || (err && pipe->opencl_error));
+    const gboolean shut_down = dt_dev_pixelpipe_has_shutdown(pipe);
+    // A completed run whose output is not published hands back the reference reserved on it.
+    if(!err && (keep_running || shut_down)) dt_dev_pixelpipe_cache_unref_hash(final_hash);
     if(keep_running)
     {
       // Report it and be told what it means: 1 = retry this run on CPU, 2 = OpenCL is off
@@ -1765,7 +1753,7 @@ int dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe, dt_iop_roi_t roi)
 
       _print_opencl_errors(opencl_error, pipe);
     }
-    else if(!dt_dev_pixelpipe_has_shutdown(pipe))
+    else if(!shut_down)
     {
       // The state switched to is now rendered: the next run may overwrite its outputs again.
       if(!err) pipe->keep_outputs = FALSE;

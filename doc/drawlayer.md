@@ -1,40 +1,67 @@
 # The drawlayer module
 
+> **Verified against `f37105c227` on 2026-09-29.** That pass found 9 claim(s) in this file
+> that were wrong of the tree and 17 that had gone stale; the ones corrected since carry a note
+> saying what they used to say. Anything not yet corrected is flagged inline. Re-measure before
+> acting on a claim older than the code you are changing, and re-date this line when you do.
+
 `src/iop/drawlayer.c` plus `src/iop/drawlayer/` is a painting layer: a full-resolution RGBA
 canvas per layer, a brush that stamps dabs into it, a sidecar TIFF that stores it, and a
 composite into the pipe. This note is the map — what the parts are, which thread owns what,
 and where a realtime stroke's time goes. It was written from a full read of the module; every
 number below is derived from the code and cites it.
 
+**Re-verified against the tree on 2026-09-29, after #1418, #1430, #1431 and #1471, and
+corrected again the same day against `1cfa1551c8`.** The second pass found six claims still
+wrong — two of them describing defects the refactor had already *fixed*, which is the worse
+direction: §2's `self->params` finding and §7's dead-function list. Citations drift as the code
+moves, and this note has now shipped a finding that named the wrong struct, one whose count was
+stale, and two that survived their own repair — so re-measure before acting on any claim, and
+say so here when you do.
+
+A mechanical check worth re-running: every `file.ext:NNN` in this document should resolve to a
+line that exists. All of them do as of `1cfa1551c8` — but note a **bare** `:NNN`, continuing a
+previous citation, is invisible to that check and is how `drawlayer.c:4238` survived in §2 for a
+file of 4169 lines. Write the filename out. Sections 1, 6 and 7 carry a note
+where their earlier version was wrong rather than being quietly corrected, because the *way*
+each was wrong is the more useful thing to know.
+
 ---
 
-## 1. The module is not the directory
+## 1. Eleven translation units, one per file
 
-`src/iop/CMakeLists.txt:223` compiles **seven** of the eleven `.c` files. The other four —
-`conf.c`, `coordinates.c`, `worker.c`, `layers.c` — are text-`#include`d into `drawlayer.c`
-(`drawlayer.c:160`, `:161`, `:1558`, `:1563`). The real translation unit is **7130 lines**.
+*This section used to be titled "the module is not the directory" and described four files
+text-`#include`d into `drawlayer.c`. #1431 removed that; the numbers below are 2026-09-29.*
 
-That matters for every reading of this code: a `static` in `worker.c` is in the same namespace
-as a `static` in `drawlayer.c`, the directory buys no encapsulation, and the file boundaries
-suggest an ownership split that the linker does not enforce. `_commit_dabs` at `worker.c:1157`
-resolving to `dt_drawlayer_commit_dabs` in `drawlayer.c` — across what looks like a module
-boundary — is only possible because of this.
+`src/iop/CMakeLists.txt` compiles **all eleven** `.c` files. There is no `#include` of a `.c`
+anywhere in the module, so a `static` really is private to its file and the directory buys the
+encapsulation its layout suggests.
+
+What that cost, and why it is worth keeping: as one unit the module was 7130 lines, a `static`
+in `worker.c` shared a namespace with one in `drawlayer.c`, and ten alias macros existed so
+pasted code could call a public function by a private-looking name (`_commit_dabs` for
+`dt_drawlayer_commit_dabs`). Compiled alone the four spliced files raised 819 errors, every one
+a header they had been borrowing from their host without naming it. Three headers could not be
+included first either: `coordinates.h` declared twelve functions over `dt_iop_module_t`,
+`dt_iop_roi_t` and `dt_drawlayer_brush_dab_t` and included **nothing**; `worker.h` named types
+it never pulled in; `runtime.h` held a `dt_drawlayer_cache_patch_t` by value without
+`cache.h`.
 
 Actual units, by role:
 
 | file | lines | role |
 |---|---|---|
-| `drawlayer.c` | 4254 | module API, GUI, the whole OpenCL composite, `process`/`process_cl` |
-| `worker.c` | 1665 | the `draw-back` thread, the ring, batching, the heartbeat |
-| `io.c` | 1151 | sidecar TIFF read/write |
-| `runtime.c` | 1001 | the event→schedule→action dispatcher |
-| `paint.c` | 981 | pointer samples → dabs (interpolation, spacing, smoothing) |
-| `brush.c` | 913 | the per-pixel rasterizer |
-| `widgets.c` | 860 | widget construction helpers |
-| `cache.c` | 642 | patch allocation over the pixelpipe cache arena |
-| `layers.c` | 484 | layer CRUD, the GUI-side canvas loader |
-| `conf.c` | 370 | preferences |
-| `coordinates.c` | 357 | coordinate spaces |
+| `drawlayer.c` | 4169 | module API, GUI, the whole OpenCL composite, `process`/`process_cl` |
+| `worker.c` | 1828 | the `draw-back` thread, the ring, batching, the heartbeat |
+| `brush.c` | 1196 | the per-pixel rasterizer |
+| `io.c` | 1101 | sidecar TIFF read/write |
+| `paint.c` | 994 | pointer samples → dabs (interpolation, spacing, smoothing) |
+| `runtime.c` | 973 | the event→schedule→action dispatcher |
+| `widgets.c` | 851 | widget construction helpers |
+| `layers.c` | 489 | layer CRUD, the GUI-side canvas loader |
+| `conf.c` | 375 | preferences, and the tablet-mapping widget↔key pairing |
+| `coordinates.c` | 366 | coordinate spaces |
+| `cache.c` | 246 | patch allocation over the pixelpipe cache arena |
 
 ---
 
@@ -59,16 +86,21 @@ flowchart LR
 
 **Ownership is not clean, and that is the module's central defect.** The same `base_patch` is
 written by the worker (`worker.c:961-970`), read by the pipeline across a whole `process()`
-(rdlock `drawlayer.c:1621` → released `runtime.c:975` via `:4238`/`:4117`), and replaced by the
-GUI (`layers.c:199-213`). The entry's rwlock guards the *pixels*; nothing guards the *patch
-struct* that holds the lock.
+(rdlock `drawlayer.c:1621`, released through the `dt_drawlayer_runtime_release_t` set at
+`drawlayer.c:4049`, `:4129` and `:4149`), and replaced by the GUI (`layers.c:199-213`). The
+entry's rwlock guards the *pixels*; nothing guards the *patch struct* that holds the lock.
 
-Three things cross a thread boundary they should not:
+Two things cross a thread boundary they should not:
 
-- **`self->params` is written by the worker thread.** `_publish_backend_progress`
-  (`worker.c:302-320`) does a read-modify-write of the params blob to bump
-  `stroke_commit_hash`, then hands it to `dt_dev_transient_params_set`. The transient channel
-  is the sanctioned route (CLAUDE.md); mutating `self->params` to feed it is not — the GUI
+- ~~**`self->params` is written by the worker thread.**~~ **Corrected 2026-09-29: it is not,
+  and has not been since the realtime rework.** `_publish_backend_progress` reads
+  `&ctx->worker->publish_params` (`worker.c:326`) — a worker-private blob declared at
+  `worker.c:118`, seeded from `self->params` by the GUI thread at stroke begin
+  (`dt_drawlayer_worker_snapshot_params`) and owned by the worker thereafter. Its own doc
+  comment states the rule this finding was written about: "The heartbeat must never touch
+  `self->params`: that blob belongs to the GUI thread." The finding is kept, struck through,
+  because the *shape* is right and recurs — feeding the transient channel by mutating the
+  module's live params is not the sanctioned route — but the module does not do it. The GUI
   thread writes the same blob from `_widget_changed` with no lock in common.
 - **`cache_dirty_rect` has no synchronisation at all.** Written by the worker
   (`worker.c:364`, `:973`), read *and reset* by the pipeline (`drawlayer.c:741`, `:746`,
@@ -81,9 +113,17 @@ Three things cross a thread boundary they should not:
 
 ## 3. A live stroke, end to end
 
+> Two labels in this diagram were corrected on 2026-09-29. The **26 conf reads per event** were
+> real when first measured but are not what `_fill_input_brush_settings` does: they live in
+> `_refresh_brush_settings_cache` (`drawlayer.c:206-247`), which the filler calls at
+> `drawlayer.c:252` only when `g->ui.brush_settings_valid` is false. And the drain loop has
+> honoured the input path's publish deadline since `worker.c:1282` — the "Fixed" list in §4 says
+> so, and the diagram was still showing the state before it.
+
+
 ```mermaid
 flowchart TD
-  M["mouse_moved<br/>drawlayer.c:3690"] --> BRS["_fill_input_brush_settings<br/>26 conf reads, every event<br/>drawlayer.c:210"]
+  M["mouse_moved<br/>drawlayer.c:3690"] --> BRS["_fill_input_brush_settings<br/>drawlayer.c:248<br/>cache refill only when stale"]
   BRS --> PUSH["ring push"]
   PUSH --> PBI["_process_backend_input<br/>worker.c:325"]
   PBI --> LUT["arc-length LUT<br/>25 full dab structs<br/>paint.c:239"]
@@ -91,7 +131,7 @@ flowchart TD
   EMIT --> Q{"publish deadline?<br/>>= 20 ms"}
   Q -->|no| WAIT["accumulate in pending_dabs"]
   Q -->|yes| BATCH
-  WAIT -.->|worker idle| DRAIN["_backend_worker_on_idle<br/>drains with NO deadline<br/>worker.c:1138"]
+  WAIT -.->|worker idle| DRAIN["_backend_worker_on_idle<br/>drains, same 20 ms deadline<br/>worker.c:1282"]
   DRAIN --> BATCH
   BATCH["_rasterize_pending_dab_batch<br/>B = 2 x nthreads dabs<br/>worker.c:885"]
   BATCH --> CP1["copy base_patch -> heartbeat_patch<br/>batch bbox"]
@@ -195,8 +235,11 @@ Fixed:
 - The 32-point radial quadrature (32 `asinf`, 32 `sqrtf`, ~96 divisions) is memoised on
   (radius, hardness, shape, spacing); with no tablet map on size or softness it is computed
   once per stroke.
-- `dab->wx`/`wy` and the `dev->geometry_chain` walk that filled them from the worker thread
-  are deleted — four writers, no readers.
+- The `dev->geometry_chain` walk that ran from the worker thread is deleted. (`wx`/`wy`
+  themselves are **not** deleted and were never on `dt_drawlayer_brush_dab_t`: they are the
+  pointer's widget coordinates on `dt_drawlayer_paint_raw_input_t` (`paint.h:51-52`), read at
+  `worker.c:192` and in `drawlayer.c`. What went was the worker-side geometry walk that used
+  to translate them.)
 - The drain loop honours the same 20 ms publish deadline as the input path. It used to
   publish after every batch: a transient-params write, a `TOP_CHANGED` flag and an
   asynchronous signal raise apiece.
@@ -209,8 +252,8 @@ Not fixed:
   heartbeat patch. Deduplicating means translating between them.
 - **`process()` composites the whole `roi_out` every frame** and never consults
   `cache_dirty_rect`, while `process_cl()` does. The win is smaller than it looks:
-  `dt_interpolation_resample` takes a 1:1 fast path (`interpolation.c:920-937`, reached
-  because `source_roi.scale` is hardcoded to 1.0f) at the zoom levels people paint at, so
+  `dt_interpolation_resample` takes a 1:1 fast path (`pixel/interpolation.c:946`) at the zoom
+  levels people paint at, so
   only the alpha-over blend is full-frame there. It is worth most when zoomed *out*. A
   damage-limited CPU composite also cannot copy the GPU gate: that one depends on the output
   cacheline being rekeyed in place, which `cache_output_on_ram` prevents on the CPU path.
@@ -219,36 +262,101 @@ Not fixed:
   `io.c` takes no lock anywhere and uses a fixed `<path>.tmp` name while being reachable from
   three threads.
 
-## 6. State is ten booleans, not a state machine
+## 6. State is twelve booleans, not a state machine
+
+*Re-measured 2026-09-29; the line numbers below are current, the previous ones had drifted
+off their targets entirely. Check them before quoting them — this section has been wrong once.*
 
 The logical state — idle / hovering / painting / draining / committing / loading / saving —
-is spread across at least ten independent booleans in five structs (`runtime.h:19`, `:43-45`,
-`:68`, `:76`, `:79`, `:228-230`) plus a 15-boolean schedule, with no enum and no asserted
-invariant. `realtime_active` is a stored copy of a pure function of three of them.
+is spread across **twelve** independent booleans in five structs, with no enum and no asserted
+invariant:
 
-`_build_runtime_schedule` (`runtime.c:411`) maps an event to that 15-boolean schedule; the
-dispatcher then executes the set bits. It recomputes its whole state twice per dispatch and
-pushes realtime mode twice.
+| struct | booleans | `runtime.h` |
+| --- | --- | --- |
+| `dt_drawlayer_session_state_t` | `pointer_valid`, `background_job_running` | `:20`, `:30` |
+| `dt_drawlayer_process_state_t` | `cache_valid`, `cache_dirty`, `base_patch_loaded_ref`, `last_composite_valid` | `:44`, `:45`, `:51`, `:69` |
+| `dt_drawlayer_stroke_state_t` | `last_dab_valid`, `finish_commit_pending` | `:77`, `:80` |
+| `dt_drawlayer_ui_state_t` | `brush_color_valid`, `brush_settings_valid` | `:124`, `:126` |
+| `dt_drawlayer_runtime_manager_t` | `realtime_active`, `painting_active` | `:255`, `:256` |
+
+Beside them sits a 15-boolean schedule, `dt_drawlayer_runtime_schedule_t` — declared in
+`runtime.c`, not the header. `_build_runtime_schedule` (`runtime.c:462`) maps an event onto
+it and the dispatcher executes the set bits. It recomputes its whole state twice per dispatch
+and pushes realtime mode twice.
+
+**`realtime_active` is NOT a cached pure function**, which an earlier version of this section
+claimed. It is computed from three inputs (`runtime.c:345`), then *overridden* to FALSE for
+four event kinds (`:356`), and written FALSE again from two commit-time sites outside that
+computation (`drawlayer.c:1878`, `:1894`). Replacing it with a predicate would lose both
+overrides. Note the pairing at those two sites — the flag and
+`dt_drawlayer_set_pipeline_realtime_mode(self, FALSE)` are set together, while four other
+places derive the pipeline mode *from* the flag (`runtime.c:434`, `:443`, `:679`, `:880`).
+Two spellings of one operation, and the shape this module keeps paying for.
+
+`brush_color_valid` deserves its own warning: it is set TRUE once (`drawlayer.c`, in
+`dt_drawlayer_sync_cached_brush_colors`) and **never cleared anywhere**. Nothing rebuilds the
+cached brush colours lazily, so every path that changes what they depend on must refresh them
+explicitly. Until #1471 the refresh happened only because refilling the HDR exposure slider
+woke `_widget_changed` on the panel paths that were not frozen — an accident the frozen path
+never had.
 
 ---
 
 ## 7. Dead weight
 
-Confirmed by whole-tree grep, not by inspection:
+*Drained across #1430, #1431 and #1471. What is left is at the bottom; the rest is kept as a
+record, because two of the original entries were WRONG and the way they were wrong is worth
+knowing.*
 
-- `dt_drawlayer_runtime_host_t.collect_inputs` / `.perform_action` are **never dereferenced**;
-  `drawlayer.c:135-136` `#define`s both to `NULL` and assigns them at **19 sites** (~250 lines).
-- **389 of `cache.c`'s 642 lines** are a second "process patch" cache tier with no callers
-  outside the file.
-- **Nine exported functions** have no caller anywhere (`worker.c:1592`, `:1630`, `:1636`,
-  `:1641`, `paint.c:847`, `:877`, `widgets.c:386`, `io.c:972`, `drawlayer.c:2662`).
-- `dt_drawlayer_brush_dab_t.wx`/`.wy`: written at three sites, read at none.
-- `drawlayer_process_scratch_t.flush_update_rgba`: declared and freed, never allocated or read.
-- `direct_copy` has exactly one assignment, `FALSE`, so its fast path is dead in both backends.
-- `_blend_layer_over_input_cl` takes **19 parameters** for one call site, three of which are
-  provably constant there.
-- `gui_init` is **334 lines** of stereotyped widget quartets; the 3×4 tablet-mapping grid at
-  `:3131` is already table-driven and proves the rest could be.
+**Removed:**
+
+- `dt_drawlayer_runtime_host_t.collect_inputs` / `.perform_action`, never dereferenced,
+  assigned at 19 sites (#1430). `runtime.h` keeps a comment where they were.
+- 389 of `cache.c`'s 642 lines — a second "process patch" cache tier with no caller outside
+  the file (#1430).
+- Three of the nine uncalled exported functions (#1430).
+- `drawlayer_process_scratch_t.flush_update_rgba`: a pointer, a size beside it and a free.
+  Nothing ever allocated it, so nothing read it and the free was on NULL (#1471).
+- `direct_copy`: one assignment in the whole tree, `FALSE`. The GPU fast branch was
+  unreachable, the `!direct_copy` term in the partial-composite predicate always true, and
+  the CPU path's `if(!source.direct_copy)` wrapped 25 lines that always ran (#1471).
+- `_blend_layer_over_input_cl`'s constant arguments, then its parameter list (#1471). See the
+  correction below.
+- `gui_init`'s 332 lines, now 72, split into three tab builders that each connect their own
+  widgets (#1471). The 3×4 tablet-mapping grid it was already table-driven for is now ONE
+  list — `dt_drawlayer_mapping_rows()` — walked by the builder, by `gui_update` and by
+  `sync_params_from_gui`, where each used to spell it out.
+- The runtime manager's `background_job_running`, written twice and read never. The
+  *session*'s identically-named field is the live one, which is why this survived: a grep for
+  the name finds eleven uses and looks busy (#1471).
+- Three `fill_*` widgets that had exactly create/pack/connect, whose handlers ignore the
+  button they are given (#1471).
+
+**Two entries in this list were wrong. Verify before acting on any of the rest.**
+
+- `dt_drawlayer_brush_dab_t.wx`/`.wy` "written at three sites, read at none" named **the wrong
+  struct**. The dab type has no such fields. The writes are to
+  `dt_drawlayer_paint_raw_input_t`, and they ARE read — `paint.c` quantises them into the dab
+  hash, and `worker.c` and `drawlayer.c` convert them to layer coordinates. Acting on this
+  entry would have deleted the pointer coordinates that place every dab.
+- `_blend_layer_over_input_cl` "takes 19 parameters, three provably constant" was 16 and two
+  by the time anyone reached it, because `direct_copy` was the third and had already gone.
+  Both remaining constants gated real code: `force_device_copy` selected an eager
+  `dt_opencl_copy_host_to_device()`, and `source_mem_override` had a branch plus **four**
+  guards written to work whether or not it was set. It now takes one named
+  `drawlayer_blend_cl_request_t`.
+
+**Still open:**
+
+- ~~**Six exported functions have no caller anywhere**~~ — **three**, re-measured
+  2026-09-29: `dt_drawlayer_io_background_layer_job_run`,
+  `dt_drawlayer_paint_runtime_get_stroke_seed`, `dt_drawlayer_worker_raw_inputs`. The other
+  three on the original list gained callers when the TU splice was undone and they stopped
+  being reachable by private name: `dt_drawlayer_brush_transition_mass_primitive_eval`
+  (`brush_profile.h:210`), `dt_drawlayer_brush_profile_prepare` (`brush.c:290`),
+  `dt_drawlayer_brush_mass_primitive_eval` (`paint.c`). That is the splice's signature one last
+  time — a "dead" export that was live all along, invisible because the caller and the callee
+  shared a namespace.
 
 ---
 
@@ -257,13 +365,16 @@ Confirmed by whole-tree grep, not by inspection:
 Both fixed; recorded because the shapes recur.
 
 **The worker could deadlock itself and take the GUI down with it.**
-`_backend_worker_on_idle` called `_commit_dabs` → `_wait_worker_idle`, which blocks while
+`_backend_worker_on_idle` called `dt_drawlayer_commit_dabs` (`worker.c:1234`) →
+`dt_drawlayer_worker_wait_idle` (`worker.c:1415`) — the private-looking spellings `_commit_dabs`
+and `_wait_worker_idle` are from the splice era and exist nowhere in the tree — which blocks
+while
 `ring_count > 0` — and the ring's only consumer is the worker's own loop. It read the
 "ready" predicate under the mutex, dropped it, then committed, so a GUI push in that window
 made the wait real. The only escape, `worker->stop`, is written by `_stop_worker` *after* it
 calls `_wait_worker_idle` too, so the next GUI-side commit hung the GUI thread on the same
 predicate. The worker now posts the commit to the GUI thread and decides-and-posts under one
-lock acquisition; `_wait_worker_idle` carries a tripwire. Note the cheap fix — making the
+lock acquisition; `dt_drawlayer_worker_wait_idle` carries a tripwire. Note the cheap fix — making the
 wait a no-op on the worker thread — is *wrong*: at that point the ring may hold a new
 stroke's events, and the commit would wipe that stroke's session state.
 
@@ -295,5 +406,10 @@ produced by pointer events on the GUI thread; CLAUDE.md's *OpenCL GUI-thread mat
 hazard* forbids the GUI thread enqueueing work on a device it does not own; the canvas would
 then live on the device and the CPU-side base patch would need syncing for every `process()`,
 export and sidecar write; and the current split already keeps a 384 MB canvas resident in vRAM
-per layer. The CPU rasterizer has a **~26× algorithmic factor and a ~16× parallelism factor**
-still on the table (§4). Spend those first; they cost no new synchronisation and no vRAM.
+per layer. The CPU rasterizer had a **~26× algorithmic factor and a ~16× parallelism factor**
+on the table (§4), and **the algorithmic half has since been spent**: `2875569cc8` composites a
+stroke pixel once per batch instead of 128 times, and `6b16818e79` hoists the per-pixel
+constants the dab and the stroke already fix (both 2026-09-19, i.e. before this document's
+2026-09-29 rewrite, which is why the claim read as open when it was not). The parallelism factor
+is still there. The argument stands either way: spend what is left on the CPU first, because it
+costs no new synchronisation and no vRAM.

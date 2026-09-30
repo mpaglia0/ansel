@@ -2,6 +2,8 @@
 
 [TOC]
 
+> **First checked 2026-09-29.** This file was mechanically checked against `8f4638a04e` on 2026-09-29 — every `file:line` citation resolved, every backticked symbol looked up in the tree, every OPEN/planned status claim tested, and every gate or baseline number it quotes compared with `tools/check_module_boundaries.sh` and `tools/include_baseline.txt`. **No per-claim semantic read was done**: a citation that resolves can still describe the wrong thing, so this is a floor, not a verification. Nothing was found wrong by those checks.
+
 ## What is Sentry, in one paragraph
 
 [Sentry](https://sentry.io) is a hosted *error and crash monitoring* service. An application
@@ -78,7 +80,7 @@ All of this lives in `src/common/sentry.c` / `sentry.h`. The public API is three
 ### Consent (opt-in)
 
 Consent is gathered **once**, by a single dialog shared with usage analytics, implemented in
-`src/common/privacy_consent.c` (`dt_privacy_ask_consent()`). On the **very first launch** with a GUI
+`src/gui/privacy_consent.c` (`dt_privacy_ask_consent()`). On the **very first launch** with a GUI
 it shows one checkbox per built-in data flow ("Send crash reports" and "Share anonymous usage
 statistics") plus a link to the user-facing
 [Data privacy](https://ansel.photos/en/data-privacy/) page, then writes the per-feature toggles.
@@ -352,7 +354,7 @@ independently of this script.
 | `src/external/CMakeLists.txt` | builds the submodule (inproc, static) |
 | `src/CMakeLists.txt` | links `sentry`, defines `HAVE_SENTRY` / `SENTRY_DSN` |
 | `src/common/sentry.c` / `.h` | init/shutdown, context, sessions, `on_crash` gdb attach |
-| `src/common/privacy_consent.c` / `.h` | the shared first-launch consent dialog (crash + analytics) |
+| `src/gui/privacy_consent.c` / `.h` | the shared first-launch consent dialog (crash + analytics) |
 | `src/common/system_signal_handling.c` | local gdb fallback; defers to Sentry when it captured |
 | `src/darktable.c` | calls `dt_sentry_init()` / `dt_sentry_shutdown()` |
 | `data/anselconfig.xml.in` / `.dtd`, `tools/generate_prefs.xsl` | the `sentry/enabled` preference |
@@ -360,3 +362,15 @@ independently of this script.
 | `tools/sentry-fetch-issue.sh` | pull an issue's backtrace + attachments locally to fix it |
 | `.github/workflows/sentry-triage.yml` | manual CI triage: fetch backtrace, artifact, auto-open a GitHub issue |
 | `.github/workflows/{lin,mac,win}-nightly.yml` | call the upload script with the CI secret |
+
+---
+
+## Quick reference (carried from CLAUDE.md)
+
+*Found `22f623c0be`, 2026-06-25. Verified against `42eca0e8fe`, 2026-09-29.*
+
+**Sentry crash issues:** `tools/sentry-fetch-issue.sh <issue-id|url>` pulls a Sentry issue's
+backtrace locally (writes `summary.txt`, `event.json`, attachments). The region host is
+`https://de.sentry.io` (EU data residency) — `sentry.io`/`us.sentry.io` give 403/401.
+Reading issues needs a **User Auth Token** (not the org token used for symbol upload).
+See `doc/sentry.md` for setup details.
