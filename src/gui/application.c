@@ -56,7 +56,7 @@
     Copyright (C) 2023 Luca Zulberti.
     Copyright (C) 2023 Maurizio Paglia.
     Copyright (C) 2025 Alynx Zhou.
-    Copyright (C) 2025 Guillaume Stutin.
+    Copyright (C) 2025-2026 Guillaume Stutin.
     
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -96,6 +96,7 @@
 #include "common/startup_progress.h"
 #include "gui/dtgtk/thumbtable.h"
 #include "gui/splash.h"
+#include "gui/closing.h"
 
 #include "common/conf.h"
 #include "control/control.h"
@@ -272,7 +273,7 @@ void dt_gui_gtk_quit()
 {
   GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
   dt_gui_add_class(win, "dt_gui_quit");
-  gtk_window_set_title(GTK_WINDOW(win), _("closing Ansel..."));
+  gtk_window_set_title(GTK_WINDOW(win), _("Closing Ansel..."));
 
   dt_ui_cleanup_titlebar(darktable.gui->ui);
 
@@ -285,7 +286,7 @@ void dt_gui_gtk_quit()
 
 gboolean dt_gui_quit_callback(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
-  dt_control_quit();
+  dt_gui_closing_quit();
   return TRUE;
 }
 
@@ -307,7 +308,7 @@ static gboolean _osx_quit_callback(GtkosxApplication *OSXapp, gpointer user_data
   for(window = windows; !IS_NULL_PTR(window); window = g_list_next(window))
     if(gtk_window_get_modal(GTK_WINDOW(window->data)) && gtk_widget_get_visible(GTK_WIDGET(window->data)))
       break;
-  if(IS_NULL_PTR(window)) dt_control_quit();
+  if(IS_NULL_PTR(window)) dt_gui_closing_quit();
   g_list_free(windows);
   windows = NULL;
   return TRUE;
@@ -1408,6 +1409,7 @@ int dt_gui_gtk_init(dt_gui_gtk_t *gui)
 
   dt_thumbnail_notify_set_handler(_gui_refresh_thumbnail);
   dt_startup_progress_set_handler(_gui_startup_progress);
+  dt_control_set_shutdown_wait_handler(dt_gui_closing_wait);
   dt_film_gui_register_handlers();
   dt_collection_gui_register_handlers();
   dt_folder_survey_gui_register_handlers();

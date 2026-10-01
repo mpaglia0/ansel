@@ -855,8 +855,47 @@ so every entry numbered the modules alike; only the increment is left there now.
 module's raster mask. `dt_iop_check_modules_equal()` still compares it, legitimately: that is an
 identity test within one session, not a key.
 
+Export paid for it too. `dt_imageio_export_with_flags()` builds a dev of its own, which
+`dt_dev_init()` numbers from 0, while the darkroom's dev numbers from wherever its counter stands:
+0 on the first darkroom entry of a session (its modules come from the `dt_dev_init()` of the view's
+`init()`), further on after every `leave()` / `enter()`. With the id in the key, an export after
+any darkroom entry but the first found none of the darkroom's cachelines and recomputed from
+`basebuffer`.
+
+*Re-measured 2026-09-29 against `1fb2281865`*, with `-d pipe -d perf -d verbose`, OpenCL on, a
+6960x4640 raw: darkroom, export, lighttable, darkroom, export. `lens`'s global hash is
+`2311758751283094755` in the preview, full and export pipes at every step. The first export runs
+nothing up to and including `lens` and starts at `initialscale` (highlight reconstruction, 3.3 s in
+the darkroom, is not rerun); the re-entry runs no module in either pipe; the second export starts
+at `initialscale` again, an export keeping none of its own outputs (see "An export reads the
+cache and keeps nothing of its own" below). What the export does recompute is everything after
+`initialscale`, which the darkroom runs at the display scale (0.16 there) and the export at full
+size: 3.8 s of that run, tone equalizer, a masked color balance rgb and dither the largest.
+With `--disable-opencl`, darkroom, lighttable, darkroom, export: the same hashes, the re-entry runs
+no module, and the export after it again starts at `initialscale`. On the CPU (i7-3770K) that
+remainder is what an export costs: 19.8 s, of which color balance rgb 3.1 s and its masked
+instance 9.0 s, filmic 3.3 s.
+
 Anything else folded into a cache key owes the same test: would two sessions editing the same
 image, with the same history, produce the same value?
+
+### What a module reads from the pipe belongs in its key
+
+*Found `540130f59d`, 2026-09-29.*
+
+The key of a piece covers its parameters, not the pipe state its processing reads. Dither read
+two things there: the precision and channels of the output format, `pipe->levels`, which its
+automatic mode quantizes to, and whether the pipe is an export, which sets its step on the other
+pipes from the display scale. Neither reached the key. Measured on two `ansel-cli` exports of one
+raw, a JPEG and a 16-bit TIFF: the same dither global hash, two different output content hashes
+(`-d pipe -d pipecache -d verbose`). A pipe keeping its outputs would have handed one export the
+other's pixels.
+
+`commit_params()` now copies both into `piece->data`, the processing reads them from there only,
+and `runtime_data_hash()` folds `piece->data` into the key, as colorout already does for the
+export's output profile. Same output content hashes as before, two global hashes. A module that
+reads pipe state while processing owes the same: copy it at commit, read the copy, opt into
+`runtime_data_hash()`.
 
 ### A module memoising its own intermediates keys them on `upstream_hash`, never on `global_hash`
 
@@ -913,6 +952,35 @@ cache allocator, which evicts what each of them needs when it is made.
 Diagnose this class with `-d dev -d perf -d pipecache`: the ``processed `Module' … [pipe]`` lines
 say which modules each pipe actually ran, and a burst of `LRU … removed` lines right after one of
 them names the allocation that emptied the cache.
+
+### ...nor when the tiler would fall back to `process()`
+
+*Found `1fb2281865`, 2026-09-29.*
+
+A tileable module chooses nothing either when `default_process_tiling()` would not tile it: when
+the module's own factor is under 2.2 with a small overhead, tiles save nothing over its input plus
+its output, and both tiling paths fall back to `process()`. That is most pointwise modules. The
+probe is therefore asked only when `dt_tiling_piece_can_save_memory()` is TRUE too, and that
+function and both tiling paths share one test (`_tiling_saves_memory()`, `develop/tiling.c`). It
+reads the module's OWN factor: the probe is handed the factor aggregated with blending, 3.5 for any
+module whose blending is not disabled, colorin included, and blending is never tiled.
+
+Measured on a CPU export of a 6959x4639 raw inside `systemd-run -p MemoryMax=5G` (a 2560 MiB
+cache), with a trace in the probe. Asked for every tileable module, it answered "does not fit" from
+demosaic to colorout, each time after evicting all it could (the cache left at 985 MiB: the
+module's input and output), and every one of those modules but demosaic then fell back to
+`process()`. Asked only where tiling can save memory, it runs once, for demosaic, which tiles as
+before; the run takes the same time (24.3 s against 24.1 s) and the pixels do not move (they
+differ between the two by what two runs of one binary differ by: the dither is random).
+
+Still open: the probe's total, `factor × roi × bpp`, counts the input and output buffers the
+factor includes, and the pipe has already allocated both when it asks. In that run it asked for
+1724 MiB with 1575 MiB free, 985 MiB of the cache being those two buffers; the 740 MiB it lacked
+would have fitted. Discounting them would change which modules tile, so it wants its own
+measurement.
+
+"`with tiling`" on a processed line means `process_tiling()` was called. It can still fall back
+(an allocation failing, too many tiles), and `-d tiling` says when it does.
 
 ### The cache gives memory back on kernel pressure, not only on low available RAM
 
@@ -1056,4 +1124,80 @@ Two things a reviewer would otherwise simplify:
 - **`add_new_pipe_node` is computed from the module's last history entry in every case**, whether
   the top item is rewritten in place, a new item appended or one forced. A toggle it misses reaches
   the pipe as `TOP_CHANGED`, and nothing downstream knows it was a switch.
+
+### An export reads the cache and keeps nothing of its own
+
+*Found `1fb2281865`, 2026-09-29.*
+
+`dt_dev_pixelpipe_init_export()` sets `no_cache`, as the thumbnail pipe does. Every output the
+export computes is then flagged auto-destroy (`_bypass_cache()` in `process_rec()`) and goes once
+the next module has consumed it; the final output goes at `dt_dev_pixelpipe_cleanup()`, after
+`dt_imageio_export_with_flags()` has copied it. Lines other pipes hold are still reused:
+`_bypass_cache()` skips the fast-track lookup, so the recursion walks up to `basebuffer`, and each
+line that exists comes back from `dt_dev_pixelpipe_cache_get_writable()` as an exact hit, never
+flagged (`-d dev` prints `writable-exact-hit` for it). The darkroom's full-resolution lines, up to
+`lens`, are reused that way.
+
+Kept, the export's outputs were gigabytes nothing reads again. Measured on a CPU export of a
+6959x4639 raw after the darkroom, with `-d pipecache -d memory` and a 200 ms sampler of
+`/proc/meminfo`, `/proc/vmstat` and PSI: the cache went from 1.6 to 9.0 GB in 19 s and, right after,
+~550 ms of "full" stall in a second made the pressure reaction shed 5 GB, least recently used
+first: the darkroom's full-resolution lines. The next export recomputed from `basebuffer`, 24.4 s
+against 19.3 s, and pushed MemFree down to ~200 MiB while 11 GB still counted as available: kswapd
+swapped other applications out (up to 17k pages per 0.2 s), the system-wide stall passed the
+threshold again (~210 ms in a window, Ansel's own cgroup not stalled at all), and 4.5 GB more were
+shed. With `no_cache`: the cache is at 2.1 GB when the export ends and back to 1.6 GB after it, RSS
+3.7 GB at most, MemFree never under 905 MiB, no page swapped, 3 ms of stall, nothing shed, and the
+second export hits the darkroom's lines again (19.4 s). Six raws exported by `ansel-cli` on the
+CPU: peak RSS 9.6 GB -> 3.0 GB, cache between images 4.1-6.4 GB -> 0, pressure reactions 2 -> 0,
+same run time (94 s, 90 s), pixels identical to each image exported alone.
+
+What goes: an identical re-export no longer finds its final output.
+
+### An arena allocation is not zeroed: a module must not read what it did not write
+
+*Found `1fb2281865`, 2026-09-29. RCD and `lens` re-measured against `119b6c8cd1`, 2026-09-30.*
+
+`dt_pixelpipe_cache_alloc_align_*()` hands out arena memory. Fresh pages read zero; a recycled
+allocation holds whatever its last user left. A module reading elements it never wrote is
+therefore deterministic only as long as its memory is fresh, and the bug shows up as an image
+that exports differently depending on what ran before it -- more often the more the arena
+recycles: after a pressure shed, or when a pipe drops its outputs as it goes.
+
+RCD (`iop/demosaic/rcd.c`) did: full tiles read elements of the per-thread `rgb` scratch that no
+tile writes, and only partial tiles cleared it. Found on a batch export: an image differed from
+its isolated export (mean 0.36 on 8 bits, in patches); comparing each module's output across the
+two runs (`-d pipecache -d verbose`, `[pixelpipe_stats] ... content_hash`), demosaic was the first
+to differ, from the same input. Poisoning each scratch buffer at allocation, only `rgb` moved the
+output (9.6 M pixels), besides `VH_Dir`, whose clearing the poison overwrote. Zeroing `rgb` once at
+allocation, as `VH_Dir` already was, made the images of a six-raw `ansel-cli` batch whose demosaic
+ran untiled identical to each one exported alone -- reproducible, not right: the zeroes still
+reached the output. RCD's tiles kept one row and column too many; with a 10-pixel border, nothing
+the scratch holds reaches the output any more, on the CPU and in OpenCL, whose kernels had the same
+fault at the image edges. See [RCD's own tiles need a 10-pixel border](raw-roi-cfa.md#rcds-own-tiles-need-a-10-pixel-border-the-image-edge-included).
+
+*Found wrong 2026-09-30:* this section called "demosaic run in tiles does not give the pixels it
+gives untiled" still open *and separate*. In the same batch, a pressure shed had lowered the
+budget and the last three images ran demosaic tiled (`-d tiling`: no fallback); those three
+differed from their isolated exports (mean 0.33-0.49 on 8 bits), the three untiled ones did not. It
+is the same defect: the zeroes sat on RCD's tile seams, and pipe tiling moves the seams. With the
+border fixed, tiled and untiled differ by float rounding upstream of `dither`; the 8-bit output
+still differs by one level on many pixels, because Floyd-Steinberg diffusion carries any
+difference along the rows.
+
+`lens` wrote the fourth channel of its output only when a mask is displayed. Elsewhere it was
+whatever the arena slot last held: two isolated exports of the same raw published different `lens`
+outputs (alpha -0.031..0.999 in one, -0.020..0.9997 in the other), and poisoning RCD's scratch put
+±5.7e7 in `lens`'s alpha through the recycled slot. `colorin` rewrites alpha, which is why nothing
+after it differed. `lens` now always writes the whole pixel, alpha 0 outside mask display; the same
+two poisons leave its output bit-identical. RCD's image border had the same fault: the outer three
+pixels' alpha was never written on the CPU (`rcd_ppg_border()`), and in OpenCL
+`border_interpolate` wrote an uninitialised `w`.
+
+To look for others: poison with a large FINITE value. NaN is absorbed by `fmaxf()` and by
+comparisons, and `-d nan` fills only the output buffer and checks only its RGB channels. In OpenCL,
+fill each buffer after allocation from a host buffer holding the poison
+(`dt_opencl_write_buffer_to_device()`). To read an OpenCL module's output, its host copy has to be
+forced for the measurement: the export pipe is `no_cache`, so `/plugins/<op>/cache` does not apply
+there (`cache_ram_output` in `pixelpipe_hb.c` requires the cache not to be bypassed).
 
