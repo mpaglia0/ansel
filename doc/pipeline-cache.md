@@ -788,10 +788,24 @@ lock), read-locks while copying, and releases exactly that reference.
 Referencing the entry after the peek does not close the window: the eviction can still land before
 the reference, which then counts up freed memory. The backbuffer's keepalive is the case that costs
 most: taken that way, it is released by pointer at the next publication. So the pipeline publishes
-the backbuffer from `ref_host_entry_by_hash()` and drops that reference once the keepalive is taken.
+the backbuffer from a retained lookup and drops that reference once the keepalive is taken: the exact
+hit before a run from `ref_host_entry_by_hash()`, the output after it from `ref_entry_by_hash()`
+followed by `dt_dev_pixelpipe_cache_restore_host_payload(entry, pipe->devid, NULL)`.
 `dt_dev_pixelpipe_cache_get_entry()` is a peek too: it serves the producer-to-consumer handoff inside
 one run, where the reference is already held, and nothing else. For the same reason,
 `dt_dev_pixelpipe_cache_get_writable()` hands its exact hit back already referenced.
+
+*Wrong claim, found 2026-10-05 against `281fc20a37`:* that commit published the output after the run
+from `ref_host_entry_by_hash()` too, on the premise that "after the run the final output always keeps
+a host copy". It does not on an export pipe: `dt_imageio_export_with_flags()` drives the pipe without
+`_seal_opencl_cache_policy()`, `dt_iop_commit_params()` leaves the last node at
+`cache_output_on_ram = 0`, and `gamma` is disabled outside the GUI pipes, so an OpenCL export ends on
+a vRAM-only cacheline. The peek it replaced, called with the still-reserved `pipe->devid`, had been
+downloading it; the host-only lookup refused it, the backbuffer was never published, and the export
+failed with only `[dt_imageio_export_with_flags] no valid output buffer` under `-d imageio`.
+Measured by bisect: OpenCL export fails at `281fc20a37`, succeeds at its parent; CPU export succeeds
+at both. The exact hit before the run is unaffected: `pipe->devid` is -1 there, so the peek never
+materialized a device-only entry either.
 
 A release nobody took is a use-after-free with a delay. It leaves the count below the number of real
 holders; the LRU (`refcount > 0` is its only guard) frees a held entry; and since every long-lived
@@ -1193,6 +1207,19 @@ after it differed. `lens` now always writes the whole pixel, alpha 0 outside mas
 two poisons leave its output bit-identical. RCD's image border had the same fault: the outer three
 pixels' alpha was never written on the CPU (`rcd_ppg_border()`), and in OpenCL
 `border_interpolate` wrote an uninitialised `w`.
+
+*Found on top of `4306d5f952`, 2026-10-01.* In OpenCL, the three `lens_distort_*` kernels sample
+alpha along with green and used to write it out whether or not a mask was displayed: their alpha
+was the input's, resampled, where the CPU writes 0. Not a read of unwritten memory, but a GPU output
+that is not the CPU's. On a NIKON Z 6 raw (6064x4040 out), `lens`'s input alpha is 0 everywhere, so
+nothing showed. Overwriting the input's alpha with ±5.7e7 just before the kernel (read back with
+`dt_opencl_copy_device_to_host()` in `process_cl()`, written with
+`dt_opencl_write_host_to_device()`) put nonzero alpha on 23.9 M (bilinear) and all 24.5 M
+(bicubic, mitchell) of the 24.5 M output pixels. The kernels now take the mask-display flag and
+write 0 outside it: with the same poison their output is bit-identical to the unpoisoned one, and
+with the flag forced on it is bit-identical to the old kernels', poisoned or not. The exported
+image is the same in every case, `colorin` rewriting alpha. Where nothing moves (the copy and
+`lens_vignette`), `lens` carries its input's alpha, on the CPU and in OpenCL alike.
 
 To look for others: poison with a large FINITE value. NaN is absorbed by `fmaxf()` and by
 comparisons, and `-d nan` fills only the output buffer and checks only its RGB channels. In OpenCL,

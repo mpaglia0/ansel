@@ -754,8 +754,60 @@ void _export_final_buffer_to_uint16(const float *const restrict inbuf, uint16_t 
       outbuf[4 * k + c] = (uint16_t)CLAMP(roundf(inbuf[4 * k + c] * 65535.f), 0.f, 65535.f);
 }
 
+/**
+ * @brief Convert the pipeline's float RGBA output into @p outbuf, at the depth the format writes:
+ * 8 bits (in display byte order if asked), 16 bits, or float for any other depth.
+ *
+ * A thumbnail export stores this buffer straight into the mipmap cache, and the thumbnail
+ * pipeline does not maintain a meaningful alpha contract across all modules: random zero/garbage
+ * alpha values would make valid RGB thumbnails render black in consumers that composite the
+ * mipmap buffer. So a thumbnail's alpha is forced opaque here, and its RGB left untouched.
+ */
+static void _export_convert_output(const float *const data, void *const outbuf, const int bpp,
+                                   const size_t width, const size_t height,
+                                   const gboolean display_byteorder, const gboolean thumbnail_export)
+{
+  const size_t pixels = width * height * 4;
+  if(bpp == 8)
+  {
+    if(display_byteorder)
+      _swap_byteorder_float_to_uint8(data, outbuf, width, height);
+    else
+      _clamp_float_to_uint8(data, outbuf, width, height);
+
+    if(thumbnail_export)
+    {
+      uint8_t *thumbnail_buf = outbuf;
+      __OMP_PARALLEL_FOR__()
+      for(size_t k = 0; k < pixels / 4; k++) thumbnail_buf[4 * k + 3] = UINT8_MAX;
+    }
+  }
+  else if(bpp == 16)
+  {
+    _export_final_buffer_to_uint16(data, outbuf, width, height);
+
+    if(thumbnail_export)
+    {
+      uint16_t *thumbnail_buf = outbuf;
+      __OMP_PARALLEL_FOR__()
+      for(size_t k = 0; k < pixels / 4; k++) thumbnail_buf[4 * k + 3] = UINT16_MAX;
+    }
+  }
+  else // output float, no further harm done to the pixels :)
+  {
+    memcpy(outbuf, data, sizeof(float_t) * pixels);
+
+    if(thumbnail_export)
+    {
+      float *thumbnail_buf = outbuf;
+      __OMP_PARALLEL_FOR__()
+      for(size_t k = 0; k < pixels / 4; k++) thumbnail_buf[4 * k + 3] = 1.0f;
+    }
+  }
+}
+
 // internal function: to avoid exif blob reading + 8-bit byteorder flag + high-quality override
-int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
+dt_imageio_retval_t dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
                                  dt_imageio_module_format_t *format, dt_imageio_module_data_t *format_params,
                                  const gboolean ignore_exif, const gboolean display_byteorder,
                                  const gboolean high_quality, const double scale_factor, const gboolean thumbnail_export,
@@ -770,6 +822,8 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
 
   dt_mipmap_buffer_t buf;
   void *outbuf = NULL;
+  // set at every `goto error`, so the caller learns which step failed
+  dt_imageio_retval_t status = DT_IMAGEIO_OK;
 
   // Get the history, aka sequence of editing changes
   dt_develop_t dev;
@@ -781,21 +835,26 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   const gboolean use_style = !thumbnail_export && format_params->style[0] != '\0';
   //  If a style is to be applied during export, add the iop params into the history
   if(use_style && _apply_style_before_export(&dev, format_params, imgid))
+  {
+    status = DT_IMAGEIO_PROCESSING_FAILED;
     goto error;
+  }
 
   int width = MAX(format_params->max_width, 0);
   int height = MAX(format_params->max_height, 0);
   double scale = 1.;
 
   // Get a pipeline, aka sequence of nodes
-  int res = 0;
   dt_dev_pixelpipe_t pipe;
-  if(thumbnail_export)
-    res = dt_dev_pixelpipe_init_thumbnail(&pipe, &dev);
-  else
-    res = dt_dev_pixelpipe_init_export(&pipe, &dev, format->levels(format_params), export_masks);
+  int res = thumbnail_export
+                ? dt_dev_pixelpipe_init_thumbnail(&pipe, &dev)
+                : dt_dev_pixelpipe_init_export(&pipe, &dev, format->levels(format_params), export_masks);
 
-  if(!res) goto error;
+  if(!res)
+  {
+    status = DT_IMAGEIO_PROCESSING_FAILED;
+    goto error;
+  }
 
   pipe.shutdown_ext = shutdown;
 
@@ -814,6 +873,8 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
 
   if(IS_NULL_PTR(buf.buf) || buf.width == 0 || buf.height == 0)
   {
+    // the loader's own reason (unsupported camera, corrupted file...)
+    status = buf.status;
     dt_mipmap_cache_release(&buf);
     goto error;
   }
@@ -865,6 +926,7 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   dt_iop_roi_t roi = (dt_iop_roi_t){ 0, 0, processed_width, processed_height, scale };
 
   dt_get_times(&start);
+  const uint32_t alloc_refusals = dt_pixelpipe_cache_get_alloc_refusals();
   int err = dt_dev_pixelpipe_process(&pipe, roi);
   dt_show_times(&start, thumbnail_export ? "[dev_process_thumbnail] pixel pipeline processing thread"
                                          : "[dev_process_export] pixel pipeline processing thread");
@@ -872,6 +934,16 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   if(dt_dev_backbuf_get_hash(&pipe.backbuf) == -1 || err)
   {
     dt_print(DT_DEBUG_IMAGEIO, "[dt_imageio_export_with_flags] no valid output buffer\n");
+    /* The pipe returns the same error for a kill-switch stop, a module that failed, and a buffer
+     * the pixelpipe cache refused it. The stop is the pipe's own state. The cache counts what it
+     * refuses to each thread, and the pipe ran on this one. Anything else stays a processing
+     * failure, including memory the modules allocate outside the cache. */
+    if(dt_dev_pixelpipe_has_shutdown(&pipe))
+      status = DT_IMAGEIO_ABORTED;
+    else if(dt_pixelpipe_cache_get_alloc_refusals() != alloc_refusals)
+      status = DT_IMAGEIO_CACHE_FULL;
+    else
+      status = DT_IMAGEIO_PROCESSING_FAILED;
     goto error;
   }
 
@@ -890,10 +962,11 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
    * window by holding cache->lock across both the lookup and the increment. */
   if(!dt_dev_pixelpipe_cache_ref_entry_by_hash(dt_dev_backbuf_get_hash(&pipe.backbuf),
                                                &data, &cache_entry)
-     || !data)
+     || IS_NULL_PTR(data))
   {
-    if(cache_entry)
+    if(!IS_NULL_PTR(cache_entry))
       dt_dev_pixelpipe_cache_ref_count_entry(FALSE, cache_entry);
+    status = DT_IMAGEIO_PROCESSING_FAILED;
     goto error;
   }
 
@@ -901,66 +974,27 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
    * while the OpenMP threads are reading it. */
   dt_dev_pixelpipe_cache_rdlock_entry(TRUE, cache_entry);
 
-  // Down-conversion to low-precision formats:
-  const size_t pixels = pipe.backbuf.width * pipe.backbuf.height * 4;
+  // Down-conversion to low-precision formats: 8 and 16 bits, any other depth stays float
+  size_t channel_size = sizeof(float_t);
   if(bpp == 8)
-  {
-    outbuf = dt_pixelpipe_cache_alloc_align_cache(
-        sizeof(uint8_t) * pixels,
-        0);
-    if(outbuf && display_byteorder)
-      _swap_byteorder_float_to_uint8(data, outbuf, pipe.backbuf.width, pipe.backbuf.height);
-    else if(outbuf)
-      _clamp_float_to_uint8(data, outbuf, pipe.backbuf.width, pipe.backbuf.height);
-
-    /* Thumbnail export stores the in-memory RGBA buffer straight into the mipmap cache.
-     * The thumbnail pipeline does not maintain a meaningful alpha contract across all
-     * modules, so random zero/garbage alpha values would make valid RGB thumbnails render
-     * black in consumers that composite the mipmap buffer. Keep thumbnail alpha opaque at
-     * the export boundary and leave RGB untouched. */
-    if(outbuf && thumbnail_export)
-    {
-      uint8_t *thumbnail_buf = (uint8_t *)outbuf;
-      __OMP_PARALLEL_FOR__()
-      for(size_t k = 0; k < pixels / 4; k++) thumbnail_buf[4 * k + 3] = UINT8_MAX;
-    }
-  }
+    channel_size = sizeof(uint8_t);
   else if(bpp == 16)
-  {
-    outbuf = dt_pixelpipe_cache_alloc_align_cache(
-        sizeof(uint16_t) * pixels,
-        0);
-    if(outbuf)
-      _export_final_buffer_to_uint16(data, outbuf, pipe.backbuf.width, pipe.backbuf.height);
+    channel_size = sizeof(uint16_t);
 
-    if(outbuf && thumbnail_export)
-    {
-      uint16_t *thumbnail_buf = (uint16_t *)outbuf;
-      __OMP_PARALLEL_FOR__()
-      for(size_t k = 0; k < pixels / 4; k++) thumbnail_buf[4 * k + 3] = UINT16_MAX;
-    }
-  }
-  else // output float, no further harm done to the pixels :)
-  {
-    outbuf = dt_pixelpipe_cache_alloc_align_cache(
-        sizeof(float_t) * pixels,
-        0);
-    if(outbuf)
-      memcpy(outbuf, data, sizeof(float_t) * pixels);
-
-    if(outbuf && thumbnail_export)
-    {
-      float *thumbnail_buf = (float *)outbuf;
-      __OMP_PARALLEL_FOR__()
-      for(size_t k = 0; k < pixels / 4; k++) thumbnail_buf[4 * k + 3] = 1.0f;
-    }
-  }
+  outbuf = dt_pixelpipe_cache_alloc_align_cache(channel_size * pipe.backbuf.width * pipe.backbuf.height * 4, 0);
+  if(!IS_NULL_PTR(outbuf))
+    _export_convert_output(data, outbuf, bpp, pipe.backbuf.width, pipe.backbuf.height, display_byteorder,
+                           thumbnail_export);
 
   // Decrease ref count on the cache entry and release the read lock
   dt_dev_pixelpipe_cache_ref_count_entry(FALSE, cache_entry);
   dt_dev_pixelpipe_cache_rdlock_entry(FALSE, cache_entry);
 
-  if(IS_NULL_PTR(outbuf)) goto error;
+  if(IS_NULL_PTR(outbuf))
+  {
+    status = DT_IMAGEIO_CACHE_FULL;
+    goto error;
+  }
 
   format_params->width = pipe.backbuf.width;
   format_params->height = pipe.backbuf.height;
@@ -987,7 +1021,11 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
                             num, total, &pipe, export_masks);
 
   dt_free(exif_profile);
-  if(res) goto error;
+  if(res)
+  {
+    status = DT_IMAGEIO_IOERROR;
+    goto error;
+  }
 
   dt_dev_pixelpipe_cleanup(&pipe);
   dt_dev_cleanup(&dev);
@@ -1004,13 +1042,13 @@ int dt_imageio_export_with_flags(const int32_t imgid, const char *filename,
   }
 
   dt_pixelpipe_cache_free_align(outbuf);
-  return 0; // success
+  return DT_IMAGEIO_OK;
 
 error:
   dt_pixelpipe_cache_free_align(outbuf);
   dt_dev_pixelpipe_cleanup(&pipe);
   dt_dev_cleanup(&dev);
-  return 1;
+  return status;
 }
 
 
