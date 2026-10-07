@@ -690,7 +690,60 @@ The defense has five layers, from planning to last resort:
    us), and an over-credit would wave the allocation through on a system that is still just as
    full. If even shedding everything cannot keep
    HALF the floor, the allocation is refused: the pipeline fails with a clear message, which
-   beats a silent SIGKILL. A 5-second GUI timer (`_memory_pressure_shedder()`) covers the case
+   beats a silent SIGKILL. The message goes through the cache's *alert* handler, not its warn
+   handler: the GUI installs it (`dt_dev_pixelpipe_cache_set_alert_handler()`, from
+   `dt_gui_gtk_init()`) and shows it with `dt_gui_alert()` (`gui/alert.c`), a window kept above Ansel's
+   main window until its OK button is clicked, because what it says -- the module failed, the image was
+   not updated -- stays true long after a toast is gone. Without a GUI it falls back to the warn
+   handler. It is rate-limited to one every 10 s for one module on one image (`pressure_alerts`,
+   keyed by both). Until 2026-10-06 the limit was one every 10 s for all of them, and two raws whose
+   thumbnails were refused at startup got one line in the window: the first refusal silenced the
+   second -- found from the code after the user saw one line for two thumbnails out of RAM; the
+   stdout log has no timestamps to show the gap. The size refused, the module that asked for it,
+   that module's image (its file name between backticks -- it can hold spaces -- and its image id,
+   as text `pixelpipe_hb.c` writes and hands over with
+   `dt_pixelpipe_cache_set_current_image()` beside the module's name: the cache prints it, and knows
+   nothing of images) and the RAM left above the floor -- what the valve compared the
+   size with -- are its item, listed under the message, which stays the same at every refusal.
+   `dev_pixelpipe.c` names both around `modify_roi_in()` too, before any module processes: lens
+   allocates its edge buffer there, and on 2026-10-06 a refusal of it (1795728 bytes, with the floor
+   forced to 3000 MiB) listed "1 MiB: only 0 MiB available", with neither module nor image. Lens
+   does not fail on it: it plans its input without the margin. The sizes have two decimals since
+   then: in whole MiB those 1.71 MiB read "1 MiB", which the valve lets through. In
+   `dt_dev_pixelpipe_process_rec()` the naming starts before `dt_dev_pixelpipe_cache_get_writable()`,
+   not at `process()`: that call allocates the module's output when it stays in RAM, as the
+   darkroom's preview does, and opening an image the same day listed "46,69 MiB: only 0,00 MiB
+   available" first -- rawdenoiseai's preview output, refused there -- then the same size named,
+   refused again in `pixelpipe_cpu.c`. The
+   cache's other
+   user-facing message, "The pipeline cache is full…" (the cache's own cap, `_free_space_to_alloc()`
+   and `_log_arena_allocation_failure()`), takes the same path, under the same "Not enough
+   memory" title but in a window of its own -- `dt_gui_alert()` opens one per title and message, and
+   what was being allocated (the cacheline's name, its module) is the item, not part of the text.
+   (Until 2026-10-06 the window was one per title and both messages carried their values, so every
+   size and every module added a paragraph; changed on top of `8073021c02`.)
+   `_log_arena_allocation_failure()` raises it only when the arena itself refused, not the valve
+   (`_arena_alloc_with_defrag()` says which). Until 2026-10-06 a valve refusal raised it too, so one
+   refusal opened two windows and the second was false. Measured on `8073021c02` by exporting the
+   24 Mpx X-H1 raw of the image test bank with the installed `ansel-cli --conf
+   memory_pressure_floor=1250`: lens was refused 370 MiB with 1495 MiB available, while the log
+   read `cache=741/4461 MiB` -- 370 of those 741 being lens's own entry, counted before its buffer
+   exists -- and nothing was evictable (`couldn't remove LRU, 2 items and all are used`: lens's
+   input and lens's own entry). Lens is where that export peaks: the pipe stays at full resolution
+   until `initialscale`, right after lens, so lens holds demosaic's 370 MiB output while asking for
+   370 more. The pre-commit image test met the same refusal for real that day, with 445 MiB
+   available. It is raised only when
+   the allocation is actually
+   refused, and then followed by what happens next (`_alert_cache_refused()`): the module fails,
+   the pipe stops without publishing, nothing retries in tiles (whether to tile was decided before
+   `process()` ran, in `pixelpipe_cpu.c`), and the darkroom keeps its last complete rendering until
+   the next change runs the pipe again (`develop.c`). Read from the code on 2026-10-03, not
+   measured. `_free_space_to_alloc()` also reaches its message when nothing is left to evict
+   because the memory is held by working buffers, not cachelines: `error` stays 0 and the
+   allocation goes ahead past the budget. That case stays a toast. Neither is rate-limited, as
+   the toast was not. Written 2026-10-03 on
+   top of `65e7a3adea`; the failure it describes was measured on that base with AI denoise on CPU
+   (a 1182 MiB tile refused with 1255 MiB available, the preview left as it was). A 5-second GUI timer (`_memory_pressure_shedder()`) covers the case
    where *another* application creates the pressure while we sit idle and never allocate.
 
    Two traps live in this valve. The probe costs ~61 µs (16 µs `/proc/meminfo` + 45 µs walking

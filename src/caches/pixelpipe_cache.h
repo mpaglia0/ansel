@@ -189,6 +189,19 @@ typedef struct dt_pixel_cache_entry_t
 const char *dt_pixelpipe_cache_set_current_module(const char *module);
 
 /**
+ * @brief Set the image the current module runs on, for the message that reports a refused
+ * allocation (thread-local).
+ *
+ * @details
+ * The image comes as text its caller wrote, as the module comes as its name: the cache prints it,
+ * and knows nothing of images. The pointer is kept, not copied.
+ *
+ * @param image The image as it should read, which must outlive the setting, or NULL to clear.
+ * @return const char* Previous image.
+ */
+const char *dt_pixelpipe_cache_set_current_image(const char *image);
+
+/**
  * @brief Count the allocations the cache refused to the calling thread for lack of memory
  * (thread-local).
  *
@@ -866,8 +879,9 @@ int dt_dev_pixelpipe_cache_rekey(const uint64_t old_hash,
 
 /* --- Telling the rest of the application things ---------------------------
  *
- * The cache has three reasons to speak upward: warn the user that it is full, announce that a
- * cacheline became ready so a waiter can stop waiting, and feed the supervisor its bookkeeping.
+ * The cache has three reasons to speak upward: alert the user that an allocation could not be
+ * served (the cache is full, or the system itself runs out of memory), announce that a cacheline
+ * became ready so a waiter can stop waiting, and feed the supervisor its bookkeeping.
  * Every one of those used to be a direct call -- dt_control_log(), a raised
  * DT_SIGNAL_CACHELINE_READY, dt_supervisor_*() -- which put control/ and develop/ headers in a
  * module that is otherwise pure storage, and made the cache depend on the application rather
@@ -878,9 +892,21 @@ int dt_dev_pixelpipe_cache_rekey(const uint64_t old_hash,
  * dt_colorspaces_set_profile_changed_handler().
  */
 
-/** @brief Tell the user something went wrong. Called with an already-translated,
+/** @brief Tell the user something went wrong, when no alert handler is installed (see
+ * dt_dev_pixelpipe_cache_set_alert_handler()). Called with an already-translated,
  * already-formatted string; the cache does not know what a toast is. */
 typedef void (*dt_pixelpipe_cache_warn_handler_t)(const char *message);
+
+/** @brief Tell the user something that must not go unseen: what it says stays true after a toast
+ * would have gone. Same contract as dt_control_alert(): @p message is the kind of failure, the
+ * same text at every call; what was refused -- its size, its module -- is @p item, one line,
+ * already translated and formatted, NULL when unknown. */
+typedef void (*dt_pixelpipe_cache_alert_handler_t)(const char *message, const char *item);
+
+/** @brief Install the alert handler. The GUI installs it, once it exists, apart from the others:
+ * without a GUI there is nothing to alert with, and an alert then goes to the warn handler.
+ * @param alert may be NULL, which restores that fallback. */
+void dt_dev_pixelpipe_cache_set_alert_handler(dt_pixelpipe_cache_alert_handler_t alert);
 
 /** @brief A cacheline finished and is readable. @param hash its content hash,
  * @param producer_node_key which node published it. Waiters key on both. */

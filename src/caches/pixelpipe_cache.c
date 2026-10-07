@@ -35,7 +35,6 @@
 */
 
 #include <inttypes.h>
-#include <stdarg.h>
 #include <glib.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -84,6 +83,10 @@ typedef struct dt_dev_pixelpipe_cache_t
   gint64 sys_probe_time_us;
   size_t sys_available_est;
   gboolean sys_probe_valid;
+  // When the pressure valve last told the user of a refusal, per module and image, keyed by both as
+  // text: `gint64 *` monotonic times, guarded by `lock`. Entries older than the alert period go at
+  // the next refusal.
+  GHashTable *pressure_alerts;
   /* Kernel memory pressure: how much the cache may hold while the machine stalls, and what
    * decides it -- caches/pixelpipe_cache_pressure.c, which this file feeds through _pressure_sink()
    * and which never touches an entry itself. Guarded by `lock`, like the fields above. */
@@ -106,6 +109,7 @@ gboolean dt_dev_pixelpipe_cache_is_ready(void)
 /* Installed by the orchestrator; see dt_dev_pixelpipe_cache_set_handlers(). NULL means
  * nobody is listening, which is a working configuration, not an error. */
 static dt_pixelpipe_cache_warn_handler_t _warn_handler = NULL;
+static dt_pixelpipe_cache_alert_handler_t _alert_handler = NULL;
 static dt_pixelpipe_cache_ready_handler_t _ready_handler = NULL;
 static const dt_pixelpipe_cache_observer_t *_observer = NULL;
 
@@ -118,18 +122,79 @@ void dt_dev_pixelpipe_cache_set_handlers(dt_pixelpipe_cache_warn_handler_t warn,
   _observer = observer;
 }
 
-/* printf-style, so the call sites keep reading as they did; the formatting happens here and
- * the handler receives a finished string. */
-static void _warn_user(const char *format, ...) __attribute__((format(printf, 1, 2)));
-static void _warn_user(const char *format, ...)
+void dt_dev_pixelpipe_cache_set_alert_handler(dt_pixelpipe_cache_alert_handler_t alert)
 {
-  if(!_warn_handler) return;
-  va_list ap;
-  va_start(ap, format);
-  char *message = g_strdup_vprintf(format, ap);
-  va_end(ap);
-  if(message) _warn_handler(message);
-  g_free(message);
+  _alert_handler = alert;
+}
+
+/* For an allocation the cache refused: the module that asked fails, and its pipe publishes
+ * nothing. That stays true long after a toast is gone, so it goes to the alert handler, and to the
+ * warn handler only when no GUI installed one, with the item on the line under the message. */
+static void _alert_user(const char *message, const char *item)
+{
+  if(!IS_NULL_PTR(_alert_handler))
+    _alert_handler(message, item);
+  else if(!IS_NULL_PTR(_warn_handler))
+  {
+    gchar *text = IS_NULL_PTR(item) ? g_strdup(message) : g_strdup_printf("%s\n%s", message, item);
+    _warn_handler(text);
+    dt_free(text);
+  }
+}
+
+/* For what is fine to miss: the cache went over its budget, but the allocation went ahead. */
+static void _warn_user(const char *message)
+{
+  if(!IS_NULL_PTR(_warn_handler) && !IS_NULL_PTR(message)) _warn_handler(message);
+}
+
+/* "The pipeline cache is full while allocating ...", in the four shapes the catalogs already
+ * translate, depending on what is known of the request. Freed by the caller. */
+static gchar *_cache_full_sentence(const char *name, const char *module)
+{
+  if(!IS_NULL_PTR(name) && !IS_NULL_PTR(module))
+    return g_strdup_printf(_("The pipeline cache is full while allocating\n"
+                             "`%s` (module `%s`).\n"
+                             "Either your RAM settings are too frugal or your RAM is too small."),
+                           name, module);
+  if(!IS_NULL_PTR(name))
+    return g_strdup_printf(_("The pipeline cache is full while allocating\n"
+                             "`%s`.\n"
+                             "Either your RAM settings are too frugal or your RAM is too small."),
+                           name);
+  if(!IS_NULL_PTR(module))
+    return g_strdup_printf(_("The pipeline cache is full while processing module\n"
+                             "`%s`.\n"
+                             "Either your RAM settings are too frugal or your RAM is too small."),
+                           module);
+  return g_strdup(_("The pipeline cache is full.\n"
+                    "Either your RAM settings are too frugal or your RAM is too small."));
+}
+
+/* The cache refused an allocation: say what it was, then what follows from it. The buffer is a
+ * module's output or one of its working buffers, so the module fails and the pipe stops without
+ * publishing. Nothing retries in smaller tiles: whether to tile was decided before the module
+ * ran (pixelpipe_cpu.c), from the memory that looked free then. The darkroom keeps showing its
+ * last complete rendering, and only the next change runs the pipe again (develop.c). */
+static void _alert_cache_refused(const char *name, const char *module)
+{
+  // What was being allocated -- the cacheline's name, the module that asked, or both -- is the item:
+  // the message stays the same whatever was refused, so a run of refusals shares one window.
+  gchar *item = NULL;
+  if(!IS_NULL_PTR(name) && !IS_NULL_PTR(module))
+    item = g_strdup_printf(_("`%s` (module `%s`)"), name, module);
+  else if(!IS_NULL_PTR(module))
+    item = g_strdup_printf(_("module `%s`"), module);
+  else
+    item = g_strdup(name);
+  gchar *message = g_strdup_printf("%s\n%s",
+                                   _("The pipeline cache is full.\n"
+                                     "Either your RAM settings are too frugal or your RAM is too small."),
+                                   _("The module fails and the image is not updated: what is shown stays "
+                                     "the last complete rendering, until the next change tries again."));
+  _alert_user(message, item);
+  dt_free(message);
+  dt_free(item);
 }
 
 static inline gboolean _observed(void)
@@ -154,6 +219,9 @@ static inline void _observe_rekey(uint64_t old_hash, uint64_t new_hash)
 
 
 static __thread const char *dt_pixelpipe_cache_current_module = NULL;
+// The image that module runs on, set alongside it, as text its caller wrote: what the user needs to
+// find in a refusal's message. The cache only prints it, and knows nothing of images.
+static __thread const char *dt_pixelpipe_cache_current_image = NULL;
 
 /* Allocations refused to this thread for lack of memory: by _free_space_to_alloc() when the
  * budget is spent and every line is in use, and by _log_arena_allocation_failure() when the
@@ -189,6 +257,13 @@ const char *dt_pixelpipe_cache_set_current_module(const char *module)
 {
   const char *previous = dt_pixelpipe_cache_current_module;
   dt_pixelpipe_cache_current_module = module;
+  return previous;
+}
+
+const char *dt_pixelpipe_cache_set_current_image(const char *image)
+{
+  const char *previous = dt_pixelpipe_cache_current_image;
+  dt_pixelpipe_cache_current_image = image;
   return previous;
 }
 
@@ -1650,6 +1725,14 @@ dt_pixel_cache_entry_t *dt_dev_pixelpipe_cache_ref_entry_for_host_ptr(void *host
  * buffers, not a hole large enough for pipeline tiles. */
 #define DT_PIXELPIPE_CACHE_PRESSURE_EXEMPT_SIZE ((size_t)1024 * 1024)
 
+// The pressure valve tells the user of one module's refusals on one image at most this often.
+#define DT_PIXELPIPE_CACHE_PRESSURE_ALERT_PERIOD_US ((gint64)10 * G_USEC_PER_SEC)
+
+static gboolean _pressure_alert_expired(gpointer key __attribute__((unused)), gpointer value, gpointer user_data)
+{
+  return *(const gint64 *)user_data - *(const gint64 *)value > DT_PIXELPIPE_CACHE_PRESSURE_ALERT_PERIOD_US;
+}
+
 /* System memory-pressure valve (issue #1083).
  *
  * The internal budget (max_memory) is only a plan made at startup: it says nothing
@@ -1679,7 +1762,7 @@ static gboolean _system_memory_pressure_valve(dt_dev_pixelpipe_cache_t *cache, s
 
   dt_pthread_mutex_lock(&cache->lock);
 
-  const gint64 now = g_get_monotonic_time();
+  gint64 now = g_get_monotonic_time();
   const gint64 PROBE_PERIOD_US = 100000; // 100 ms
   if(cache->sys_probe_time_us == 0 || now - cache->sys_probe_time_us > PROBE_PERIOD_US)
   {
@@ -1766,37 +1849,75 @@ static gboolean _system_memory_pressure_valve(dt_dev_pixelpipe_cache_t *cache, s
     // self-corrects at the next probe if the arena allocation fails afterwards.
     cache->sys_available_est
         = (cache->sys_available_est > request_size) ? cache->sys_available_est - request_size : 0;
+    dt_pthread_mutex_unlock(&cache->lock);
+    return TRUE;
+  }
+
+  // Alert the user of one module on one image at most once per alert period: this fires per
+  // failed allocation, on a system that is already drowning. Per module and image, not once for
+  // all: on 2026-10-06 two raws whose thumbnails were both refused got one line in the window, as
+  // the first refusal silenced the second for 10 s. The refused allocation makes the module that
+  // asked for it fail, and a pipe that failed publishes nothing: say so where it cannot be
+  // missed, or the user waits for an image that will not come.
+  const char *module = dt_pixelpipe_cache_current_module;
+  const char *image = dt_pixelpipe_cache_current_image;
+  g_hash_table_foreach_remove(cache->pressure_alerts, _pressure_alert_expired, &now);
+  gchar *who = g_strdup_printf("%s\n%s", module ? module : "", image ? image : "");
+  if(g_hash_table_contains(cache->pressure_alerts, who))
+  {
+    dt_free(who);
   }
   else
   {
-    // Warn the user at most every 10 s: this fires per failed allocation, on a
-    // system that is already drowning.
-    static gint64 last_warning_us = 0;
-    if(now - last_warning_us > 10000000)
-    {
-      last_warning_us = now;
-      _warn_user(_("Your system is running out of memory. "
-                       "Close other applications or add more RAM to your system."));
-    }
-    fprintf(stdout,
-            "[pixelpipe_cache] refusing to allocate %" G_GSIZE_FORMAT " MiB: the system has only "
-            "%" G_GSIZE_FORMAT " MiB of available RAM left (pressure floor: %" G_GSIZE_FORMAT " MiB)\n",
-            request_size / (1024 * 1024), cache->sys_available_est / (1024 * 1024),
-            pressure_floor / (1024 * 1024));
+    gint64 *when = g_new(gint64, 1);
+    *when = now;
+    g_hash_table_insert(cache->pressure_alerts, who, when);
+    // The size, the module that asked for it, its image and the memory left are the item, so that
+    // the message is the same at every refusal. What is left is counted above the floor, as the
+    // valve counts it, so it always reads less than the size; the system's own figure includes
+    // the floor and can read more. Two decimals: in whole MiB, a 1.71 MiB request read "1 MiB",
+    // which the valve lets through. Not G_GSIZE_FORMAT: xgettext does not expand macros, and
+    // would cut the msgid there.
+    const double request_mib = (double)request_size / (1024 * 1024);
+    const double left_mib
+        = (double)(MAX(cache->sys_available_est, pressure_floor) - pressure_floor) / (1024 * 1024);
+    gchar *item = NULL;
+    if(IS_NULL_PTR(module))
+      item = g_strdup_printf(_("%.2f MiB: only %.2f MiB available"), request_mib, left_mib);
+    else if(IS_NULL_PTR(image))
+      item = g_strdup_printf(_("%.2f MiB for module `%s`: only %.2f MiB available"), request_mib, module,
+                             left_mib);
+    else
+      item = g_strdup_printf(_("%.2f MiB for module `%s` on %s: only %.2f MiB available"),
+                             request_mib, module, image, left_mib);
+    _alert_user(_("Your system is running out of memory:\n"
+                  "A module could not get the memory it needs, "
+                  "so it fails and the image is not updated.\n\n"
+                  "Close other applications or add more RAM to your system."),
+                item);
+    dt_free(item);
   }
+  fprintf(stdout,
+          "[pixelpipe_cache] refusing to allocate %" G_GSIZE_FORMAT " MiB: the system has only "
+          "%" G_GSIZE_FORMAT " MiB of available RAM left (pressure floor: %" G_GSIZE_FORMAT " MiB)\n",
+          request_size / (1024 * 1024), cache->sys_available_est / (1024 * 1024),
+          pressure_floor / (1024 * 1024));
 
   dt_pthread_mutex_unlock(&cache->lock);
-  return allowed;
+  return FALSE;
 }
 
 // Attempt to allocate from the arena; if fragmentation prevents it, evict LRU cache lines
 // until a sufficiently large contiguous run is available (or nothing remains to evict).
+// On NULL, `system_refused` says which of the two refused: the system, through the pressure valve,
+// which has already told the user, or the arena.
 static inline void *_arena_alloc_with_defrag(dt_dev_pixelpipe_cache_t *cache, size_t request_size,
-                                             size_t *actual_size)
+                                             size_t *actual_size, gboolean *system_refused)
 {
   // Never grow the committed footprint past what the system can actually take,
   // whatever our internal budget still allows.
-  if(!_system_memory_pressure_valve(cache, request_size)) return NULL;
+  *system_refused = !_system_memory_pressure_valve(cache, request_size);
+  if(*system_refused) return NULL;
 
   void *buf = dt_cache_arena_alloc(&cache->arena, request_size, actual_size);
   if(!IS_NULL_PTR(buf)) return buf;
@@ -1847,7 +1968,7 @@ size_t dt_pixelpipe_cache_get_largest_free_run(void)
 
 static inline void _log_arena_allocation_failure(dt_dev_pixelpipe_cache_t *cache, size_t request_size,
                                                  const char *entry_name, const char *module, uint64_t hash,
-                                                 gboolean name_is_file)
+                                                 gboolean name_is_file, gboolean system_refused)
 {
   dt_pixelpipe_cache_alloc_refusals++;
 
@@ -1870,17 +1991,11 @@ static inline void _log_arena_allocation_failure(dt_dev_pixelpipe_cache_t *cache
             largest_free_bytes / (1024 * 1024), total_free_bytes / (1024 * 1024),
             cache->current_memory / (1024 * 1024), cache->max_memory / (1024 * 1024));
 
-  if(!IS_NULL_PTR(entry_name) && !IS_NULL_PTR(module))
-    _warn_user(_("The pipeline cache is full while allocating `%s` (module `%s`). Either your RAM settings are too frugal or your RAM is too small."),
-                   entry_name, module);
-  else if(!IS_NULL_PTR(entry_name))
-    _warn_user(_("The pipeline cache is full while allocating `%s`. Either your RAM settings are too frugal or your RAM is too small."),
-                   entry_name);
-  else if(!IS_NULL_PTR(module))
-    _warn_user(_("The pipeline cache is full while processing module `%s`. Either your RAM settings are too frugal or your RAM is too small."),
-                   module);
-  else
-    _warn_user(_("The pipeline cache is full. Either your RAM settings are too frugal or your RAM is too small."));
+  // Every caller gets NULL back. When the pressure valve refused, it has already told the user that
+  // the system is running out of memory, and "the pipeline cache is full" on top of it is false: on
+  // 2026-10-06 the valve refused lens 370 MiB with the cache at 741 of 4461 MiB, 370 of them lens's
+  // own unallocated entry. Only a refusal by the arena itself is the cache's own.
+  if(!system_refused) _alert_cache_refused(entry_name, module);
 
   (void)name_is_file; // kept for signature symmetry if future callers need it.
 }
@@ -1955,13 +2070,14 @@ void *dt_pixel_cache_alloc(dt_pixel_cache_entry_t *cache_entry)
   // allocate the data buffer
   if(IS_NULL_PTR(cache_entry->data))
   {
-    cache_entry->data = _arena_alloc_with_defrag(cache, cache_entry->size, &cache_entry->size);
+    gboolean system_refused = FALSE;
+    cache_entry->data = _arena_alloc_with_defrag(cache, cache_entry->size, &cache_entry->size, &system_refused);
 
     if(IS_NULL_PTR(cache_entry->data))
     {
       const char *module = dt_pixelpipe_cache_current_module;
       _log_arena_allocation_failure(cache, cache_entry->size, cache_entry->name, module,
-                                    cache_entry->hash, FALSE);
+                                    cache_entry->hash, FALSE, system_refused);
     }
   }
 
@@ -2073,14 +2189,20 @@ static int _free_space_to_alloc(dt_dev_pixelpipe_cache_t *cache, const size_t si
       fprintf(stdout, "[pixelpipe] cache is full, cannot allocate new entry %" PRIu64 " (%s)\n", hash, name);
     else
       fprintf(stdout, "[pixelpipe] cache is full, cannot allocate new entry (%s)\n", name);
-    if(!IS_NULL_PTR(name) && !IS_NULL_PTR(module) && name_is_file)
-      _warn_user(_("The pipeline cache is full while allocating `%s` (module `%s`). Either your RAM settings are too frugal or your RAM is too small."), name, module);
-    else if(!IS_NULL_PTR(name))
-      _warn_user(_("The pipeline cache is full while allocating `%s`. Either your RAM settings are too frugal or your RAM is too small."), name);
-    else if(!IS_NULL_PTR(module))
-      _warn_user(_("The pipeline cache is full while processing module `%s`. Either your RAM settings are too frugal or your RAM is too small."), module);
+    // The module is named only beside a file-like entry name, as before.
+    if(error)
+    {
+      // Everything left is in use: the caller is refused, and gets NULL.
+      _alert_cache_refused(name, name_is_file ? module : NULL);
+    }
     else
-      _warn_user(_("The pipeline cache is full. Either your RAM settings are too frugal or your RAM is too small."));
+    {
+      // Nothing was left to evict -- the memory is held by working buffers, not cachelines -- so
+      // the allocation goes ahead past the budget, and nothing fails.
+      gchar *what = _cache_full_sentence(name, name_is_file ? module : NULL);
+      _warn_user(what);
+      dt_free(what);
+    }
   }
 
   // Both callers return NULL on an error: the allocation is refused.
@@ -2103,11 +2225,12 @@ void *dt_pixelpipe_cache_alloc_align_cache_impl(size_t size, int id,
 
   // Page size is the desired size + AVX/SSE rounding
   size_t page_size = 0;
-  void *buf = _arena_alloc_with_defrag(cache, size, &page_size);
+  gboolean system_refused = FALSE;
+  void *buf = _arena_alloc_with_defrag(cache, size, &page_size, &system_refused);
 
   if(IS_NULL_PTR(buf))
   {
-    _log_arena_allocation_failure(cache, size, name, NULL, 0, FALSE);
+    _log_arena_allocation_failure(cache, size, name, NULL, 0, FALSE, system_refused);
     return NULL;
   }
 
@@ -2328,12 +2451,14 @@ gboolean dt_dev_pixelpipe_cache_init(size_t max_memory, const gboolean verbose,
   cache->sys_probe_time_us = 0;
   cache->sys_available_est = 0;
   cache->sys_probe_valid = FALSE;
+  cache->pressure_alerts = g_hash_table_new_full(g_str_hash, g_str_equal, dt_free_gpointer, dt_free_gpointer);
   dt_pixelpipe_cache_pressure_monitor_init(&cache->psi, max_memory);
 
-  if(IS_NULL_PTR(cache->entries) || IS_NULL_PTR(cache->external_entries))
+  if(IS_NULL_PTR(cache->entries) || IS_NULL_PTR(cache->external_entries) || IS_NULL_PTR(cache->pressure_alerts))
   {
     if(cache->entries) g_hash_table_destroy(cache->entries);
     if(cache->external_entries) g_hash_table_destroy(cache->external_entries);
+    if(cache->pressure_alerts) g_hash_table_destroy(cache->pressure_alerts);
     dt_pthread_mutex_destroy(&cache->lock);
     dt_free(cache);
     return FALSE;
@@ -2342,6 +2467,7 @@ gboolean dt_dev_pixelpipe_cache_init(size_t max_memory, const gboolean verbose,
   if(dt_cache_arena_init(&cache->arena, cache->max_memory))
   {
     dt_pthread_mutex_destroy(&cache->lock);
+    g_hash_table_destroy(cache->pressure_alerts);
     g_hash_table_destroy(cache->external_entries);
     g_hash_table_destroy(cache->entries);
     dt_free(cache);
@@ -2389,6 +2515,7 @@ void dt_dev_pixelpipe_cache_cleanup(void)
   // instance stays published until the tables are gone.
   g_hash_table_destroy(cache->external_entries);
   g_hash_table_destroy(cache->entries);
+  g_hash_table_destroy(cache->pressure_alerts);
   dt_pthread_mutex_destroy(&cache->lock);
   dt_cache_arena_cleanup(&cache->arena);
 
