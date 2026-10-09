@@ -12,6 +12,80 @@
 > that is recorded rather than quietly corrected: how a claim was wrong is usually the more
 > useful thing to know.
 
+## Where the on-disk thumbnail cache lives, and the one way to ask
+
+> **Established 2026-09-30 against `aac2ee1321`.**
+
+`dt_loc_cachedir()` is the answer, always — or `dt_loc_default_user_cache_dir()`
+(`src/common/file_location.c`) for the two callers that run before `dt_loc_init()` has set the
+global. **Never `g_get_user_cache_dir()` directly**, for three independent reasons:
+
+- **It is the wrong directory on Windows.** GLib returns `FOLDERID_InternetCache` there —
+  `%LOCALAPPDATA%\Microsoft\Windows\INetCache`, the shell folder still labelled "Temporary
+  Internet Files" — a shell-managed container for the browser cache, not a general-purpose
+  per-user cache. Storage Sense empties it whenever it runs, of every file not *written* in the
+  last week or so however recently it was read (measured below), so a thumbnail cache written
+  there — written once, read for months — is deleted behind the user's back, which reads as "the
+  disk cache never works on Windows". It also carries the Hidden and System attributes, so
+  Explorer does not show it even with hidden files shown, and a thumbnail cache or a log written
+  there is invisible to a user who goes looking (#1473). The default is now
+  `%LOCALAPPDATA%\cache\ansel` on Windows and `~/.cache/ansel` elsewhere, with an absolute
+  `XDG_CACHE_HOME` winning on every platform. On Windows it sits
+  *beside* the config folder `%LOCALAPPDATA%\ansel` (`g_get_user_config_dir()` is `%LOCALAPPDATA%`
+  there), not inside it, as `~/.cache/ansel` sits beside `~/.config/ansel`: a cache nested in the
+  config goes with every backup or deletion of `anselrc` and `library.db`. The branch first had
+  `ansel\cache`; it was changed on 2026-10-07, before it shipped, so only test builds wrote there.
+  `%LOCALAPPDATA%` is read from the environment rather than through `g_get_user_data_dir()`, which
+  resolves to the same folder but takes `XDG_DATA_HOME` first — a variable that says where data
+  goes and must not steer a cache.
+
+  *Measured 2026-10-07 against `ea59057346` plus #1493*, on one Windows 11 machine with Storage
+  Sense on (`StoragePolicy` `01=1`, temporary files `04=1`) at its default cadence (`2048=0`,
+  "when disk space is low"), by running it by hand — "Run Storage Sense now", recycle bin and
+  Downloads set to "Never" — over the 118 files an older build had left in `INetCache\ansel`
+  (backed up first):
+
+  - every last-access time set back to 2026-07-01: it deleted the 109 files last written
+    2026-04-30 .. 2026-09-28 and kept the 9 written the day before (the log, two OpenCL kernels,
+    six thumbnails);
+  - the 109 restored with their write and creation times unchanged and their last-access time
+    set to the minute before the run: it deleted the same 109 again and kept the same 9.
+
+  So the criterion is the last write, somewhere between one and nine days old, and a recent read
+  does not protect a file. The attributes were read on the same machine (`INetCache`: Hidden,
+  System), with Explorer showing hidden files but not protected system ones (`Hidden=1`,
+  `ShowSuperHidden=0`). Disk Cleanup was not tried.
+
+  *How this claim went wrong, then right.* The first version of this section said Storage Sense
+  clears the folder "by default", without measuring it. The review of #1493 then called that
+  unestablished, because those same 118 files had sat there for five months, and an earlier
+  commit of the PR took it out. The runs above put it back. The five months were the cadence, not
+  Storage Sense sparing the folder: at "when disk space is low" it had most likely never run on
+  that machine — which also means "by default" overstates how often it happens, not what happens.
+- **It ignores `--cachedir`.** That is how `libs/textnotes.c` came to build a download's path under
+  `g_get_user_cache_dir()/ansel/downloads` while creating the directory under
+  `dt_loc_cachedir()/downloads`: with `--cachedir` given, it made one directory and wrote into
+  another, which did not exist.
+- **It takes `XDG_CACHE_HOME` literally, relative included, and keeps its first answer.**
+  *Established 2026-10-07 against `ea59057346` plus #1493.* `g_build_user_cache_dir()`
+  (`glib/gutils.c`) copies the variable whenever it is non-empty, on every platform, with no
+  `g_path_is_absolute()` test; `g_get_user_cache_dir()` memoises that for the life of the process. Read from the GLib
+  source (main) and measured on Windows with a probe (GLib 2.90, MSYS2 UCRT64): with
+  `XDG_CACHE_HOME=relative-cache` it answers `relative-cache`, and a second call after changing the
+  variable answers the same. So the non-Windows default is built from `g_get_home_dir()` +
+  `.cache`, which is what GLib answers for an unset or empty variable — the only cases left once an
+  absolute one has returned. *The first version of this branch had it wrong:* it kept
+  `g_get_user_cache_dir()/ansel` for Linux and macOS behind an "absolute only" guard, and a
+  relative value walked around the guard and came back through that call as `relative-cache/ansel`.
+  Its test could not see it: the empty-variable case ran first and froze GLib on `~/.cache`.
+
+`tests/unittests/test_loc_cache_dir.c` pins the XDG precedence and that the default is not a
+shell-managed temporary folder. Its relative-variable case runs first, before anything in the
+process can have asked GLib for its cache directory, so a return to `g_get_user_cache_dir()` would
+fail it on Linux. The thumbnail cache path itself is built on top of this by
+`dt_mipmap_cache_get_filename()`, which hashes the library's absolute path into the directory
+name so two libraries do not share thumbnails.
+
 ## Mipmap invalidation is explicit, not hash-driven
 
 *Found `22f623c0be`, 2026-06-25.*
@@ -49,6 +123,54 @@ back on Ctrl+Z. It reports `invalid cache entry size 0 for module basebuffer`, t
 path answers with an 8x8 husk, and no later render replaces it. **Only a developed image shows
 this**: an unaltered one is drawn from the embedded JPEG and never asks for the input at all,
 which is why the symptom reads as "one broken thumbnail" rather than as a cache bug.
+
+## The darkroom copies a frame into the thumbnail only when it carries no overlay
+
+*Found `ea59057346`, 2026-10-07.*
+
+At the end of a darkroom run, `dt_dev_darkroom_pipeline()` (`develop/develop.c`) copies the
+backbuffer into the mipmap cache (`dt_dev_resync_mipmap_cache()`, then
+`dt_mipmap_cache_swap_at_size()`) whenever the run has the preview's output size. Until
+`07aea1a673` (2026-06-19) only the preview pipe did this. Since then the main pipe does it too at
+zoom == fit, where both pipes render the same frame. `8f7c553fb6` (2026-06-21) kept mask previews
+out of that copy, but not the overlays that only the main pipe draws:
+
+- the clipping and raw clipping indicators (`overexposed` and `rawoverexposed` disable themselves
+  on any other pipe);
+- soft proof and gamut check (`colorout` applies the proofing mode to the FULL pipe only).
+
+After an edit at fit, the main pipe finished after the preview pipe and overwrote its clean copy.
+The disk cache then kept the overlay across restarts. A user reported clipping colours in a
+thumbnail.
+
+`requested_overlay` now gates the copy. Like `requested_mask_preview`, it is a snapshot taken
+before the run.
+
+Measured with `-d perf -d cache` on a 5208x3912 raw at fit. A copy prints `will fit a mip size 1`
+followed by `is synchronized from pipeline`. A lone `will fit` comes from `_preview_pipe_finished()`
+(`views/darkroom.c`) answering the finished signal of a run that copied nothing.
+
+- **Before** (`-d cache` alone): two copies per edit, about 50 ms apart (106.91/106.97 s,
+  113.21/113.27 s, 114.49/114.69 s, 124.49/124.54 s).
+- **After, an edit with an overlay on:** the pipes run preview, main, preview. The main run copies
+  nothing and the preview run after it does (23.20/23.28 s, 24.77/24.84 s, 30.61/30.68 s,
+  31.82/31.87 s).
+- **After, toggling the overlay:** the toolbox resyncs the main pipe alone, in 1-34 ms runs. Each
+  switch-off produces a copy (25.93, 34.86, 40.60, 43.71 s) and each switch-on produces none (27.29,
+  39.71, 42.31 s).
+- **After, an edit with no overlay:** both pipes copy, as before (36.76/36.80 s).
+
+The thumbnails stayed clean. Two limits, read from the source:
+
+- The snapshot reads the GUI state when the run starts, while the modules read it when they
+  commit, earlier. An overlay switched off between the two lets one overlay frame through. The
+  resync that the switch-off queues replaces it on the next run.
+- A thumbnail polluted before the fix stays until something rewrites it. Opening its image in the
+  darkroom does: the first run on entry copies a clean frame.
+
+The second size in a `synchronized` line is the entry's size before the downscale. It reads 720x450
+for an entry that was just allocated and the fitted size otherwise, so it does not mean the image
+was stretched.
 
 ## Releasing an image cache entry returns the LOCK, not the image
 
