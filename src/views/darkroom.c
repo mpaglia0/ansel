@@ -1569,6 +1569,36 @@ gboolean _switch_to_prev_picture(GtkAccelGroup *accel_group, GObject *accelerabl
   return TRUE;
 }
 
+static gboolean _zoom_to_fit(GtkAccelGroup *accel_group __attribute__((unused)),
+                             GObject *accelerable __attribute__((unused)),
+                             guint keyval __attribute__((unused)),
+                             GdkModifierType modifier __attribute__((unused)), gpointer data)
+{
+  dt_develop_t *dev = (dt_develop_t *)data;
+  float center[2] = { 0.0f };
+  dt_dev_get_widget_center(dev, center);
+  _change_scaling(dev, center, 1.f);
+  return TRUE;
+}
+
+static gboolean _zoom_to_100(GtkAccelGroup *accel_group __attribute__((unused)),
+                             GObject *accelerable __attribute__((unused)),
+                             guint keyval __attribute__((unused)),
+                             GdkModifierType modifier __attribute__((unused)), gpointer data)
+{
+  dt_develop_t *dev = (dt_develop_t *)data;
+
+  // The viewport scaling is relative to the fit-to-screen scale, so 100% is its inverse. That
+  // scale is the -1 sentinel until an image has been fitted into the view.
+  const float natural_scale = dt_dev_roi_request_natural_scale(dev);
+  if(natural_scale <= 0.f) return TRUE;
+
+  float center[2] = { 0.0f };
+  dt_dev_get_widget_center(dev, center);
+  _change_scaling(dev, center, 1.f / natural_scale);
+  return TRUE;
+}
+
 /**
  * @brief Re-settle every node against the preferences that were just changed.
  *
@@ -1797,6 +1827,13 @@ void gui_init(dt_view_t *self)
   dt_accels_new_virtual_shortcut(dt_gui_get_accels(), dt_gui_get_accels()->darkroom_accels,
                                  path, dt_gui_center_widget(), GDK_KEY_minus, DT_PRIMARY_MASK);
   dt_free(path);
+
+  dt_accels_new_darkroom_action(_zoom_to_fit, dev, NULL, _("Darkroom/Main image"), _("Zoom to fit"),
+                                GDK_KEY_0, DT_PRIMARY_MASK,
+                                _("Zooms the main image to fit the window"));
+  dt_accels_new_darkroom_action(_zoom_to_100, dev, NULL, _("Darkroom/Main image"), _("Zoom to 100%"),
+                                GDK_KEY_1, DT_PRIMARY_MASK,
+                                _("Zooms the main image to 100%"));
   /*
    * Add view specific tool buttons
    */
@@ -3082,16 +3119,18 @@ int button_pressed(dt_view_t *self, double x, double y, double pressure, int whi
   return 0;
 }
 
+/* A zoom step that lands closer to fit (1.0) than its own size lands on fit, so stepping through
+ * fit stops there. Only steps snap: a jump to an absolute level is usually farther from where it
+ * starts than from fit, and would land on fit instead -- 100% from 200%, or from below fit. */
+static float _snap_step_to_fit(const float old_scaling, const float new_scaling)
+{
+  return (fabsf(new_scaling - 1.0f) < fabsf(old_scaling - new_scaling)) ? 1.0f : new_scaling;
+}
+
 static int _change_scaling(dt_develop_t *dev, const float point[2], const float new_scaling)
 {
   const float old_scaling = dt_dev_viewport_scaling(dev);
-
-  // Round scaling to 1.0 (fit) if close enough
-  const float epsilon = fabsf(old_scaling - new_scaling);
-  if(fabsf(new_scaling - 1.0f) < epsilon)
-    dt_dev_viewport_set_scaling(dev, 1.0f);
-  else
-    dt_dev_viewport_set_scaling(dev, new_scaling);
+  dt_dev_viewport_set_scaling(dev, new_scaling);
 
   if(!dt_dev_check_zoom_scale_bounds(dev))
   { 
@@ -3139,7 +3178,8 @@ static gboolean _center_view_free_zoom(dt_view_t *self, double x, double y, int 
 
   // Commit the new scaling
   const float step = 1.02f;
-  const float new_scaling = dt_dev_viewport_scaling(dev) * powf(step, (float)-flow);
+  const float old_scaling = dt_dev_viewport_scaling(dev);
+  const float new_scaling = _snap_step_to_fit(old_scaling, old_scaling * powf(step, (float)-flow));
   const float point[2] = { x, y };
   return _change_scaling(dev, point, new_scaling);
 }
@@ -3224,15 +3264,16 @@ int key_pressed(dt_view_t *self, GdkEventKey *event)
   if(ctrl_any)
   {
     const float zoom_step = 1.1f;
+    const float old_scaling = dt_dev_viewport_scaling(dev);
     float center[2] = { 0.0f };
     dt_dev_get_widget_center(dev, center);
 
     switch(key)
     {
       case GDK_KEY_plus:
-        return _change_scaling(dev, center, dt_dev_viewport_scaling(dev) * zoom_step);
+        return _change_scaling(dev, center, _snap_step_to_fit(old_scaling, old_scaling * zoom_step));
       case GDK_KEY_minus:
-        return _change_scaling(dev, center, dt_dev_viewport_scaling(dev) / zoom_step);
+        return _change_scaling(dev, center, _snap_step_to_fit(old_scaling, old_scaling / zoom_step));
     }
   }
 

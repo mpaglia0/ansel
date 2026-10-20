@@ -82,7 +82,9 @@ the provider and the consumer. The canonical cached mask remains immutable.
 The pipeline keeps references to the raster-mask hashes required by its current graph in
 `dt_dev_pixelpipe_t.raster_mask_hashes`. On a new render it first retains the new set, then releases
 the previous set. This ordering prevents an unchanged mask from becoming briefly evictable between
-provider publication and downstream consumption or export.
+provider publication and downstream consumption or export. The references go with the graph:
+`dt_dev_pixelpipe_cleanup_nodes()` releases them, and the detail mask's (`rawdetail_mask_hash`)
+with them -- see "A pipe's side-band masks go with its nodes" below.
 
 An image cache hit can therefore reuse its associated raster mask without recomputing the provider
 or the modules before it. If the side-band mask was nevertheless evicted while the provider image
@@ -1336,3 +1338,78 @@ fill each buffer after allocation from a host buffer holding the poison
 forced for the measurement: the export pipe is `no_cache`, so `/plugins/<op>/cache` does not apply
 there (`cache_ram_output` in `pixelpipe_hb.c` requires the cache not to be bypassed).
 
+### A pipe's side-band masks go with its nodes
+
+*Found `199597e02a`, 2026-10-19.*
+
+`dt_dev_pixelpipe_cleanup_nodes()` releases the references the pipe holds on its raster masks
+(`raster_mask_hashes`) and on the detail mask (`rawdetail_mask_hash`), with the nodes that
+published them. Left to the next render, they outlive the image on a pipe that does not render
+again: the darkroom's two pipes live for the whole session, and `leave()` (darkroom and studio
+capture) destroys their nodes only. A referenced line is skipped by the LRU, the pressure valve
+and the kernel-pressure shedding alike, so no demand for memory could free those masks.
+
+Measured in the GUI with an `LD_PRELOAD` library that writes `dt_dev_pixelpipe_cache_get_entries_stats()`
+on request (the source of the supervisor's memory view, refcounts included): open in the darkroom
+an image whose modules consume raster masks, go back to the lighttable, and no line may remain
+referenced. With the release left to the next render, two raster masks of the preview pipe, 3.5 MiB
+each, stayed at `refs=2` there; a full-resolution one, 68 MiB, was seen held the same way.
+`tests/unittests/test_pipe_cleanup_nodes_masks.c` pins the release.
+
+On the rebuild of a changed topology (`DT_DEV_PIPE_REMOVE` in `dt_dev_pixelpipe_change()`), the
+masks are released before the following render retains them again. For a raster mask, an eviction
+in between costs one recompute of the provider (the `DT_DEV_PIPE_REENTRY` pass of "Raster masks are
+dedicated side-band cachelines"), never a wrong mask: a consumer reads a mask through its own
+retained lookup. The detail mask has no such pass; the next section is what covers it.
+
+That statistics call, and the memory view built on it, listed `entries` only then. The working
+buffers of `dt_pixelpipe_cache_alloc_align_*()` live in `external_entries`: they counted in
+`current_memory` and in the usage bar, but appeared in no list. Seen that day: 6.0 GiB of usage
+against 0.2 GiB of listed entries, the rest being the working buffers of a thumbnail pipe
+reconstructing highlights at full resolution. The call returns them now: see "The cache's usage
+counts its allocations as well as its lines".
+
+### A cached output of `detailmask` stands for it only with its mask
+
+*Found `ca319461b9`, 2026-10-19, from a review of the release above.*
+
+The hidden `detailmask` stage publishes two cachelines: its output, a copy of its input, and the
+detail mask, under `dt_dev_pixelpipe_rawdetail_mask_hash()`. Either can be evicted without the
+other, and the output alone cannot rebuild the mask. Its consumers, the detail refinement of the
+blend masks (`_refine_with_detail_mask()` and its OpenCL twin in `blend.c`), find the mask with
+`dt_dev_retrieve_rawdetail_mask()` and, on a miss, skip the refinement without an error: the
+consumer's output is then cached under the hash of a refined one. A raster mask that goes missing
+fails its consumer and gets a `DT_DEV_PIPE_REENTRY` pass; the detail mask had nothing of the kind.
+
+So `dt_dev_pixelpipe_process_rec()` calls `dt_dev_pixelpipe_rawdetail_mask_check_hit()` before it
+looks up the stage's output. When the mask is there, the pipe takes it at once, as the stage's
+`process()` would. When it is not, the output is invalidated: neither the exact hit nor the
+writable acquisition after the recursion finds it, the stage runs, and the mask is published again.
+The invalidation removes only a line nobody holds; pipes run one at a time, under
+`dt_pipeline_threadsafe_mutex()`, so no other pipe holds the stage's output then.
+
+The hazard predates the release in `cleanup_nodes()`: any pipe that did not hold the mask could hit
+the stage's output without it -- a thumbnail pipe, or a darkroom pipe back on a history state whose
+mask it had released. The release widened it to darkroom re-entry and to the topology rebuild.
+Read from the code, not reproduced: the eviction has to take the mask and spare the output.
+`tests/unittests/test_pipe_cleanup_nodes_masks.c` pins the rule.
+
+### The cache's usage counts its allocations as well as its lines
+
+*Found `948fbf7c90`, 2026-10-19.*
+
+What `dt_pixelpipe_cache_alloc_align_*()` allocates lives in `external_entries`, not in `entries`,
+and counts in `current_memory` all the same: an entry of either table adds its size when it is
+created (`dt_pixel_cache_new_entry()`) and takes it back when it is freed, so the usage is the sizes
+of both tables summed. `dt_dev_pixelpipe_cache_get_entries_stats()` returns both, under one hold of
+`lock`: the allocations flagged `allocation`, named after the `file:line` that made them (from
+`src/` on: the absolute root of `__FILE__` would push the line number out of the 64-byte name) and
+aged since then (`age_us`; `_pixel_cache_touch()` stamps an allocation when it is made, and the one
+lookup that would touch it again, `dt_dev_pixelpipe_cache_get_entry_by_data()`, has no caller). The
+supervisor's memory view lists them with the lines in RAM (`supervisor.md`).
+
+Not every allocation is a working buffer of one run. Some are kept for the session, and seen at
+rest the same day: demosaic's two LMMSE gamma tables (`iop/demosaic.c:1193-1194`, 0.25 MiB each,
+made on the first LMMSE run and freed in `cleanup_global()`), and the histogram's state struct
+(`libs/histogram.c:3075`, made in `gui_init()`, freed in `gui_cleanup()`). They are held, so neither
+the LRU nor the pressure valve can free them, and they count against the budget for the session.
