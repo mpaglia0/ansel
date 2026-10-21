@@ -834,14 +834,28 @@ typedef struct _cache_lru_t
   int64_t max_age;
   uint64_t hash;
   dt_pixel_cache_entry_t *cache_entry;
+  gboolean host_only; // only lines with a host buffer: the others give no RAM back
 } _cache_lru_t;
 
+
+/* What eviction may take: an entry nobody holds and nobody is writing. The LRU and the room told
+ * to tile planners both ask this, so planners are never promised memory eviction cannot give back.
+ * WARNING: non thread-safe, the caller holds the cache lock. */
+static gboolean _entry_evictable(dt_pixel_cache_entry_t *cache_entry, gboolean *used)
+{
+  *used = dt_atomic_get_int(&cache_entry->refcount) > 0;
+  // Nobody is writing it if its write lock can be taken: taken, it goes straight back.
+  if(dt_pthread_rwlock_trywrlock(&cache_entry->lock)) return FALSE;
+  dt_pthread_rwlock_unlock(&cache_entry->lock);
+  return !*used;
+}
 
 // find the cache entry hash with the oldest use
 static void _cache_get_oldest(gpointer key, gpointer value, gpointer user_data)
 {
   dt_pixel_cache_entry_t *cache_entry = (dt_pixel_cache_entry_t *)value;
   _cache_lru_t *lru = (_cache_lru_t *)user_data;
+  if(lru->host_only && IS_NULL_PTR(cache_entry->data)) return;
 
   // Don't remove LRU entries that are still in use.
   // `refcount > 0` is the only thing standing between a holder and this eviction, so a release
@@ -852,24 +866,30 @@ static void _cache_get_oldest(gpointer key, gpointer value, gpointer user_data)
   const int64_t age = _pixel_cache_get_age(cache_entry);
   if(age < lru->max_age)
   {
-    // Returns 1 if the lock is captured by another thread
-    // 0 if WE capture the lock, and then need to release it
-    gboolean locked = dt_pthread_rwlock_trywrlock(&cache_entry->lock);
-    if(!locked) dt_pthread_rwlock_unlock(&cache_entry->lock);
-    gboolean used = dt_atomic_get_int(&cache_entry->refcount) > 0;
-
-    if(!locked && !used)
+    gboolean used = FALSE;
+    if(_entry_evictable(cache_entry, &used))
     {
       lru->max_age = age;
       lru->hash = cache_entry->hash;
       lru->cache_entry = cache_entry;
       _pixel_cache_message(cache_entry, "candidate for deletion", TRUE);
     }
-    else if(used)
-      _pixel_cache_message(cache_entry, "cannot be deleted: used", TRUE);
-    else if(locked)
-      _pixel_cache_message(cache_entry, "cannot be deleted: locked", TRUE);
+    else
+      _pixel_cache_message(cache_entry, used ? "cannot be deleted: used" : "cannot be deleted: locked", TRUE);
   }
+}
+
+/* The bytes eviction can take back: [0] against the budget, [1] of host RAM -- a line kept on a
+ * device only has no host buffer, so evicting it gives the system nothing. */
+static void _cache_sum_evictable(__attribute__((unused)) gpointer key, gpointer value, gpointer user_data)
+{
+  dt_pixel_cache_entry_t *cache_entry = (dt_pixel_cache_entry_t *)value;
+  size_t *evictable = (size_t *)user_data;
+  gboolean used = FALSE;
+  if(!_entry_evictable(cache_entry, &used)) return;
+
+  evictable[0] += cache_entry->size;
+  if(!IS_NULL_PTR(cache_entry->data)) evictable[1] += cache_entry->size;
 }
 
 static void _print_cache_lines(gpointer key, gpointer value, gpointer user_data)
@@ -879,16 +899,17 @@ static void _print_cache_lines(gpointer key, gpointer value, gpointer user_data)
 }
 
 
-// remove the least used cache entry
+// remove the least used cache entry -- with `host_only`, the least used one holding host RAM
 // return 0 on success, 1 on error
 // error is : we couldn't find a candidate for deletion because all entries are either locked or in use
 // or we found one but failed to remove it.
-static int _non_thread_safe_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache)
+static int _non_thread_safe_pixel_pipe_cache_remove_lru(dt_dev_pixelpipe_cache_t *cache, const gboolean host_only)
 {
   _cache_lru_t *lru = (_cache_lru_t *)malloc(sizeof(_cache_lru_t));
   lru->max_age = g_get_monotonic_time();
   lru->hash = 0;
   lru->cache_entry = NULL;
+  lru->host_only = host_only;
   int error = 1;
   g_hash_table_foreach(cache->entries, _cache_get_oldest, lru);
 
@@ -916,7 +937,7 @@ int dt_dev_pixel_pipe_cache_remove_lru(void)
 {
   dt_dev_pixelpipe_cache_t *cache = _pixelpipe_cache;
   dt_pthread_mutex_lock(&cache->lock);
-  int error = _non_thread_safe_pixel_pipe_cache_remove_lru(cache);
+  int error = _non_thread_safe_pixel_pipe_cache_remove_lru(cache, FALSE);
   dt_pthread_mutex_unlock(&cache->lock);
   return error;
 }
@@ -1779,42 +1800,52 @@ static gboolean _system_memory_pressure_valve(dt_dev_pixelpipe_cache_t *cache, s
     return TRUE;
   }
 
+  const gboolean negligible = request_size <= DT_PIXELPIPE_CACHE_PRESSURE_EXEMPT_SIZE;
+
   if(cache->sys_available_est < request_size + pressure_floor)
   {
     const size_t deficit = request_size + pressure_floor - cache->sys_available_est;
     size_t freed = 0;
+    /* The deficit is host RAM: a line kept on a device only would count its size as freed and
+     * give the system nothing. */
     while(freed < deficit && g_hash_table_size(cache->entries) > 0)
     {
       const size_t before = cache->current_memory;
-      if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+      if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache, TRUE)) break;
       freed += before - cache->current_memory;
     }
 
-    if(freed)
+    /* Evicting only returns the pages to the ARENA. How much of that reaches the OS
+     * is not ours to guess: the per-free lazy release is a no-op on Windows until a
+     * decommit runs, and even where MADV_FREE applies, the kernel decides when those
+     * pages stop counting against us. So hand them over for real, then take the new
+     * number from the OS instead of crediting what we think we released — an
+     * over-credit here would let the allocation through on a system that is still
+     * just as full, which is precisely the OOM this valve exists to prevent.
+     * Ordering note: cache->lock is held and dt_cache_arena_trim() takes arena.lock,
+     * matching the cache->lock → arena.lock order the rest of this file already uses
+     * (see the defrag path below). */
+    if(freed) dt_cache_arena_trim(&cache->arena);
+
+    /* Re-read even when nothing was evicted: between probes the estimate is debited by
+     * every allocation and credited by no free, so what other pipes gave back since the
+     * last probe is not in it. An allocation is refused on what the OS says, never on it.
+     * A negligible one is never refused, so it does not pay for the read. */
+    if(freed || !negligible)
     {
-      /* Evicting only returns the pages to the ARENA. How much of that reaches the OS
-       * is not ours to guess: the per-free lazy release is a no-op on Windows until a
-       * decommit runs, and even where MADV_FREE applies, the kernel decides when those
-       * pages stop counting against us. So hand them over for real, then take the new
-       * number from the OS instead of crediting what we think we released — an
-       * over-credit here would let the allocation through on a system that is still
-       * just as full, which is precisely the OOM this valve exists to prevent.
-       * Ordering note: cache->lock is held and dt_cache_arena_trim() takes arena.lock,
-       * matching the cache->lock → arena.lock order the rest of this file already uses
-       * (see the defrag path below). */
-      dt_cache_arena_trim(&cache->arena);
       dt_invalidate_system_available_mem();
       const size_t probed = dt_get_system_available_mem();
       cache->sys_probe_valid = (probed > 0);
       cache->sys_available_est = probed;
       cache->sys_probe_time_us = g_get_monotonic_time();
+    }
 
+    if(freed)
       dt_print(DT_DEBUG_MEMORY | DT_DEBUG_PIPECACHE,
                "[pixelpipe_cache] system memory pressure: shed %" G_GSIZE_FORMAT " MiB of cache "
                "(%" G_GSIZE_FORMAT " MiB available after trim, floor %" G_GSIZE_FORMAT " MiB)\n",
                freed / (1024 * 1024), cache->sys_available_est / (1024 * 1024),
                pressure_floor / (1024 * 1024));
-    }
   }
 
   // The post-trim re-probe can itself come back unanswered; absence of information is
@@ -1837,8 +1868,6 @@ static gboolean _system_memory_pressure_valve(dt_dev_pixelpipe_cache_t *cache, s
    * an absolute reserve (DT_MEMORY_PRESSURE_FLOOR_DEFAULT, 200 MiB), and "always leave
    * 200 MiB to the OS" has to mean 200, not 100. The shed/trim step above already ran at
    * this same threshold, so reaching here means trimming did not recover enough. */
-  const gboolean negligible = request_size <= DT_PIXELPIPE_CACHE_PRESSURE_EXEMPT_SIZE;
-
   const gboolean allowed = negligible
                            || !cache->sys_probe_valid
                            || (cache->sys_available_est >= request_size + pressure_floor);
@@ -1931,7 +1960,7 @@ static inline void *_arena_alloc_with_defrag(dt_dev_pixelpipe_cache_t *cache, si
 
     while(largest_free_run_pages < pages_needed && g_hash_table_size(cache->entries) > 0)
     {
-      if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+      if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache, FALSE)) break;
       dt_cache_arena_stats(&cache->arena, &total_free_pages, &largest_free_run_pages);
     }
     dt_pthread_mutex_unlock(&cache->lock);
@@ -2120,7 +2149,7 @@ static size_t _pressure_shed(void *user, const size_t target, size_t *given_back
   dt_dev_pixelpipe_cache_t *cache = (dt_dev_pixelpipe_cache_t *)user;
 
   while(cache->current_memory > target && g_hash_table_size(cache->entries) > 0)
-    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache, FALSE)) break;
 
   // Hand the pages over now rather than when the kernel gets to MADV_FREE, and make the
   // available-RAM valve re-read the system instead of trusting its pre-shed estimate.
@@ -2171,13 +2200,13 @@ static int _free_space_to_alloc(dt_dev_pixelpipe_cache_t *cache, const size_t si
   _pressure_react_locked(cache);
   const size_t budget = _cache_budget_locked(cache);
   while(cache->current_memory + size > budget && g_hash_table_size(cache->entries) > 0)
-    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache, FALSE)) break;
 
   // Free up space if needed to match the max memory limit
   // If error, all entries are currently locked or in use, so we cannot free space to allocate a new entry.
   int error = 0;
   while(cache->current_memory + size > cache->max_memory && g_hash_table_size(cache->entries) > 0 && !error)
-    error = _non_thread_safe_pixel_pipe_cache_remove_lru(cache);
+    error = _non_thread_safe_pixel_pipe_cache_remove_lru(cache, FALSE);
 
   if(cache->current_memory + size > cache->max_memory)
   {
@@ -3126,10 +3155,11 @@ static int _memory_pressure_shedder(dt_dev_pixelpipe_cache_t *cache)
 
   const size_t deficit = pressure_floor - available;
   size_t freed = 0;
+  // Host RAM, as in the valve: only lines with a host buffer give any back.
   while(freed < deficit && g_hash_table_size(cache->entries) > 0)
   {
     const size_t before = cache->current_memory;
-    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache)) break;
+    if(_non_thread_safe_pixel_pipe_cache_remove_lru(cache, TRUE)) break;
     freed += before - cache->current_memory;
   }
 
@@ -3388,10 +3418,33 @@ void dt_dev_pixelpipe_cache_get_usage(size_t *current, size_t *max)
   if(IS_NULL_PTR(cache)) return;
   dt_pthread_mutex_lock(&cache->lock);
   if(current) *current = cache->current_memory;
-  // The budget allocations currently evict down to, so tiling plans against it -- and never
-  // under what is held, since the callers compute `max - current` unsigned.
+  // The budget allocations currently evict down to -- never under what is held, since the
+  // callers compute `max - current` unsigned. Tiling plans against dt_dev_pixelpipe_cache_get_available().
   if(max) *max = dt_pixelpipe_cache_pressure_reported(&cache->psi.budget, cache->current_memory);
   dt_pthread_mutex_unlock(&cache->lock);
+}
+
+size_t dt_dev_pixelpipe_cache_get_available(void)
+{
+  dt_dev_pixelpipe_cache_t *cache = _pixelpipe_cache;
+  size_t evictable[2] = { 0, 0 };
+  dt_pthread_mutex_lock(&cache->lock);
+  g_hash_table_foreach(cache->entries, _cache_sum_evictable, evictable);
+  // The budget an allocation is refused on is the plan: under kernel pressure the lowered one is
+  // only what eviction aims for (_free_space_to_alloc()).
+  const size_t kept = cache->current_memory - evictable[0];
+  const size_t budget_room = (cache->max_memory > kept) ? cache->max_memory - kept : 0;
+  dt_pthread_mutex_unlock(&cache->lock);
+
+  // What the valve lets through: the system's available RAM over the floor, plus what evicting
+  // hands back to the OS (_system_memory_pressure_valve()).
+  const size_t sys_available = dt_get_system_available_mem();
+  if(sys_available == 0) return budget_room; // no information on this platform
+
+  const size_t pressure_floor = dt_get_memory_pressure_floor();
+  const size_t sys_room
+      = ((sys_available > pressure_floor) ? sys_available - pressure_floor : 0) + evictable[1];
+  return MIN(budget_room, sys_room);
 }
 
 size_t dt_dev_pixelpipe_cache_get_max_memory(void)

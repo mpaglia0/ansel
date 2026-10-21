@@ -115,6 +115,8 @@ outright, so those two — the unprocessed input, RAM-only, every disk write bei
 `mip < DT_MIPMAP_F` — are reachable only through `dt_mipmap_cache_remove_all_sizes()`. That is
 the right default for the list above: a development change does not invalidate the decoded raw,
 and dropping it on every history commit would re-read and re-demosaic the file per slider tick.
+The one `DT_MIPMAP_FULL` entry it does drop holds no raw: a load that failed (see "A purge tries
+a failed load again" below).
 
 An image LEAVING the library is the other case, and the only caller of the all-sizes form.
 Its input buffer otherwise outlives the row, with nothing but memory pressure to reclaim it,
@@ -248,7 +250,9 @@ lost there — stderr only got `could not process thumbnail!`. The causes, each 
 |---|---|---|
 | `_init_8` | neither the original nor a local copy exists, or the image left the image cache | `FILE_NOT_FOUND` |
 | `_init_8` | embedded-JPEG mode "always" (2) and no embedded/companion JPEG could be read: the pipe is forbidden | `NO_EMBEDDED_THUMBNAIL` |
-| `_generate_blocking`, `DT_MIPMAP_FULL` | the loader failed; its own value (`UNSUPPORTED_CAMERA`, `FILE_CORRUPTED`, …) used to be dropped | the loader's |
+| `_generate_blocking`, `DT_MIPMAP_FULL` | every decoder failed | `dt_imageio_open()`'s reason: see "Which loader failure a skull names" |
+| `_generate_blocking`, `DT_MIPMAP_FULL` | no source any more: the file went after `_init_8`'s check, or the image left the image cache | `FILE_NOT_FOUND` |
+| `dt_imageio_open` | the path exists but is not a regular file | `FILE_NOT_FOUND` |
 | `dt_imageio_export_with_flags` | pipe init failed, or the pipe returned an error / no backbuf | `PROCESSING_FAILED` |
 | `dt_imageio_export_with_flags` | the pipe returned an error after the pixelpipe cache refused it memory | `CACHE_FULL` |
 | `dt_imageio_export_with_flags` | the pipe was stopped (`dt_dev_pixelpipe_process` returns the same `1` for a kill-switch stop as for a failure) | `ABORTED` |
@@ -260,6 +264,53 @@ Not causes: an **external** stop (`shutdown_ext`, a thumbnail scrolled out of vi
 descriptor and keeps the entry flagged for generation, so it never leaves a skull; the disk cache
 never holds one (only `> 8x8` entries are written, and an unreadable `.jpg` is deleted and
 regenerated); `_init_8`'s early return for `width < 16` does not zero the size.
+
+### "File not found" is about the source, never the cached thumbnail
+
+*Found `c1c4123fcb`, 2026-10-20, by reading every path that returns `DT_IMAGEIO_FILE_NOT_FOUND`;
+the table's two `FILE_NOT_FOUND` rows after the first come from this reading. The `EXISTS` and
+`IS_REGULAR` columns below are measured with `g_file_test()`, GLib 2.80.0, Linux, as uid 1000 —
+not root, which passes every permission check. The labels are by reading.*
+
+`FILE_NOT_FOUND` reaches a thumbnail by three paths, all about the image's source file: the
+original, or its local copy.
+
+1. `_init_8()`, before anything else: `_write_mipmap_to_disk()` asks
+   `dt_image_choose_input_path()` for a source and none exists. The candidates, in order: the
+   local copy (then its legacy path) when the image is flagged `DT_IMAGE_LOCAL_COPY`, then
+   `fullpath`, then the local copy again as a last chance. An image that left the image cache
+   gives no `dt_image_t`, hence no path either.
+2. `_generate_blocking()` at `DT_MIPMAP_FULL`, reached through the export pipe `_init_8()`
+   starts: the same lookup fails there, so the file went in between — a drive unplugged
+   mid-render. `dt_imageio_export_with_flags()` hands the full-size buffer's status back as is.
+3. `dt_imageio_open()`: a path that exists but is not a regular file returns `!DT_IMAGEIO_OK`,
+   which is `1`, which is `FILE_NOT_FOUND` by its position in the enum rather than by choice.
+
+"Exists" is `g_file_test(G_FILE_TEST_EXISTS)`, which is `access(F_OK)` on POSIX:
+
+| The source path | `EXISTS` | `IS_REGULAR` | Label |
+|---|---|---|---|
+| absent: deleted, moved, renamed, drive unplugged, share not mounted | 0 | 0 | File not found (path 1) |
+| a broken symlink | 0 | 0 | File not found (path 1) |
+| a file in a directory without search (`x`) permission | 0 | 0 | File not found (path 1) |
+| a file without read permission (mode `000`) | 1 | 1 | a decoder's failure, not "File not found" |
+| a directory named like an image | 1 | 0 | File not found (path 3) |
+
+Two `FILE_NOT_FOUND` returns never reach a thumbnail: `dt_imageio_open_j2k()`'s (it cannot open
+the file or read its header) runs inside `dt_imageio_open_raster()`, whose chain ends on
+`FILE_CORRUPTED`; and the `dt_imageio_open_libraw()` stub of a build without LibRaw is never
+called, since `dt_imageio_open_raw()` calls it only under `HAVE_LIBRAW`.
+
+The disk cache never produces it. In the cache's allocate callback, a missing `.jpg` leaves the
+entry flagged for generation, and so does an unreadable one, which is deleted; `_init_8()` then
+renders from the source. A `.jpg` that loads is shown without the source being looked at, and so
+is an entry already in RAM: a missing original keeps showing its last thumbnail, and the skull
+appears only when no thumbnail is left to show.
+
+Like every skull, it stays in RAM until the entry is evicted or invalidated. The file coming back
+does not change that: the full-size entry stays flagged for generation, but the thumbnail entry
+that asked for it does not, and the mount signal `libs/collect.c` listens to refreshes the
+folders' accessibility (`dt_film_set_folder_status()`), not the mipmap cache.
 
 ### A pipe that failed for lack of memory says so
 
@@ -289,11 +340,105 @@ the run recovered from, followed by an unrelated failure in the same run, reads 
 
 A skull stays in RAM until the entry is evicted or invalidated, **whatever the cause** — a
 transient one (`CACHE_FULL`) included. The label makes that visible; it does not change it.
+`dt_mipmap_cache_remove()` invalidates it, together with the failed full-size load behind it.
 
 `_view_image_get_surface_internal()` (`views/view.c`) paints the label: every consumer
 (lighttable, filmstrip, preview window, map, print, slideshow) goes through it. It runs in a
 worker thread, so it builds its own Pango font description rather than borrowing bauhaus's, which
 `dt_bauhaus_load_theme()` frees from the GUI thread.
+
+### Which loader failure a skull names
+
+*Measured 2026-10-20 on `c1c4123fcb`, before and with this change, by a scratch program linked
+against `libansel.so`: it imports a good file into a `:memory:` library, breaks the file, asks for
+a `DT_MIPMAP_2` thumbnail and the `DT_MIPMAP_FULL` buffer and prints their `status`, repairs the
+file, calls `dt_mipmap_cache_remove()`, and asks again. `--disable-opencl`,
+`lighttable/embedded_jpg=0`, so every thumbnail goes through the export. The table's broken files
+are made from one Nikon Z 6 NEF, which rawspeed decodes. Labels from `view.c`. Seen in the
+lighttable the same day, in French, on the same files imported whole and then broken on disk:
+"Boîtier non supporté", "Erreur d'E/S" twice, "Fichier corrompu" twice.*
+
+When every decoder fails, `dt_imageio_open()` returns the first failure that says why a decoder
+which recognised the file could not load it — `UNSUPPORTED_FEATURE`, `UNSUPPORTED_CAMERA`,
+`LOAD_FAILED` or `IOERROR` — and `FILE_CORRUPTED` otherwise (`_decoder_reason()`). Each chain
+(`dt_imageio_open_raster/_raw/_hdr()`) applies the same rule to its own decoders.
+
+The other two failures say nothing once the whole cascade has run. Every raster and HDR decoder,
+and LibRaw, answer `FILE_CORRUPTED` both to another format and to a broken file in their own;
+rawspeed answers `UNSUPPORTED_FORMAT` to a file it cannot parse, a cut header included. The
+cascade tries every decoder on every file, so kept, these would make a truncated JPEG read
+"Unsupported format": rawspeed, tried after the raster chain, does not know JPEG. "Unsupported
+format" therefore never reaches a skull.
+
+| Broken file | rawspeed | LibRaw | Before | Now |
+|---|---|---|---|---|
+| model renamed to an unknown `NIKON Z 0` | `UNSUPPORTED_CAMERA` | decodes it | no skull | no skull |
+| the same, cut to 4 MB | `UNSUPPORTED_CAMERA` | I/O error | Corrupted file | Unsupported camera |
+| 0 bytes | `FileIOException`: `IOERROR` | fails | Corrupted file | I/O error |
+| mode `000` | `FileIOException`: `IOERROR` | fails | Corrupted file | I/O error |
+| cut to 4 MB | `RawDecoderException`: `UNSUPPORTED_FORMAT` | fails | Corrupted file | Corrupted file |
+| cut to 300 bytes, inside the TIFF header | `IOException` | fails | Corrupted file | Corrupted file |
+| 1 MB of `A` | no decoder: `UNSUPPORTED_FORMAT` | fails | Corrupted file | Corrupted file |
+
+**Before, the table row above that says "the loader's" status was wrong in effect.** The loader's
+value reached `dsc->status`, but every chain ended on `return DT_IMAGEIO_FILE_CORRUPTED` and the
+cascade on `dt_imageio_open_hdr()`'s, so a failed load always read "Corrupted file".
+
+LibRaw follows rawspeed on every raw, not only on CR3 (`dt_imageio_open_raw()`). A camera or a
+feature rawspeed does not support leaves a skull only when LibRaw fails too: the first row.
+
+rawspeed's `IOException` is `FILE_CORRUPTED`, not `IOERROR`. rawspeed throws it on reading past
+the end of the copy `FileReader::readFile()` made of the whole file, so it means cut or corrupt;
+failing to read the file throws `FileIOException`. `decodeRaw()`, `decodeMetaData()` and
+`checkSupport()` rewrap it as a `RawDecoderException`, so only `RawParser::getDecoder()` lets it
+out, on a header cut short. Cut to 60 %, an ARW, a CR2, a RAF, an ORF, an RW2 and a DNG all
+failed in rawspeed through `RawDecoderException`, before and now. LibRaw then decoded the ARW, the
+ORF and the DNG anyway (under gdb, `dt_imageio_open_libraw()` returned `DT_IMAGEIO_OK`): the first
+two gave a picture, the DNG a `PROCESSING_FAILED` skull from the pipe.
+
+Reachable by reading, not measured: `UNSUPPORTED_FEATURE` (rawspeed: a sample type or size it does
+not handle, a `RawDecoderException` that mentions "supported", a `CameraMetadataException`) and
+`LOAD_FAILED` (rawspeed: a CFA image with more than one component per pixel).
+
+Two statuses of the table above never reach a skull, by reading. `IOERROR` from
+`format->write_image`: the thumbnail's format copies into the cache buffer and returns `0`.
+`ABORTED`: the thumbnail's pipe is local to `dt_imageio_export_with_flags()`, so only its
+`shutdown_ext` can stop it, and that external stop restores the entry.
+
+### A purge tries a failed load again
+
+*Measured 2026-10-20 on `c1c4123fcb`, before and with this change, as above. Seen in the
+lighttable the same day: once the five broken files were repaired, "Purge selected thumbnails from
+cache" brought them back without a restart.*
+
+`dt_mipmap_cache_remove()` — "Purge selected thumbnails from cache", an embedded-JPEG mode change,
+any history change — drops the thumbnails, and also the `DT_MIPMAP_FULL` entry when its `status` is
+not `DT_IMAGEIO_OK`. Without that, the purged thumbnail was regenerated, but the export behind it
+asked for `DT_MIPMAP_FULL` and read the failure back. Fourteen broken files whose load failed —
+the NEF renamed and cut, emptied, made unreadable, cut to 4 MB and filled with `A`; the NEF cut at
+six sizes from 100 bytes to 50 kB; and a CR2, a RAF and an RW2 cut to 60 % — were repaired before
+the purge: the thumbnail stayed a skull with the same status for all fourteen. Only eviction or
+`dt_mipmap_cache_remove_all_sizes()`, an image leaving the library, dropped that entry. Now all
+fourteen give their picture back after the purge.
+
+Eviction does retry a failure by chance once enough other images are loaded. The full-size cache
+holds `worker_threads` + 1 entries and is collected above 80 % of that, by reading: in the
+lighttable, with seven images and `worker_threads=4`, each broken file was decoded twice before
+any purge, once per thumbnail request. A failure stuck in the cache is therefore the case of a
+few images, and the purge is what retries it there.
+
+The decoded raw of a healthy image still survives a purge: over the same import, thumbnail,
+purge, thumbnail sequence, `-d cache` logs one `from original file I/O`, before and now.
+
+So does a raw decoded from a broken file, since its load succeeded. LibRaw decodes the DNG cut to
+60 % and the pipe fails on it: the `PROCESSING_FAILED` skull came back after the repair and the
+purge, before and now. The cut ARW and ORF gave a picture, which a purge keeps in the same way.
+Nothing in the cache notices that the file changed.
+
+The failure stays cached until then rather than not being cached at all. A thumbnail's export
+loads the image through `dt_dev_load_image()`, which already asks for `DT_MIPMAP_FULL`
+(`_dt_dev_mipmap_prefetch_full()`), then asks for it again itself. Uncached, every thumbnail of a
+broken file would run the whole decoder cascade twice, and again for each thumbnail size.
 
 ### The label wraps onto half the skull at most
 
