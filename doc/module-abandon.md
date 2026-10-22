@@ -4,7 +4,7 @@
 > GeForce GTX 1060 6GB (CUDA OpenCL). Every figure below says how it was obtained. Re-measure
 > before acting on one older than the code you are changing, and re-date this line when you do.
 
-The pipe reads its killswitch, `dt_dev_pixelpipe_has_shutdown()` (`develop/pixelpipe_hb.h:693`),
+The pipe reads its killswitch, `dt_dev_pixelpipe_has_shutdown()` (`develop/pixelpipe_hb.h:695`),
 between two modules. A module that takes seconds therefore runs to its end once the pipe no
 longer wants its output: the image changed, a parameter moved, the darkroom closed. The modules
 below also read it inside their own `process()` / `process_cl()`, at a step that leaves them
@@ -15,15 +15,17 @@ nothing to clean up but their own scratch.
 A module that sees the killswitch returns an error, and its output buffer holds garbage. Nothing
 else is needed from it: the pipe already handles a failed module without any help.
 
-- **CPU.** `pixelpipe_process_on_CPU()` prints `[pixelpipe] %s process on CPU returned with an
-  error` on stdout (`develop/pixelpipe_cpu.c:141`) and returns the error. The tiled path returns a
-  tile's error as is, without running the other tiles (`develop/tiling.c:441`).
+- **CPU.** `pixelpipe_process_on_CPU()` returns the error. With the killswitch raised, it logs
+  `[pixelpipe] %s process on CPU stopped: the pipe abandoned its run` under `-d pipe` only, as quiet
+  as a stop between two modules; otherwise it prints `... returned with an error` on stdout
+  (`develop/pixelpipe_cpu.c:143`). The tiled path returns a tile's error as is, without running the
+  other tiles (`develop/tiling.c:448`).
 - **OpenCL.** A failing `process_cl()` normally falls back to CPU and tells the user OpenCL
   failed. When the killswitch is raised, `pixelpipe_process_on_GPU()` aborts instead
   (`develop/pixelpipe_gpu.c:730`): rerunning on CPU a run nobody wants would only redo the work.
   The tiled OpenCL path ends in the same error label.
 - **Either way**, `dt_dev_pixelpipe_process_rec()` flags the output cacheline auto-destroy while it
-  still holds it (`develop/pixelpipe_hb.c:1228`), so it is never published, and no alert is shown:
+  still holds it (`develop/pixelpipe_hb.c:1233`), so it is never published, and no alert is shown:
   an abandoned run is not a failure anybody needs to hear about.
 
 A `NULL` pipe never abandons: `dt_dev_pixelpipe_has_shutdown(NULL)` is `FALSE`. A module that is
@@ -223,7 +225,8 @@ above; one run per row.
 | guided laplacians, 512 iterations, OpenCL (to exit) | 2 s | 5.82 s | 0.23 s |
 | harmonic, OpenCL (to exit) | 0.3 s | 1.34 s | 0.41 s |
 
-In every "after" run the module failed (`returned with an error` on CPU), the export wrote no file,
+In every "after" run the module failed (on CPU, the build measured printed `returned with an error`;
+see *The contract* for what it logs now), the export wrote no file,
 and nothing fell back from OpenCL to CPU. In every "before" run the module ran to its end and the
 pipe stopped at the next module. The contrast equalizer's 0.48 s is one full-resolution scale.
 
@@ -237,3 +240,34 @@ fallback. With `--disable-opencl` and diffuse set to 100 iterations, a full diff
 (`returned with an error`, no blending), the next run started about 0.5 s later and went to its
 end, and the image shown was complete. On opening, denoise (profiled), 3.8 s when it runs through,
 was stopped four times, after 3.3, 2.4, 0.4 and 0.4 s.
+
+### What an abandoned AI denoise run leaves allocated
+
+Measured 2026-10-21 on top of `5632537f6e`, clang 19. The builds also carried the stdout change of
+*The contract*, which only moves a print. No run left anything allocated, and each instrument was
+first shown to report a leak.
+
+- **The U-Net executor alone, under ASan.** A standalone harness builds `common/nn_model.c` with
+  `-fsanitize=address` and no injected allocator, so every tensor is a `malloc` that LeakSanitizer
+  tracks. It cancels each forward at its first check, then at its second, and so on until a forward
+  runs to its end. Over the six shipped models, coarse stage of the multiscale ones included, that
+  is 84 cancelled forwards, each returning `DT_NN_CANCELLED` (8 checks in a coarse forward, 10 in a
+  fine one), then one full forward per stage that asked the hook exactly that many times. No leak
+  and no ASan error. A buffer leaked on purpose in the same harness is reported.
+- **AI denoise in an export, CPU, under ASan.** `ansel-cli`, Debug with `-fsanitize=address`, a
+  Nikon Z 6 NEF (6064×4040) whose history ends with AI denoise (quarter, multiscale),
+  `--disable-opencl`. Under gdb, a breakpoint on the module's cancel hook (`_nn_cancelled`) writes 1
+  into `pipe->shutdown` at its K-th call, then gdb detaches, since LeakSanitizer does not run under
+  ptrace. K = 1 (first level of the coarse forward), 12 (fourth encoder level of the fine forward),
+  18 (before the fine head). Each run logged the stop under `-d pipe` and wrote no file. LSan
+  reported only the 4243 bytes that a preloaded library leaks at load on purpose, and the same
+  export with AI denoise disabled reports exactly that too. A first version of this control was not
+  reported: it leaked from the constructor's own frame, and a stale stack slot kept the pointer
+  reachable. It now leaks one frame down and scrubs the stack after.
+- **AI denoise in an export, OpenCL.** ASan does not see device memory, so the instrument is
+  Ansel's own count, `memory_in_use` (`common/opencl.c`), printed under `-d opencl -d memory` at
+  every allocation and release. Debug build without ASan, GTX 1060 6GB, same image, history and
+  breakpoint, K = 1, 12, 18: the count is 0 after the last release, as after the complete export
+  (AI denoise 0.99 s on GPU). No run reran the module on CPU, and each process exited 0.25 s after
+  the write. With gdb calling `dt_opencl_alloc_device_buffer(0, 1048576)` at the stop and nothing
+  releasing it, the count ends at 1048576 bytes.
