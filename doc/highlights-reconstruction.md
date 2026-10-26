@@ -12,6 +12,75 @@
 > that is recorded rather than quietly corrected: how a claim was wrong is usually the more
 > useful thing to know.
 
+## Highlights (harmonic) on OpenCL: the device middle outgrows the working set it declares
+
+> **Established 2026-10-24 against `2fadf8a366`.** GTX 1060 6 GB (driver 580.178.04), i7-3770K
+> (8 threads), thumbnail pipes of a 51-image collection rendered from the raw, the desktop on the
+> same card.
+
+`tiling_callback()` gives harmonic the guided-laplacian budget,
+`factor_cl = 2 + 3·4 + 6·4/DS_FACTOR = 20` times the single-channel input. Its comment said
+harmonic "allocates region buffers well under this envelope". **That was wrong.** On a 5208×3476
+input (72.4 MB as one float plane, so 1.45 GB declared), Ansel's own vRAM accounting
+(`-d opencl -d memory`) went from 932 MB at the module's entry to 4.5–4.97 GB through the device
+middle: the module held at least 4.0 GB, about 2.8× what it declares.
+
+The admission check (`dt_opencl_image_fits_device_reason()`) compares the declaration with
+`used_available − memory_in_use`, `used_available` being the device's memory minus its
+`forced_headroom`. OpenCL publishes nothing about what other processes hold on a discrete device,
+so the headroom is the only allowance for them. Here the desktop held 978 MiB before Ansel
+started, and the driver's context about 140 MiB more that Ansel does not count. `nvidia-smi`,
+sampled every 100 ms, read 5856 of 6063 usable MiB while the middle ran. The next 265 MB image did
+not fit, and the driver said so on its first use: `copy_buffer_to_image` returned `-4`
+(`CL_MEM_OBJECT_ALLOCATION_FAILURE`), then "harmonic GPU middle failed (-4), using the host
+middle".
+
+The host middle runs the reconstruction on the CPU at full sensor resolution: 43.8 to 74.2 s for
+one thumbnail, against 0.005 to 10 s on the device, for one or two images of the collection per
+run. It runs inside the pipe, which keeps the device and `dt_pipeline_threadsafe_mutex()`
+throughout, so every other thumbnail waits.
+
+Raising the device's headroom does not prevent it. With `forced_headroom` at 900 and at 1500 MiB,
+the same image failed at the same copy (host middle 68.9 s and 72.7 s), and vRAM peaked at 5920
+and 5947 MiB. The headroom lowers the budget the entry check reads; nothing checks the middle's
+allocations against it once the module is admitted.
+
+### What holds the memory: one merged window over a chain of small holes
+
+> **Established 2026-10-25 against `2fadf8a366`**, with temporary prints around each region of
+> `_harmonic_reconstruct_cl()` and `_harmonic_reconstruct_regions()`, and in the merge of
+> `_segment_clipped_regions()`; same machine, collection and `forced_headroom` 900 MiB.
+
+The working set follows one region's padded window, not the frame. `_segment_clipped_regions()`
+merges every pair of regions whose padded read boxes intersect, and rebuilds each group as the
+union of its members' bboxes, padded by the group's largest pad. A chain of small holes whose
+pads touch thus becomes one window over most of the frame:
+
+| image (5208×3476) | regions after merge | largest window | members | clipped px in its bbox | largest member bbox |
+|---|---|---|---|---|---|
+| 18477 | 555 (of 2216) | 4749×3476, 16.5 Mpx (91 %) | 705 | 1.10 Mpx | 1.55 Mpx |
+| 18977 | 403 (of 1571) | 4694×3469, 16.3 Mpx (90 %) | 617 | 1.00 Mpx | 1.48 Mpx |
+
+- **On the device**, 18477's window raised Ansel's accounting from 932 MB to 4971 MB (`-d memory`),
+  `nvidia-smi` read 5755 of 6063 MiB, and the region failed after 3.0 s with `-5`
+  (`CL_OUT_OF_RESOURCES`, events of `hl_fill_jacobi` unreadable). Reproduced in two sessions. The
+  46 regions before it were small (at most 36 kpx), took the CPU route and 1.0 s in all.
+- **On the CPU**, 18977's window took 70.1 s of the 77.5 s its 403 regions took. Running only that
+  window on the host would therefore save little time.
+- **After that `-5`, the device stays unusable for the session**: every later kernel on it fails
+  with `-5` (`colorin`, `exposure`, `interpolation_resample`, …), and every module falls back to
+  the CPU. In one session, 55 module runs were on the GPU before it and none of 337 after.
+  The `-5` is a kernel reading a NULL buffer, not the memory: see "a gate-0 region read a NULL
+  buffer and killed the device" below.
+
+Open: the declaration does not describe the device middle, and the merged window can be about 15
+times the clipped area it reconstructs. Raising `factor_cl` to the measured working set would send
+the module to the CPU from the start on this card, at about the same cost. The region loop instead
+checks each big window against what the device has left and sends only an oversized one to the host
+(see "a window that does not fit the device takes the CPU offload" below). Merging less would
+shrink the window, but the merge exists to avoid seams between neighbouring fills, so it changes
+the result.
+
 ## Highlights (harmonic): per-channel saturation floors imprint the floors' own chroma — magenta
 
 *Found `e4195dec51`, 2026-08-05.*
@@ -189,3 +258,50 @@ reference):
   a smooth well-anchored WB scene does NOT reproduce it) and `gradsky` (the sunrise geometry).
   Linear RMSE is magnitude-dominated and nearly blind to the hue failures users report — judge
   chroma with a chromaticity-share RMSE alongside it.
+
+## Highlights (harmonic) on OpenCL: a gate-0 region read a NULL buffer and killed the device
+
+> **Established 2026-10-25 against `2fadf8a366`.** GTX 1060 6 GB, driver 580.178.04.
+
+`hl_dome_blend` reads `refine[0]` (the refine gate) on its first line, whatever the gate.
+`_selfdome_stage_cl()` (`iop/highlights/core.c`) allocated `refine_dev` only inside its
+`floor_gate > 1e-6` block, so with near-equal per-channel clips (asymmetry under 1.25,
+`_hl_floor_gate()`) the kernel got a NULL buffer. Only regions whose padded window exceeds
+`DT_HL_CL_CPU_REGION_PX` take this device path, which is why only one region in hundreds hit it.
+
+On NVIDIA the read is an MMU fault, not an error code: the kernel log records
+`NVRM: Xid 31 … MMU Fault … faulted @ 0x0_00000000 … ACCESS_TYPE_READ` at the second of the failure,
+the queue returns `-5` (`CL_OUT_OF_RESOURCES`), and the context stays dead: every later kernel on the
+device fails with `-5` and every module falls back to the CPU for the rest of the session (55
+module runs on the GPU before it in one session, none of 337 after). An asynchronous queue does not
+say which kernel faulted; `clFinish()` after each enqueue named `hl_dome_blend`, and a check in
+`dt_opencl_set_kernel_arg()` found its argument 13 NULL.
+
+The buffer is now allocated at gate 0 too and zeroed by `hl_set_scalar`, which takes the kernel's
+gate-0 path; the same defect aborted the process on radeonsi under rusticl. With it allocated and
+zeroed at gate 0, measured on the same 51-image session from an empty cache: no Xid, the
+16.5 Mpx window of image 18477 reconstructed on the device in 23.1 s (70 s for the same kind of window
+on the CPU), all five harmonic images kept the device middle, and 376 module runs stayed on the GPU.
+`nvidia-smi` still peaked at 5960 of 6063 MiB.
+
+When a pipe falls back to the CPU on `-5` with no allocation failure in sight, look for an Xid in
+`journalctl -k` before suspecting memory.
+
+### A window that does not fit the device takes the CPU offload
+
+> **Established 2026-10-25 against `2fadf8a366`**, with `refine_dev` allocated and zeroed at gate 0
+> (previous section).
+
+A region on the device path holds about 64 floats per pixel of its padded window: 256.4 to
+257.2 bytes per pixel on windows of 2.8, 16.3 and 16.5 Mpx (`-d memory`, peak over the region minus
+the accounting at its start), linear in the window. Nothing checks those allocations against the
+headroom once the module is admitted, so the region loop of `_harmonic_reconstruct_cl()` now asks
+`dt_opencl_image_fits_device()` for `DT_HL_CL_REGION_FLOATS_PER_PX` (65) floats per window pixel
+before a big region, and sends a window that does not fit to `_region_cpu_offload_cl()`, which needs
+9 floats per pixel on the device. Only that window goes to the host; the other regions and the rest
+of the pipe stay on the device.
+
+Measured on the same session from an empty cache. With `forced_headroom` at 2500 MiB, both 16 Mpx
+windows were sent to the CPU (`harmonic region window 4749x3476 does not fit the device`), the
+module took 76.1 s on image 18477, `nvidia-smi` peaked at 2398 MiB, and nothing failed. With 900 MiB
+both fit, stayed on the device (31.2 s on 18477, peak 5909 MiB), and 376 module runs were on the GPU.

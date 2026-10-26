@@ -221,7 +221,6 @@ static void _on_toggle(GtkToggleButton *t, gpointer u)
 {
   const gboolean a = gtk_toggle_button_get_active(t);
   GtkWidget *rev = (GtkWidget *)g_object_get_data(G_OBJECT(t), "revealer");
-  GtkWidget *arrow = (GtkWidget *)g_object_get_data(G_OBJECT(t), "arrow");
 
   // Lazily build an event's detail body the first time it is expanded, so the
   // JSON is not parsed for rows the user never opens (important under streaming).
@@ -236,25 +235,23 @@ static void _on_toggle(GtkToggleButton *t, gpointer u)
     }
   }
   if(rev) gtk_revealer_set_reveal_child(GTK_REVEALER(rev), a);
-  if(arrow)
-    gtk_image_set_from_icon_name(GTK_IMAGE(arrow), a ? "pan-down-symbolic" : "pan-end-symbolic",
-                                 GTK_ICON_SIZE_BUTTON);
+  gtk_button_set_label(GTK_BUTTON(t), a ? "▾" : "▸");
 }
 
 // A collapsible block: [arrow toggle][header label] + a revealer holding `body`.
 // The header is a separate label (NOT the toggle), so its hash links stay
 // clickable. Returns a vbox; the toggle button is stored as data "toggle".
+// The arrow is the button's text, not an icon: on Windows, every GtkImage drawn keeps a DC and a
+// DIB section, and with one arrow per event row that ran Ansel out of GDI objects (see
+// doc/gtk-patterns.md). A label costs none.
 static GtkWidget *_collapsible(const char *header_markup, GtkWidget *body, const gboolean expanded)
 {
   GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
 
-  GtkWidget *toggle = gtk_toggle_button_new();
+  GtkWidget *toggle = gtk_toggle_button_new_with_label(expanded ? "▾" : "▸");
   gtk_button_set_relief(GTK_BUTTON(toggle), GTK_RELIEF_NONE);
   gtk_widget_set_focus_on_click(toggle, FALSE);
-  GtkWidget *arrow = gtk_image_new_from_icon_name(expanded ? "pan-down-symbolic" : "pan-end-symbolic",
-                                                  GTK_ICON_SIZE_BUTTON);
-  gtk_container_add(GTK_CONTAINER(toggle), arrow);
 
   GtkWidget *header = gtk_label_new(NULL);
   gtk_label_set_markup(GTK_LABEL(header), header_markup);
@@ -266,7 +263,6 @@ static GtkWidget *_collapsible(const char *header_markup, GtkWidget *body, const
   if(body) gtk_container_add(GTK_CONTAINER(revealer), body);
 
   g_object_set_data(G_OBJECT(toggle), "revealer", revealer);
-  g_object_set_data(G_OBJECT(toggle), "arrow", arrow);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toggle), expanded);
   g_signal_connect(toggle, "toggled", G_CALLBACK(_on_toggle), NULL);
 
@@ -825,8 +821,10 @@ static GtkWidget *_add_mem_section(GtkWidget *parent, const char *key, const cha
   // Clear of the expander's arrow, which the theme packs against it.
   gtk_widget_set_margin_start(hdr, 6);
 
+  // Until the user folds or opens it, a top section is open and what it holds is folded.
+  const gboolean top = parent == _g.mem_box;
   gchar *folded = _mem_conf_key(key, "folded");
-  const gboolean expanded = !dt_conf_get_bool(folded);
+  const gboolean expanded = dt_conf_key_exists(folded) ? !dt_conf_get_bool(folded) : top;
   g_free(folded);
   GtkWidget *expander = gtk_expander_new(NULL);
   gtk_expander_set_label_widget(GTK_EXPANDER(expander), hdr);
@@ -836,7 +834,6 @@ static GtkWidget *_add_mem_section(GtkWidget *parent, const char *key, const cha
   g_signal_connect(expander, "notify::expanded", G_CALLBACK(_on_mem_section_expanded), NULL);
 
   GtkWidget *section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-  const gboolean top = parent == _g.mem_box;
   gtk_widget_set_margin_top(section, top ? 8 : 6);
   if(!top) gtk_widget_set_margin_start(section, 16);
   gtk_box_pack_start(GTK_BOX(section), expander, FALSE, FALSE, 0);
@@ -1329,18 +1326,46 @@ static void _on_clear(GtkButton *b, gpointer u)
   _full_reload();
 }
 
+/* The page shown, the group-by key and the Record box, kept for the next time the window opens. The
+ * page is kept by name, not by index, so that it survives a change in the order of the tabs. */
+#define SUPERVISOR_CONF_PAGE "ui/supervisor/page"
+#define SUPERVISOR_CONF_GROUP_BY "ui/supervisor/group_by"
+#define SUPERVISOR_CONF_RECORD "ui/supervisor/record"
+
+static const char *_page_name(const int page)
+{
+  if(page == _g.page_timeline) return "timeline";
+  if(page == _g.page_grouped) return "grouped";
+  if(page == _g.page_search) return "search";
+  return "memory";
+}
+
+static int _page_from_name(const char *name)
+{
+  if(!g_strcmp0(name, "timeline")) return _g.page_timeline;
+  if(!g_strcmp0(name, "grouped")) return _g.page_grouped;
+  if(!g_strcmp0(name, "search")) return _g.page_search;
+  return _g.page_memory;
+}
+
 static void _on_groupby_changed(GtkComboBox *c, gpointer u)
 {
+  gchar *by = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(c));
+  if(by) dt_conf_set_string(SUPERVISOR_CONF_GROUP_BY, by);
+  g_free(by);
   _rebuild_grouped_now(); // regroup everything under the new key
 }
 
 static void _on_record_toggled(GtkToggleButton *t, gpointer u)
 {
-  dt_supervisor_set_recording(gtk_toggle_button_get_active(t));
+  const gboolean active = gtk_toggle_button_get_active(t);
+  dt_conf_set_bool(SUPERVISOR_CONF_RECORD, active);
+  dt_supervisor_set_recording(active);
 }
 
 static void _on_page_changed(GtkNotebook *nb, GtkWidget *page, guint page_num, gpointer u)
 {
+  dt_conf_set_string(SUPERVISOR_CONF_PAGE, _page_name((int)page_num));
   if((int)page_num == _g.page_grouped)
     _grouped_catch_up(); // fold in whatever arrived while the page was hidden
   else if((int)page_num == _g.page_memory)
@@ -1459,8 +1484,10 @@ void dt_gui_supervisor_window_show(void)
   gtk_box_pack_start(GTK_BOX(vbox), bar, FALSE, FALSE, 0);
 
   GtkWidget *record = gtk_check_button_new_with_label(_("Record"));
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(record), TRUE);
-  dt_supervisor_set_recording(TRUE); // start capturing on open
+  // Capturing on open unless the user unticked it last time.
+  const gboolean recording = !dt_conf_key_exists(SUPERVISOR_CONF_RECORD) || dt_conf_get_bool(SUPERVISOR_CONF_RECORD);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(record), recording);
+  dt_supervisor_set_recording(recording);
   g_signal_connect(record, "toggled", G_CALLBACK(_on_record_toggled), NULL);
   gtk_box_pack_start(GTK_BOX(bar), record, FALSE, FALSE, 0);
 
@@ -1477,7 +1504,11 @@ void dt_gui_supervisor_window_show(void)
   gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(_g.groupby), "domain");
   gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(_g.groupby), "thread");
   gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(_g.groupby), "op");
-  gtk_combo_box_set_active(GTK_COMBO_BOX(_g.groupby), 0);
+  // The combo's ids are its texts, so the kept key selects its entry; an unknown one falls back to domain.
+  gtk_combo_box_set_id_column(GTK_COMBO_BOX(_g.groupby), 0);
+  if(!dt_conf_key_exists(SUPERVISOR_CONF_GROUP_BY)
+     || !gtk_combo_box_set_active_id(GTK_COMBO_BOX(_g.groupby), dt_conf_get_string_const(SUPERVISOR_CONF_GROUP_BY)))
+    gtk_combo_box_set_active(GTK_COMBO_BOX(_g.groupby), 0);
   g_signal_connect(_g.groupby, "changed", G_CALLBACK(_on_groupby_changed), NULL);
   gtk_box_pack_start(GTK_BOX(bar), _g.groupby, FALSE, FALSE, 0);
 
@@ -1493,8 +1524,13 @@ void dt_gui_supervisor_window_show(void)
 
   // notebook with the four pages, tabs spread across the full width
   _g.notebook = gtk_notebook_new();
-  g_signal_connect(_g.notebook, "switch-page", G_CALLBACK(_on_page_changed), NULL);
   gtk_box_pack_start(GTK_BOX(vbox), _g.notebook, TRUE, TRUE, 0);
+
+  _g.mem_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_container_set_border_width(GTK_CONTAINER(_g.mem_box), 6);
+  GtkWidget *sw3 = gtk_scrolled_window_new(NULL, NULL);
+  gtk_container_add(GTK_CONTAINER(sw3), _g.mem_box);
+  _g.page_memory = gtk_notebook_append_page(GTK_NOTEBOOK(_g.notebook), sw3, gtk_label_new(_("Memory")));
 
   _g.timeline_list = gtk_list_box_new();
   gtk_list_box_set_selection_mode(GTK_LIST_BOX(_g.timeline_list), GTK_SELECTION_SINGLE);
@@ -1508,12 +1544,6 @@ void dt_gui_supervisor_window_show(void)
   GtkWidget *sw2 = gtk_scrolled_window_new(NULL, NULL);
   gtk_container_add(GTK_CONTAINER(sw2), _g.grouped_list);
   _g.page_grouped = gtk_notebook_append_page(GTK_NOTEBOOK(_g.notebook), sw2, gtk_label_new(_("Grouped")));
-
-  _g.mem_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-  gtk_container_set_border_width(GTK_CONTAINER(_g.mem_box), 6);
-  GtkWidget *sw3 = gtk_scrolled_window_new(NULL, NULL);
-  gtk_container_add(GTK_CONTAINER(sw3), _g.mem_box);
-  _g.page_memory = gtk_notebook_append_page(GTK_NOTEBOOK(_g.notebook), sw3, gtk_label_new(_("Memory")));
 
   _g.search_list = gtk_list_box_new();
   gtk_list_box_set_selection_mode(GTK_LIST_BOX(_g.search_list), GTK_SELECTION_NONE);
@@ -1529,6 +1559,12 @@ void dt_gui_supervisor_window_show(void)
   g_list_free(pages);
 
   gtk_widget_show_all(_g.window);
+  /* The page left open last time, the memory view at first. Selected before the handler is connected:
+   * appending the first page made it current, which would otherwise have been kept over it. A notebook
+   * shows a page only once it is visible, hence after show_all. */
+  gtk_notebook_set_current_page(GTK_NOTEBOOK(_g.notebook),
+                                _page_from_name(dt_conf_get_string_const(SUPERVISOR_CONF_PAGE)));
+  g_signal_connect(_g.notebook, "switch-page", G_CALLBACK(_on_page_changed), NULL);
   _full_reload();
   _g.timer_id = g_timeout_add(POLL_INTERVAL_MS, _poll, NULL);
 }

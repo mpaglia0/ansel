@@ -86,6 +86,240 @@ fail it on Linux. The thumbnail cache path itself is built on top of this by
 `dt_mipmap_cache_get_filename()`, which hashes the library's absolute path into the directory
 name so two libraries do not share thumbnails.
 
+## What the eviction write persists, and how it handles its files
+
+> **Established 2026-09-30 against `aac2ee1321`.**
+
+`dt_mipmap_cache_deallocate_dynamic()` is the only place a thumbnail reaches the disk cache — on LRU
+eviction and, for everything still resident, from `dt_cache_cleanup()` at exit. Four things about it
+were wrong, and each one is a way to end up with a cached file that should not exist or cannot be
+removed.
+
+**The write predicate is about the entry's state, not its size.** It used to be `dsc->width > 8 &&
+dsc->height > 8` and nothing else, which caught the skull and missed the other two cases:
+
+- **An entry that was never generated** carries `DT_MIPMAP_BUFFER_DSC_FLAG_GENERATE` over an
+  uninitialised `dt_alloc_align()` block, at the mip's full dimensions — so the size test passed and
+  the JPEG encoder was handed whatever the allocator returned. `_generate_blocking()` deliberately
+  leaves such an entry behind whenever the `shutdown` atomic is raised mid-render. Only the async
+  surface fetcher passes one (`dt_view_image_get_surface_async()`: the preview window, slideshow,
+  map, print, studio capture), and it raises it on a resize, an image change, or when its widget
+  goes; lighttable and filmstrip thumbnails go through `dt_view_image_get_surface()`, which passes
+  none, and never abort. The next get of the same key renders over the entry again, so an aborted
+  entry survives only when nothing asks that size of that image again — a preview window enlarged
+  and then closed before its render ended. Eviction and exit wrote it out as a thumbnail of
+  uninitialised heap at the box's full dimensions, which the next session then loaded as valid. The
+  first version of this section called this the common case and said scrolling a filmstrip produced
+  them; the filmstrip never aborts a render (measured below).
+- **An invalidated entry** (`..._FLAG_INVALIDATE`) unlinked its file and then, with no `else` between
+  the two branches, immediately wrote the very buffer that had just been declared stale. The flag
+  is set on a thumbnail only by `dt_mipmap_cache_remove_at_size()` with `flush_disk` TRUE, which
+  unlinks a *second* time once `dt_cache_remove()` has returned, so no stale file outlived the call.
+  What it cost was a JPEG encode and write per removed size, and a window: `dt_cache_remove()`
+  releases the cache lock before that second unlink, and a get of the same key in between runs the
+  allocate callback, which reads the disk cache — the stale file — under that lock. *Read from
+  `src/caches/cache.c` against `2fadf8a366`, not measured.* The first version of this section said
+  that with `flush_disk` FALSE the stale thumbnail was persisted; with `flush_disk` FALSE the flag
+  is never set, and the write is the ordinary eviction write.
+
+**An entry still flagged `GENERATE` is absent to a `DT_MIPMAP_TESTLOCK` get as well.** Keeping it
+off the disk is not enough on its own: unless the embedded JPEG is used (the default for an unedited
+raw), `_init_8()` builds a size from the next larger one a `TESTLOCK` get finds, and that get handed
+back an aborted entry's buffer at the box's full dimensions. The smaller size was downsampled from
+nothing and became an ordinary thumbnail, shown and written to disk. A `TESTLOCK` get now releases
+such an entry and answers as if it were not there, which is also what the other caller, the
+darkroom's "is the cache ready for this size" test, means by it.
+
+*Measured 2026-10-23 against `2fadf8a366` plus #1495*, with a program linked against `libansel` that
+requests size 2 of one NEF with the shutdown atomic already raised, then size 1
+(`lighttable/embedded_jpg=0`, `--disable-opencl`, fresh `--configdir`, `--cachedir` and `--library`):
+
+- **`2fadf8a366`:** a `TESTLOCK` get of size 2 returns 1440×900 of zeros; size 1 is downsampled from
+  it ("generate mip size 1 for image 1 from mip size 2"), 720×450 and all zeros; both are written to
+  the disk cache, black.
+- **With the eviction write fixed only:** size 2 is withheld ("never generated"), and the black size
+  1 is still written.
+- **With the `TESTLOCK` change too:** the get returns no buffer, size 1 is rendered from scratch
+  (300×450, mean byte value 127) and that is what is written.
+
+The buffer read as zeros here, a fresh allocation; nothing guarantees that in a long session. With
+`ansel-generate-cache` and `lighttable/embedded_jpg=0` (one size rendered from scratch, two
+downsampled from a larger one), the three files are bit-identical with and without the change.
+
+**`g_unlink()` must come after `fclose()`, in both halves.** On Windows `DeleteFileW` refuses a file
+that any handle still holds open without `FILE_SHARE_DELETE`, which the CRT's `fopen` never sets. The
+read path unlinked a file it had judged corrupt while its own read handle was open, and the write
+path's error branch unlinked while holding a handle of its own — so on Windows a bad disk-cache entry
+could never be cleared: it was re-read, re-rejected and re-logged on every start, permanently. This
+is invisible on POSIX, where unlinking an open file is ordinary.
+
+**The output file was opened twice.** `dt_imageio_jpeg_write()` opens, writes and closes the path
+itself; the caller also opened it `"wb"` purely to test writability, which truncated it before the
+free-space check ran and held a second handle across the whole write. That outer open is gone — the
+function's return value is the only answer needed.
+
+**A free-space probe that cannot answer must not veto the write.** It ran `statvfs()` on the output
+file (so the file had to exist first, which is why the redundant open was there) and treated an
+unanswerable probe as "no room". `src/win/statvfs.c` built a drive root out of `path[0]`, which is
+right for `C:\...` and wrong for a UNC share, a redirected `%LOCALAPPDATA%` or a drive mounted as a
+folder — and there *every* thumbnail write failed silently. The probe now runs on the directory
+before anything is created, returns TRUE when it cannot answer, and the Windows shim uses
+`GetDiskFreeSpaceExW`, which takes any directory rather than a drive root. Its documentation asks a
+UNC path to end in a backslash, and the cache directory does not, so on a UNC share the probe may
+still fail — now without consequence, since the write goes ahead. Not tried on Windows. That shim
+reports its counts in bytes with `f_frsize == 1`: every consumer computes `f_frsize * f_bavail`,
+which is satisfied exactly, but the true cluster geometry is gone — do not add a consumer that wants
+it without a second query.
+
+The skip is logged under `-d cache` ("is not written to the disk cache: never generated | a skull"),
+because how often an aborted render leaves an entry behind is a question only a real session
+answers.
+
+*Measured 2026-10-23 in the GUI against `2fadf8a366` plus #1495*: twelve hardlinks of one NEF,
+`lighttable/embedded_jpg=0`, fresh `--configdir`, `--cachedir` and `--library`, `-d cache`, aborts
+counted by their `DT_IMAGEIO_ABORTED` ("error 11") line. Scrolling the lighttable and the filmstrip
+for 27 minutes at five thumbnails per row aborted nothing. The preview window opens at 350×350, a
+size the lighttable usually holds already, so it shows at once and renders nothing; enlarging it asks for
+size 2. Opening it on an image the window had not shown yet, enlarging it and closing it within a
+second, on three images, at three thumbnails per row:
+
+- **With master's `src/caches/mipmap_cache.c`:** 14 aborts; size 2 of images 2, 6 and 8 never
+  completed, and all three were written at exit as 1440×900 JPEGs of zeros, where a real render of
+  that image is 600×900; size 1 of images 6 and 8, which the window asked for first and which was
+  aborted too, was written as 720×450 of zeros, where a real one is 300×450.
+- **With #1495:** 11 aborts; the four entries they left behind (size 2 of images 2, 4 and 6, size 1
+  of image 6) are logged "never generated" and not written, and the 13 files written are all real
+  images.
+
+Neither session built a size from an aborted larger one, so the `TESTLOCK` half is measured only by
+the program above.
+
+*Measured 2026-10-23 against `2fadf8a366` plus #1495*, with `ansel-generate-cache --min-mip 0
+--max-mip 2` on one NEF, fresh `--configdir`, `--cachedir` and `--library`, `--disable-opencl`: the
+three thumbnails are written and the skip line appears 0 times; a second run leaves them
+byte-identical; a thumbnail truncated to 0 bytes is reported ("Reason: empty file"), unlinked and
+rewritten identically; and the three files are bit-identical (sha256) to the ones a build of
+`src/caches/mipmap_cache.c` from `2fadf8a366` writes for the same image.
+
+## A thumbnail read from the disk cache is not written back
+
+> **Established 2026-10-24 against `2fadf8a366`.**
+
+`dt_mipmap_cache_deallocate_dynamic()` writes a thumbnail to the disk cache on LRU eviction and, for
+everything still resident, from `dt_cache_cleanup()` at exit. The read path used to leave no trace
+on the entry (`flags = 0`), so that write could not tell a thumbnail read from its file from a fresh
+render, and re-encoded it at every session, at `database_cache_quality` (89 by default). The comment
+above the write said "Don't write existing files as both performance and quality (lossy jpg)
+suffer", and the FIXME under it that it did anyway.
+
+The entry now carries `DT_MIPMAP_BUFFER_DSC_FLAG_ON_DISK` from the read until new pixels are written
+into it, and the write is skipped while it does. Only `dt_mipmap_cache_swap_at_size()`, the
+darkroom's copy, writes new pixels into an entry read from disk, and it clears the flag; generation
+runs only on an entry flagged `GENERATE`, which a read never leaves, and
+`dt_mipmap_cache_write_get()` has no caller. A file deleted from outside behind a resident entry so
+flagged is not written again at eviction; the next session renders it.
+
+*Measured 2026-10-23 and 2026-10-24*, with a program linked against `libansel` that asks sizes 0 to
+2 of one NEF and quits, run in a loop on one cache (`lighttable/embedded_jpg=0`,
+`--disable-opencl`, fresh `--configdir`, `--cachedir` and `--library`):
+
+- **Before the flag** (`2fadf8a366`, 30 sessions, and a branch writing the same bytes session for
+  session, 150 sessions): every session from the second on read the three files and wrote them
+  back. Sizes 0 and 1 reached a fixed point: the file stopped changing after session 8 and session
+  12, at 54.6 and 54.9 dB PSNR from the first file. Size 2 did not: one 8×8 block (x 352–359,
+  y 736–743 of 600×900) gained one level per session, 155 to 254, and stopped only once near white,
+  after about 100 sessions.
+- **With the flag** (`2fadf8a366` plus this change): the three files were byte-identical over 30
+  sessions, and the first one byte-identical to `2fadf8a366`'s; an entry read from disk and then
+  overwritten through `dt_mipmap_cache_swap_at_size()` was written back with the new pixels.
+
+## A failed thumbnail is retried once, and a skull is never a source
+
+> **Established 2026-09-30 against `aac2ee1321`; re-measured 2026-10-25 on top of the eviction
+> rewrite and the embedded-JPEG mode snapshot (`8f8b83d8bf`). The write lock, the full-size reload
+> and the `DT_MIPMAP_TESTLOCK` status filter measured 2026-10-25 against `51de724f6e`.**
+
+`_init_8()` and `_init_f()` report a failure as a zero-sized image. If `_generate_blocking()`
+cleared `DT_MIPMAP_BUFFER_DSC_FLAG_GENERATE` on it, the failure would be latched on the spot: every
+later request takes the "already in cache, no I/O needed" branch and gets the 8×8 skull back, and
+`dt_view_image_get_surface()` reports an 8×8 buffer as `DT_VIEW_SURFACE_OK` — so the widget
+commits it and never asks again. One transient fault would cost an image its thumbnail for the
+whole session, clearable only through "Purge selected thumbnails from cache".
+
+**The retry is bounded, and the descriptor must be restored before it runs.** `GENERATE|RETRIED`
+means "failed once, try again on the next request"; `RETRIED` alone means "failed twice, stopped".
+The trap: a failed attempt leaves the skull's 8×8 in `dsc->width`/`height`, and `_init_8()` opens
+with `if(size >= DT_MIPMAP_F || dsc->width < 16 || dsc->height < 16) return DT_IMAGEIO_OK;` — so
+re-entering with those dimensions does nothing at all, silently, and the skull would be kept as a
+thumbnail that generated. `_generate_blocking()` puts back what
+`dt_mipmap_cache_update_buffer_addresses()` asks for first.
+
+**The retry runs under a write lock.** A `'r'` get of an entry that is not in the cache yet comes
+back write-locked (the allocator has to fill it), but one that is already there comes back
+read-locked — and an entry left at `GENERATE|RETRIED` *is* there. Rendered as it came, the retry
+wrote the pixels, the descriptor and the flags under a read lock, with any number of other readers
+in the same entry. `dt_mipmap_cache_get_with_caller_and_shutdown()` now takes such an entry again
+with `'w'` before `_generate_blocking()`, which re-reads the flags, so a second reader that waited
+behind the first finds nothing left to do. Measured with a probe on the lock's writer field, in the
+GUI: a fresh library of two copies of one NEF, one overwritten with random bytes after import,
+`embedded_jpg=0`, every thumbnail refreshed twice through
+`dt_thumbtable_refresh_thumbnail_real(…, -1, 1)`:
+
+|                                       | `51de724f6e` | with the write lock |
+|---------------------------------------|-------------:|--------------------:|
+| generations under a read lock         |            2 |                   0 |
+| generations under a write lock        |            4 |                   6 |
+| `will try again` / `failed … twice`   |        2 / 2 |               2 / 2 |
+
+The two read-locked generations were both retries (flags `GENERATE|RETRIED`), at mip 0 and at the
+full size.
+
+**The full size keeps its count across the reload.** `dt_imageio_open()` reaches
+`dt_mipmap_cache_alloc()`, which calls `dt_mipmap_cache_update_buffer_addresses()`, which resets the
+flags to `GENERATE` alone — on an allocation failure too. A retry that got that far forgot it was
+the retry, failed, and was granted another, on every request. `_generate_blocking()` carries
+`RETRIED` over the call. From the code, not measured: a random-bytes file fails in the loader
+before any allocation, so the repro above does not reach it.
+
+**A skull is not a downsample source.** `_init_8()` fills a size from the first larger size present
+in RAM, through a `DT_MIPMAP_TESTLOCK` get. An entry that failed twice is no longer flagged
+`GENERATE`, and has the dead image as its buffer: returned to that get, it would fill the smaller
+mips, marked as generated **without ever attempting their own generation**. So the
+`DT_MIPMAP_TESTLOCK` get returns neither an entry flagged `GENERATE` nor one whose `dsc->status` is
+not `DT_IMAGEIO_OK` — every failure path of `_init_8()` returns a non-OK status, and the full size
+stores the loader's. Its other caller, the darkroom's preview handover, reads an entry
+`dt_mipmap_cache_swap_at_size()` has just written with `DT_IMAGEIO_OK`, and that swap also clears
+`RETRIED`: new pixels leave no failure to retry.
+
+> **An earlier account of this failure was wrong, and the measurement is the reason to record it.**
+> It said the propagated skull, "being larger than 8×8, then cleared the 'don't write skulls' guard
+> on eviction and reached the disk cache, where it survived restarts". It does not.
+> `dt_iop_flip_and_zoom_8()` never upscales, so the copy comes out 8×8 as well
+> (`generate mip size 1 for image 1 from mip size 2 (8x8->8x8)`) and the guard holds — measured on
+> `aac2ee1321` with a corrupt source: 2 mips filled from the skull, 0 JPEGs written. The harm is the
+> latching of the smaller sizes, not disk contamination.
+
+Reproducing this needs a failure that happens **after** the downsample loop, which rules out the
+obvious repro: `!input_exists` returns early, above the loop. Replace an imported file's contents
+with random bytes instead, and set `lighttable/embedded_jpg=0` — otherwise `use_embedded_jpg` is
+TRUE for an unaltered image and the loop is skipped entirely.
+
+Measured that way (a 200 kB random-bytes NEF, `ansel-generate-cache --min-mip 0 --max-mip 2
+-d cache`, `--disable-opencl`, fresh `--configdir`, `--cachedir` and `--library`):
+
+|                                  | `8f8b83d8bf` | with the retry |
+|----------------------------------|-------------:|---------------:|
+| `could not process thumbnail`    |            1 |              3 |
+| `will try again`                 |            — |              4 |
+| `generate mip size … from mip size` |         2 |              0 |
+| JPEGs on disk                    |            0 |              0 |
+
+Without the retry, one generation is attempted and the two smaller sizes are filled from its skull;
+with it, each size attempts its own. Every failed size still carries `GENERATE` in this run, so it
+does not exercise the status filter: `ansel-generate-cache` asks once per size and never reaches a
+size that has failed twice. With the write lock and the status filter on top of `51de724f6e`, the
+same run gives the same four lines: 3, 4, 0, 0.
+
 ## Mipmap invalidation is explicit, not hash-driven
 
 *Found `22f623c0be`, 2026-06-25.*
@@ -125,6 +359,62 @@ back on Ctrl+Z. It reports `invalid cache entry size 0 for module basebuffer`, t
 path answers with an 8x8 husk, and no later render replaces it. **Only a developed image shows
 this**: an unaltered one is drawn from the embedded JPEG and never asks for the input at all,
 which is why the symptom reads as "one broken thumbnail" rather than as a cache bug.
+
+## The embedded-JPEG mode is what the cache was told, not what conf says
+
+> **Established 2026-10-24 against `2fadf8a366`.**
+
+The cache never reads `lighttable/embedded_jpg`. `_init_8()` decides between the embedded JPEG and
+the raw from `dt_mipmap_cache_settings_t.embedded_jpg`, which `dt_mipmap_cache_set_settings()`
+sets at startup and on `DT_SIGNAL_PREFERENCES_CHANGE`. The lighttable's thumbnail menu
+(`_jpg_combobox_changed()`, `gui/actions/display.c`) changes the mode without that signal, so it
+tells the cache itself, and does so **before** it purges: a thumbnail regenerated between the
+purge and the change would be rendered in the old mode and cached.
+
+The purge drops the thumbnails on disk too (`flush_disk = TRUE`). A file in the disk cache does
+not record which mode rendered it, and the disk read in the get path takes it as it is.
+
+Measured with `-d cache` on a copy of a 51-image collection, switching from "Always process the
+RAW" to "Always use embedded JPG". When the menu wrote only the conf key, the purged thumbnails
+were rendered again from the raw (`fetch … float32 … from original file I/O`, none
+`from embedded jpeg`), for more than four minutes, one pipe at a time. With the cache told, 21
+came from the embedded JPEG, one image with none became a skull
+(`embedded JPEG mode forbids raw processing`), no raw was decoded, and all were done 1.1 s after
+the purge.
+
+### A render in flight across the change is not kept
+
+> **Established 2026-10-25 against `a8d4f8e203`.**
+
+The purge cannot reach a thumbnail that is being rendered. `_generate_blocking()` runs under the
+entry's write lock, and `dt_mipmap_cache_remove_at_size()` takes the entry with
+`dt_cache_testget(..., 'w')`: a locked entry is neither flagged nor removed, only its file on disk
+is unlinked. The render cannot be stopped either. The lighttable asks for its thumbnails through
+`dt_view_image_get_surface()`, which passes no shutdown flag, and the refresh after the purge only
+orphans the job, whose cache entry the render still fills. A worker waiting on
+`dt_pipeline_threadsafe_mutex()` already holds its entry and has already chosen the raw, so a
+change usually finds several renders in flight.
+
+`_generate_blocking()` therefore reads the mode once, hands it to `_init_8()`, and reads it again
+when `_init_8()` returns. If it changed, the result is dropped the way a stopped pipe's is: the
+descriptor is restored, the buffer invalidated, `DT_MIPMAP_BUFFER_DSC_FLAG_GENERATE` kept, and the
+next request renders it in the new mode (`-d cache` prints `rendered in embedded JPEG mode 0, now
+2: not kept`). Waiting for the renders in the purge instead would hold the GUI thread for as long as
+the slowest of them, more than a minute here. The renders still run to their end; only their result
+is discarded.
+
+Measured with `-d cache` on the same copy, a session started in "Always process the RAW" on an
+empty cache, switched from gdb as the menu does (conf, `dt_mipmap_cache_set_settings()`, purge of
+the 51 images, thumbtable refresh) once the first raw thumbnail was done. Both runs had seven
+`DT_MIPMAP_0` renders in `_generate_blocking()` at the switch. Without the check, all seven
+finished from the raw 108 to 131 s after the switch and were kept, and the lighttable then read
+each of them from RAM (`will skip disk I/O, found in RAM cache`). With it, all seven finished 14 to
+104 s after the switch, were dropped, and were rendered again from the embedded JPEG 0.05 to 0.66 s
+after the drop; no raw thumbnail was kept.
+
+Two windows remain, of the same kind and present before: a change between the second read and the
+end of `_generate_blocking()`, a few microseconds, and an entry a reader holds read-locked while
+the purge passes, which any purge skips.
 
 ## The darkroom copies a frame into the thumbnail only when it carries no overlay
 
