@@ -52,6 +52,7 @@
 #include "caches/pixelpipe_cache_alloc.h"
 #include "common/file_location.h"
 #include "common/grealpath.h"
+#include "common/image_extensions.h"
 #include "caches/image_cache.h"
 #include "develop/pixelpipe_hb.h"
 #include "develop/supervisor.h"
@@ -336,54 +337,40 @@ exit:
 }
 
 /**
- * @brief Check if an image should be written to disk, and optionaly return what choosing the source of its
- * thumbnail needs, like whether the input is a JPEG file, if it exists on the filesystem, and if the image
- * was edited.
+ * @brief Return what choosing the source of a thumbnail needs: the input file, whether it exists
+ * on the filesystem, whether it is a JPEG, whether the image was edited, and whether it may be a raw.
  *
  * @param imgid Database SQL ID of the image
- * @param filename Filename of the input file. Can be NULL.
- * @param ext Extension of the input file. Can be NULL.
- * @param input_exists Whether the file can be found on the filesystem. Can be NULL.
- * @param is_jpg_input Whether the file is a JPEG. Can be NULL.
- * @param altered Whether the image has a history, which embedded JPEG mode 1 asks. Can be NULL.
- * @param write_to_disk Whether the cached thumbnail should be flushed to disk before being flushed from RAM. Can
- * be NULL.
+ * @param filename Filename of the input file, empty when there is none.
+ * @param ext Extension of the input file, with its dot.
+ * @param input_exists Whether the file can be found on the filesystem.
+ * @param is_jpg_input Whether the file is a JPEG.
+ * @param altered Whether the image has a history, which embedded JPEG mode 1 asks.
+ * @param may_be_raw Whether the image is a raw, or, before its first decode, has a raw extension,
+ * which the embedded JPEG modes ask.
  */
-static void _write_mipmap_to_disk(const int32_t imgid, char *filename, char *ext, gboolean *input_exists,
-                                  gboolean *is_jpg_input, gboolean *altered, gboolean *write_to_disk)
+static void _get_thumbnail_input(const int32_t imgid, char *filename, char *ext, gboolean *input_exists,
+                                 gboolean *is_jpg_input, gboolean *altered, gboolean *may_be_raw)
 {
-  // Get file name
-  char _filename[DT_PATH_MAX] = { 0 };
   const dt_image_t *img = dt_image_cache_get(imgid, 'r');
-  if(filename || ext || input_exists || is_jpg_input)
-  {
-    const dt_image_path_source_t source = dt_image_choose_input_path(img, _filename, sizeof(_filename), FALSE);
-    if(source == DT_IMAGE_PATH_NONE) _filename[0] = '\0';
-    if(filename) strncpy(filename, _filename, DT_PATH_MAX);
-    if(input_exists) *input_exists = (source != DT_IMAGE_PATH_NONE);
-  }
+  const dt_image_path_source_t source = dt_image_choose_input_path(img, filename, DT_PATH_MAX, FALSE);
+  if(source == DT_IMAGE_PATH_NONE) filename[0] = '\0';
+  *input_exists = (source != DT_IMAGE_PATH_NONE);
 
-  // Get the file extension
-  if(ext || is_jpg_input)
-  {
-    char *_ext = _filename + strlen(_filename);
-    while(*_ext != '.' && _ext > _filename) _ext--;
-    if(ext) strncpy(ext, _ext, 5);
-    if(is_jpg_input) *is_jpg_input = !strcasecmp(_ext, ".jpg") || !strcasecmp(_ext, ".jpeg");
-  }
+  const char *_ext = filename + strlen(filename);
+  while(*_ext != '.' && _ext > filename) _ext--;
+  g_strlcpy(ext, _ext, 6);
+  *is_jpg_input = !strcasecmp(_ext, ".jpg") || !strcasecmp(_ext, ".jpeg");
 
-  if(altered) *altered = !IS_NULL_PTR(img) && img->history_items > 0;
+  *altered = !IS_NULL_PTR(img) && img->history_items > 0;
 
-  // Save to cache only if the option is enabled by user and the thumbnail is not the embedded thumbnail
-  // The rationale is getting the un-processed JPEG thumbnail is cheap and not worth saving on disk.
-  // This allows fast toggling between JPEG and processed RAW thumbnail from GUI.
-  if(write_to_disk)
-  {
-    *write_to_disk = _settings_get().disk_backend;
-  }
+  // Before the first decode, an image is neither LDR nor HDR when its extension leaves that open,
+  // but the extension itself settles the question asked here: a .tif or a .heif is RGB, whether
+  // LDR or HDR; only a raw extension, like .dng, may be a raw.
+  *may_be_raw = IS_NULL_PTR(img) || dt_image_needs_rawprepare(img)
+                || (!dt_image_is_ldr(img) && !dt_image_is_hdr(img) && dt_image_ext_is_raw(_ext + 1));
 
-  if(img)
-    dt_image_cache_read_release(img);
+  if(img) dt_image_cache_read_release(img);
 }
 
 
@@ -616,10 +603,7 @@ void dt_mipmap_cache_allocate_dynamic(void *data, dt_cache_entry_t *entry)
     if(img) dt_image_cache_read_release(img);
   }
 
-  gboolean write_to_disk;
-  _write_mipmap_to_disk(imgid, NULL, NULL, NULL, NULL, NULL, &write_to_disk);
-
-  if(cache->cachedir[0] && write_to_disk && mip < DT_MIPMAP_F)
+  if(cache->cachedir[0] && _settings_get().disk_backend && mip < DT_MIPMAP_F)
   {
     // try and load from disk, if successful set flag
     char filename[DT_PATH_MAX] = {0};
@@ -822,9 +806,7 @@ void dt_mipmap_cache_deallocate_dynamic(void *data, dt_cache_entry_t *entry)
     // Neither a render that never ran (GENERATE, over an uninitialised buffer) nor a skull (8x8).
     else if(!(dsc->flags & DT_MIPMAP_BUFFER_DSC_FLAG_GENERATE) && dsc->width > 8 && dsc->height > 8)
     {
-      gboolean write_to_disk = FALSE;
-      _write_mipmap_to_disk(imgid, NULL, NULL, NULL, NULL, NULL, &write_to_disk);
-      if(cache->cachedir[0] && write_to_disk) _write_thumbnail_to_disk_cache(dsc, imgid, mip);
+      if(cache->cachedir[0] && _settings_get().disk_backend) _write_thumbnail_to_disk_cache(dsc, imgid, mip);
     }
     else
     {
@@ -907,6 +889,22 @@ void dt_mipmap_cache_init(const dt_mipmap_cache_settings_t *settings, const gboo
   dt_cache_set_cleanup_callback(&cache->mip_f.cache, dt_mipmap_cache_deallocate_dynamic, cache);
   cache->buffer_size[DT_MIPMAP_F]
       = _get_entry_size(4 * sizeof(float) * cache->max_width[DT_MIPMAP_F] * cache->max_height[DT_MIPMAP_F]);
+}
+
+void dt_mipmap_cache_flush_to_disk(void)
+{
+  dt_mipmap_cache_t *cache = _mipmap_cache;
+  if(IS_NULL_PTR(cache)) return;
+
+  /* A fill ratio of 0 evicts every entry no other thread holds. The eviction walk is reused because
+   * it already skips held entries and runs the cleanup callback, which writes the thumbnail. Only
+   * mip_thumbs: DT_MIPMAP_F and DT_MIPMAP_FULL are never written to disk. */
+  const size_t reclaimed = dt_cache_gc(&cache->mip_thumbs.cache, 0.0f);
+
+  // What left RAM, not what was written: an entry read from its file is dropped unwritten. The
+  // callback logs each write on its own.
+  _cache_print(DT_DEBUG_CACHE, "[mipmap_cache] flushed to disk: %.2f MB evicted from RAM\n",
+               reclaimed / (1024.0 * 1024.0));
 }
 
 void dt_mipmap_cache_cleanup(void)
@@ -1715,7 +1713,8 @@ static dt_imageio_retval_t _init_8(struct dt_mipmap_buffer_dsc *dsc, const int32
   gboolean input_exists = FALSE;
   gboolean is_jpg_input = FALSE;
   gboolean altered = FALSE;
-  _write_mipmap_to_disk(imgid, filename, ext, &input_exists, &is_jpg_input, &altered, NULL);
+  gboolean may_be_raw = TRUE;
+  _get_thumbnail_input(imgid, filename, ext, &input_exists, &is_jpg_input, &altered, &may_be_raw);
 
   // embedded JPG mode:
   // 0 = never use embedded thumbnail
@@ -1823,7 +1822,9 @@ static dt_imageio_retval_t _init_8(struct dt_mipmap_buffer_dsc *dsc, const int32
 
   if(!res) return DT_IMAGEIO_OK;
 
-  if(embedded_jpg_mode == 2)
+  // Mode 2 spares the cost of decoding a raw. A PNG, a TIFF or any other RGB file usually has
+  // no embedded preview, and is itself the cheap picture that preview stands in for.
+  if(embedded_jpg_mode == 2 && may_be_raw)
   {
     _cache_print(DT_DEBUG_CACHE,
              "[mipmap_cache] embedded JPEG mode forbids raw processing for image %d at mip %d\n",
@@ -1834,6 +1835,10 @@ static dt_imageio_retval_t _init_8(struct dt_mipmap_buffer_dsc *dsc, const int32
     dsc->color_space = DT_COLORSPACE_NONE;
     return DT_IMAGEIO_NO_EMBEDDED_THUMBNAIL;
   }
+
+  // What an embedded preview shows of a raw is the picture before any edit. An RGB file that has
+  // none shows the same, so the embedded modes render it without its history.
+  const gboolean ignore_history = use_embedded_jpg && !may_be_raw;
 
   // try the real thing: rawspeed + pixelpipe
   dt_imageio_module_format_t format;
@@ -1848,7 +1853,8 @@ static dt_imageio_retval_t _init_8(struct dt_mipmap_buffer_dsc *dsc, const int32
   // no upscaling and signal we want thumbnail export
   const dt_imageio_retval_t status
       = dt_imageio_export_with_flags(imgid, "unused", &format, (dt_imageio_module_data_t *)&dat, TRUE, FALSE,
-                                     FALSE, FALSE, TRUE, NULL, FALSE, FALSE, DT_COLORSPACE_ADOBERGB, NULL,
+                                     FALSE, FALSE, TRUE, ignore_history, NULL, FALSE, FALSE,
+                                     DT_COLORSPACE_ADOBERGB, NULL,
                                      DT_INTENT_LAST, NULL, NULL, 1, 1, NULL, shutdown);
   if(status != DT_IMAGEIO_OK)
   {
@@ -1873,11 +1879,7 @@ static dt_imageio_retval_t _init_8(struct dt_mipmap_buffer_dsc *dsc, const int32
 void dt_mipmap_cache_copy_thumbnails(const uint32_t dst_imgid, const uint32_t src_imgid)
 {
   dt_mipmap_cache_t *cache = _mipmap_cache;
-  gboolean write_to_disk_src, write_to_disk_dst;
-  _write_mipmap_to_disk(src_imgid, NULL, NULL, NULL, NULL, NULL, &write_to_disk_src);
-  _write_mipmap_to_disk(dst_imgid, NULL, NULL, NULL, NULL, NULL, &write_to_disk_dst);
-
-  if(cache->cachedir[0] && write_to_disk_src && write_to_disk_dst)
+  if(cache->cachedir[0] && _settings_get().disk_backend)
   {
     for(dt_mipmap_size_t mip = DT_MIPMAP_0; mip < DT_MIPMAP_F; mip++)
     {
