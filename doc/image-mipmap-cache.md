@@ -479,6 +479,74 @@ The second size in a `synchronized` line is the entry's size before the downscal
 for an entry that was just allocated and the fitted size otherwise, so it does not mean the image
 was stretched.
 
+## A failed database read is not a missing image
+
+> **Measured 2026-10-26 on `b0f10525fd` (the probe on `f6f82cbf45`, which differs only in the
+> exit path), and 2026-10-27 with this change on top of `b0f10525fd`.** RelWithDebInfo, clang 19.
+> A probe linked to `libansel.so`, with the library on disk and a second SQLite connection taking
+> `BEGIN EXCLUSIVE`; and the lighttable on Xephyr with 40 images, driven by an `LD_PRELOAD` shim
+> that calls the real actions on the GUI thread, with an outside Python writer and `/proc/locks`
+> sampled every 2 ms.
+
+`dt_image_repository_load()` tells three outcomes apart:
+
+| `sqlite3_step()` | `img` | stderr |
+|---|---|---|
+| `SQLITE_ROW` | filled from the row | — |
+| `SQLITE_DONE`: no such row, the image was removed | `id = UNKNOWN_IMAGE`, the rest as it was | — |
+| anything else: `SQLITE_BUSY`, an I/O error | as it was | one line |
+
+An id left at `UNKNOWN_IMAGE` is not a passing state. The image cache keeps the entry, and
+`dt_image_cache_get()` answers NULL for that image for as long as the entry stays cached; the
+thumbnail path reads that NULL as "File not found" (see "Why a thumbnail is a skull" below), and
+"Purge selected thumbnails from cache" does not help, since it drops thumbnails, not image cache
+entries: on `b0f10525fd`, where a failed read did write the id, every visible thumbnail (20) failed
+to generate again after it. So a failed read leaves the struct alone:
+`dt_image_cache_get_reload()` reloads a live entry in place, with no `dt_image_init()`, and the
+entry keeps the last values that did come from the database.
+
+**The allocate path is not covered.** `dt_image_cache_allocate()` runs `dt_image_init()` before
+the load, so a read that fails there still leaves an invalid entry: in the probe, an image first
+asked for during a 2 s lock stayed NULL after it.
+
+**When a read can fail.** Ansel's connection holds a SHARED lock on `library.db` almost all the
+time — 40.0 s out of 40.1 s in the lighttable — because the cached statement of
+`dt_image_repository_load()`, stepped to `SQLITE_ROW` and not reset, keeps its read transaction
+open. While it does, no read can fail with `SQLITE_BUSY`, and an outside writer never gets its
+EXCLUSIVE lock. A load that finds no row runs the statement to `SQLITE_DONE` and ends the
+transaction; until the next successful load, an outside lock fails every read. Removing an image
+from the lighttable did not open that window: the lock went to RESERVED for the removal and back
+to SHARED within 3 ms. In the window (an absent id read, then an 8 s EXCLUSIVE lock, then two
+stars on 40 images), all 40 reloads failed; their entries stayed valid and the purged thumbnails
+regenerated. The rating itself was lost, as every write of Ansel's is while that lock is held.
+
+**Ansel's writes fail as well, and silently.** While an outside writer waits for the lock
+(PENDING), every write of Ansel's fails at once and nothing is shown: with a client committing in
+a loop, one of two 40-image rotations was lost; with an 8 s lock attempt, a two-star rating on 40
+images.
+
+**There is no busy timeout, on purpose.** SQLite does not call the busy handler when a connection
+already in a read transaction asks for the write lock, since that could deadlock, and it is
+Ansel's usual state: with `sqlite3_busy_timeout(5000)`, the same rotation and the same rating were
+lost. The timeout does act in the window above, where the rating then waited for the lock and was
+kept, but on the GUI thread: it stalled 4.57 s for an 8 s lock, and 26.61 s for a 30 s one with
+three retries of the read on top. And the allocate path runs under the image cache's global lock:
+during such a wait, another thread asking for an image already in cache waited 14.89 s.
+
+**Testing it.** A second connection in the same process locks the file as another program would;
+it takes no second process. It does take a library on disk, since on `":memory:"` each connection
+has a database of its own. And nothing of Ansel's may hold a read transaction when the lock is
+taken, or `BEGIN EXCLUSIVE` itself fails: one successful `dt_image_repository_load()` is enough.
+`tests/unittests/test_image_repository.c` pins both cases. The absent one starts from a struct
+that looks loaded, since from `UNKNOWN_IMAGE` the assertion would hold without the write. The
+success path reads conf (`dt_image_film_roll_name()`); `test_image_cache_flags_writeback.c`, whose
+fixture initialises it, covers that.
+
+Claims of an earlier version of this section, found wrong: that provoking `SQLITE_BUSY` takes a
+second process; that the purge brings back an image whose read failed; that a moment's lock by an
+indexer or a backup agent could cost a thumbnail at any time — outside the window above, it cannot
+fail a read; and that a busy timeout waits such a lock out — not for a connection already reading.
+
 ## Releasing an image cache entry returns the LOCK, not the image
 
 *Found `2a0a1efe91`, 2026-09-06.*
@@ -541,13 +609,79 @@ carries its final history. Any future caller of `dt_image_duplicate()` that will
 image's history afterward (a style, a batch edit, ...) should do the same rather than let the
 default immediate reload race its own follow-up write.
 
+## A cache entry that cannot be allocated
+
+*Measured 2026-10-28 on top of `0ba2521c6f`, by an `LD_PRELOAD` shim that fails `posix_memalign()`
+(where `dt_alloc_align()` ends) only while the stack holds a given allocate callback, both being
+exported from `libansel.so`: on the `ansel-cli` export of `tools/check_it_runs.sh`, and on
+`ansel-generate-cache --min-mip 2 -m 2` over the library that export leaves. Leaks counted by
+memcheck 3.22, which intercepts the allocation functions of every object, the shim's included,
+unless run with `--soname-synonyms=somalloc=nouserintercepts`.*
+
+`dt_cache_get()` answers NULL when the key was not cached and the allocate callback left
+`entry->data` NULL. The entry goes back to `g_slice_free1()`, its allocator, and its LRU cell
+with it: nothing else would free the cell, since the entry was never inserted (memcheck: 24 bytes
+definitely lost per failure while it stayed). A cached key never takes that path, so the demote
+re-gets — of an entry marked `_lock_demoting`, which `_cache_gc_locked()` and `dt_cache_remove()`
+skip — cannot answer NULL and do not check.
+
+**Mipmap cache.** `dt_mipmap_cache_allocate_dynamic()` leaves `entry->data` NULL when
+`dt_alloc_align()` fails. A blocking get then answers status `CACHE_FULL` with a NULL
+`cache_entry`: no buffer for a `DT_MIPMAP_F` or `DT_MIPMAP_FULL` input, and for a thumbnail the
+8x8 skull itself, `_skull_8`, shared and read-only since no entry holds a copy (releasing it is a
+no-op, as for any buffer without an entry). The status matters to the export, which hands it
+back: `OK` with no buffer would read as a success there — `_init_8()` would then copy into the
+descriptor the output size the export sets only after its pipe ran (measured: the disk-cache write
+of that thumbnail fails on libjpeg's "Maximum supported image dimension is 65500 pixels").
+
+A NULL `cache_entry` with `CACHE_FULL` is a failure of this very request, where a failed render or
+decode leaves an entry behind. The two callers that see it open a "Not enough memory" window,
+which `caches/` cannot do itself, sitting below `control/`:
+`_view_image_get_surface_internal()` (`views/view.c`) for a thumbnail, whose skull reads "Out of
+RAM" like any `CACHE_FULL` skull, and `_dt_dev_mipmap_prefetch_full()` (`develop/develop.c`) for a
+full-size input, with the message `dt_imageio_open()` gives a decode that ran out of memory, so
+both land in one window. *Seen in the GUI on top of `600b680296`, the same day, all thumbnail
+allocations refused: three skulls labelled "RAM insuffisante" and one window listing the three
+files; `ansel-cli` prints the full-size window on stderr.* Nothing is cached, so every new request
+for that thumbnail tries the allocation again (a zoom change: 24 refusals, 8 per image, measured
+on top of `600b680296`), and a `dt_control_alert()` would bring the window back at each one once OK
+is clicked. So both callers, and `dt_imageio_open()` for its decode, raise it with
+`dt_control_alert_once()` (on top of `c2a2a33088`): the window lists every file refused while it is
+up, and once closed it does not open again this session for that message -- the skulls keep
+saying it on the thumbnails. *Seen in the GUI on top of `c2a2a33088`, 2026-10-28, under the same refusals: the
+window listed the three files, and after OK a zoom change left the skulls and did not bring it
+back.* An alert raised without `once` under the same title and message
+still opens the window, and the `once` items that come while it is up are listed in it.
+
+In an export, the first get to fail is `_dt_dev_mipmap_prefetch_full()`, through
+`dt_dev_load_image()`, whose failure the export does not check. One failure and the run goes on
+to fail in the pipe, `basebuffer` reading a 0x0 input: `PROCESSING_FAILED` (measured, `error 10`
+on the thumbnail). Two in a row and the export's own get fails: `CACHE_FULL` (`error 3`).
+`basebuffer` fails its run on a NULL buffer as well, which takes the entry being evicted after the
+export's get and not re-allocated (by reading: the shim cannot order that eviction).
+
+**Image cache.** `dt_image_cache_allocate()` returns early when `dt_alloc_align()` fails, saying
+so on stderr (`[image_cache] could not allocate a cache entry for image N`), and
+`dt_image_cache_get()` and `dt_image_cache_get_reload()` answer NULL. No window says it: `caches/`
+cannot open one, and not every caller checks -- an import crashes right after the line, on
+`img->group_id` in `_image_import_internal()` (`common/image.c`). Counted on top of `314f2a3875`,
+18 of the 97 calls outside `image_cache.c` dereference the answer untested: a script flags an
+assignment with no NULL test in the next five lines, and each flag was then read. Two flags are
+not dereferences: `_get_thumbnail_input()` (`mipmap_cache.c`) hands the answer to
+`dt_image_choose_input_path()` and tests it further down, and `ansel-cli` hands it to
+`dt_exif_xmp_read()`, which answers 1 for NULL -- the CLI then says it cannot open the XMP file and
+exits. `variables.c`'s, in a conditional expression, was found by reading. They are the same callers that a NULL for a vanished row reaches (see "A failed
+database read is not a missing image").
+
 ## Why a thumbnail is a skull, and how it says so
 
 *Found `8bef6908d9`, 2026-10-05, by reading every path that zeroes a thumbnail's size (#1531).*
 
-A skull is painted by one function: `_paint_skulls()` (`caches/mipmap_cache.c`) replaces any
-thumbnail whose descriptor came out of generation as `0x0` with the 8x8 `dead_image_8()`. Every
-cause therefore goes through zeroing `dsc->width/height`, and until this change the cause was
+A skull is one 8x8 pattern, `_skull_8` (`caches/mipmap_cache.c`). `_paint_skulls()` copies it
+(`dead_image_8()`) over any thumbnail whose descriptor came out of generation as `0x0`; a
+thumbnail whose entry could not be allocated is handed the pattern itself (see "A cache entry that
+cannot be allocated"). Every cause of a failed render therefore goes through zeroing
+`dsc->width/height`, and until this change the cause was
 lost there — stderr only got `could not process thumbnail!`. The causes, each now kept as a
 `dt_imageio_retval_t` in `dsc->status` and handed to readers in `dt_mipmap_buffer_t.status`:
 
@@ -558,6 +692,8 @@ lost there — stderr only got `could not process thumbnail!`. The causes, each 
 | `_generate_blocking`, `DT_MIPMAP_FULL` | every decoder failed | `dt_imageio_open()`'s reason: see "Which loader failure a skull names" |
 | `_generate_blocking`, `DT_MIPMAP_FULL` | no source any more: the file went after `_init_8`'s check, or the image left the image cache | `FILE_NOT_FOUND` |
 | `dt_imageio_open` | the path exists but is not a regular file | `FILE_NOT_FOUND` |
+| `dt_mipmap_cache_get`, a thumbnail size | the thumbnail's own entry could not be allocated: the shared skull, with no entry behind it | `CACHE_FULL` |
+| `dt_imageio_export_with_flags` | the full-size input's mipmap entry could not be allocated: see "A cache entry that cannot be allocated" | `CACHE_FULL` |
 | `dt_imageio_export_with_flags` | pipe init failed, or the pipe returned an error / no backbuf | `PROCESSING_FAILED` |
 | `dt_imageio_export_with_flags` | the pipe returned an error after the pixelpipe cache refused it memory | `CACHE_FULL` |
 | `dt_imageio_export_with_flags` | the pipe was stopped (`dt_dev_pixelpipe_process` returns the same `1` for a kill-switch stop as for a failure) | `ABORTED` |

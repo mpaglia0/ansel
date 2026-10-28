@@ -228,7 +228,10 @@ restart:
 
   if(IS_NULL_PTR(entry->data))
   {
-    dt_free(entry);
+    /* The entry came from g_slice_alloc(), which before GLib 2.76 is not g_free()'s allocator. Its
+     * LRU cell goes with it: the entry was never inserted, so nothing else would free it. */
+    g_list_free(entry->link);
+    g_slice_free1(sizeof(*entry), entry);
     dt_pthread_mutex_unlock(&cache->lock);
     return NULL;
   }
@@ -439,6 +442,8 @@ int dt_cache_seed(dt_cache_t *cache, const uint32_t key, const void *data, size_
   entry->data = dt_alloc_align(entry->data_size);
   if(IS_NULL_PTR(entry->data))
   {
+    // same as the failure path in dt_cache_get_with_caller(): the LRU cell goes with the entry
+    g_list_free(entry->link);
     g_slice_free1(sizeof(*entry), entry);
     dt_pthread_mutex_unlock(&cache->lock);
     return -1;

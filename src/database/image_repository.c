@@ -1,6 +1,7 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2025 Aurélien PIERRE.
+    Copyright (C) 2025-2026 Aurélien PIERRE.
+    Copyright (C) 2026 Guillaume Stutin.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -226,16 +227,25 @@ gboolean dt_image_repository_load(const int32_t imgid, dt_image_t *img)
   sqlite3_reset(stmt);
   sqlite3_clear_bindings(stmt);
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
-  if(sqlite3_step(stmt) == SQLITE_ROW)
+  const int rc = sqlite3_step(stmt);
+  if(rc == SQLITE_ROW)
   {
     dt_image_from_stmt(img, stmt);
     found = TRUE;
   }
+  else if(rc == SQLITE_DONE)
+  {
+    // no such row: the image was removed, which is ordinary and not an error
+    img->id = UNKNOWN_IMAGE;
+  }
   else
   {
-    img->id = -1;
-    fprintf(stderr, "[image_repository_load] failed to open image %" PRId32 " from database: %s\n", imgid,
-            sqlite3_errmsg(dt_database_get_sqlite3_global()));
+    /* The read failed (SQLITE_BUSY while another program holds the library's lock, an I/O
+     * error), which says nothing about the image, so img is left as it was.
+     * dt_image_cache_get_reload() reloads a live entry in place: marking it invalid here would
+     * make dt_image_cache_get() answer NULL for that id for as long as the entry stays cached. */
+    fprintf(stderr, "[image_repository_load] could not read image %" PRId32 " from the database: %s\n",
+            imgid, sqlite3_errstr(rc));
   }
 
   dt_pthread_mutex_unlock(&_image_stmt_mutex);
