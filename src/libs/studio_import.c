@@ -66,6 +66,34 @@ typedef struct dt_lib_studio_import_t
   GtkWidget *toggle;
 } dt_lib_studio_import_t;
 
+/** Fixed head of a preset blob; the strings of _studio_import_preset_keys follow, each NUL-terminated,
+    in their enum order. The project date is not part of a preset: it changes with every shoot. */
+typedef struct dt_lib_studio_import_params_t
+{
+  int32_t copy;
+  int32_t delete_source;
+  int32_t on_conflict;
+  int32_t interval;
+} dt_lib_studio_import_params_t;
+
+typedef enum dt_lib_studio_import_preset_string_t
+{
+  DT_STUDIO_IMPORT_PRESET_FOLDER,
+  DT_STUDIO_IMPORT_PRESET_JOBCODE,
+  DT_STUDIO_IMPORT_PRESET_BASE_FOLDER,
+  DT_STUDIO_IMPORT_PRESET_SUBFOLDER_PATTERN,
+  DT_STUDIO_IMPORT_PRESET_FILE_PATTERN,
+  DT_STUDIO_IMPORT_PRESET_STRINGS
+} dt_lib_studio_import_preset_string_t;
+
+static const char *const _studio_import_preset_keys[DT_STUDIO_IMPORT_PRESET_STRINGS] = {
+  [DT_STUDIO_IMPORT_PRESET_FOLDER] = "studio_capture/folder",
+  [DT_STUDIO_IMPORT_PRESET_JOBCODE] = "studio_capture/jobcode",
+  [DT_STUDIO_IMPORT_PRESET_BASE_FOLDER] = "studio_capture/base_directory_pattern",
+  [DT_STUDIO_IMPORT_PRESET_SUBFOLDER_PATTERN] = "studio_capture/sub_directory_pattern",
+  [DT_STUDIO_IMPORT_PRESET_FILE_PATTERN] = "studio_capture/filename_pattern",
+};
+
 const char *name(dt_lib_module_t *self)
 {
   return _("Auto import");
@@ -199,7 +227,12 @@ static void _studio_import_toggle_callback(GtkWidget *widget, gpointer user_data
 
 static void _studio_import_survey_changed_callback(gpointer instance, gpointer user_data)
 {
-  _studio_import_update_state((dt_lib_studio_import_t *)user_data);
+  dt_lib_module_t *self = (dt_lib_module_t *)user_data;
+  _studio_import_update_state((dt_lib_studio_import_t *)self->data);
+  // A preset carries the source folder and the scan frequency, which a running session locks. Grayed
+  // out rather than refused: dt_lib_presets_apply() records a preset as the last applied whatever
+  // set_params() returns, and its menu would then offer to overwrite it with the session's settings.
+  gtk_widget_set_sensitive(self->presets_button, !dt_folder_survey_is_active());
 }
 
 static void _studio_import_copy_callback(GtkWidget *widget, gpointer user_data)
@@ -512,21 +545,91 @@ void gui_init(dt_lib_module_t *self)
   _studio_import_update_state(d);
 
   DT_DEBUG_CONTROL_SIGNAL_CONNECT(dt_control_signal_get_global(), DT_SIGNAL_FOLDER_SURVEY_CHANGED,
-                                  G_CALLBACK(_studio_import_survey_changed_callback), d);
+                                  G_CALLBACK(_studio_import_survey_changed_callback), self);
 }
 
 void view_enter(struct dt_lib_module_t *self, struct dt_view_t *old_view, struct dt_view_t *new_view)
 {
   // The session may have been resumed or halted outside this module.
-  _studio_import_update_state((dt_lib_studio_import_t *)self->data);
+  _studio_import_survey_changed_callback(NULL, self);
 }
 
 void gui_cleanup(dt_lib_module_t *self)
 {
   DT_DEBUG_CONTROL_SIGNAL_DISCONNECT(dt_control_signal_get_global(), G_CALLBACK(_studio_import_survey_changed_callback),
-                                     self->data);
+                                     self);
   g_free(self->data);
   self->data = NULL;
+}
+
+void *get_params(__attribute__((unused)) dt_lib_module_t *self, int *size)
+{
+  const dt_lib_studio_import_params_t fixed = {
+    .copy = dt_conf_get_bool("studio_capture/copy"),
+    .delete_source = dt_conf_get_bool("studio_capture/delete_source"),
+    .on_conflict = dt_conf_get_int("studio_capture/on_conflict"),
+    .interval = dt_conf_get_int("studio_capture/interval"),
+  };
+
+  GByteArray *blob = g_byte_array_new();
+  g_byte_array_append(blob, (const guint8 *)&fixed, sizeof(fixed));
+  for(size_t k = 0; k < DT_STUDIO_IMPORT_PRESET_STRINGS; k++)
+  {
+    const char *value = dt_conf_get_string_const(_studio_import_preset_keys[k]);
+    g_byte_array_append(blob, (const guint8 *)value, strlen(value) + 1);
+  }
+
+  *size = blob->len;
+  return g_byte_array_free(blob, FALSE);
+}
+
+int set_params(dt_lib_module_t *self, const void *params, int size)
+{
+  dt_lib_studio_import_t *d = (dt_lib_studio_import_t *)self->data;
+  if(size < (int)sizeof(dt_lib_studio_import_params_t)) return 1;
+
+  const char *values[DT_STUDIO_IMPORT_PRESET_STRINGS];
+  const char *cursor = (const char *)params + sizeof(dt_lib_studio_import_params_t);
+  const char *end = (const char *)params + size;
+  for(size_t k = 0; k < DT_STUDIO_IMPORT_PRESET_STRINGS; k++)
+  {
+    const char *nul = memchr(cursor, '\0', end - cursor);
+    if(IS_NULL_PTR(nul)) return 1;
+    values[k] = cursor;
+    cursor = nul + 1;
+  }
+
+  dt_lib_studio_import_params_t fixed;
+  memcpy(&fixed, params, sizeof(fixed));
+  dt_conf_set_bool("studio_capture/copy", fixed.copy);
+  dt_conf_set_bool("studio_capture/delete_source", fixed.delete_source);
+  dt_conf_set_int("studio_capture/on_conflict", fixed.on_conflict);
+  dt_conf_set_int("studio_capture/interval", fixed.interval);
+  for(size_t k = 0; k < DT_STUDIO_IMPORT_PRESET_STRINGS; k++)
+  {
+    // A preset stored before a folder was ever chosen keeps the folder in place.
+    const gboolean folder = k == DT_STUDIO_IMPORT_PRESET_FOLDER || k == DT_STUDIO_IMPORT_PRESET_BASE_FOLDER;
+    if(folder && values[k][0] == '\0') continue;
+    dt_conf_set_string(_studio_import_preset_keys[k], values[k]);
+  }
+
+  // The widgets' own callbacks write back what conf now holds; the folder choosers emit nothing.
+  dt_bauhaus_combobox_set(d->copy, fixed.copy);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->delete_source), fixed.delete_source);
+  dt_bauhaus_combobox_set(d->on_conflict, CLAMP(fixed.on_conflict, DT_IMPORT_ONCONFLICT_SKIP,
+                                                DT_IMPORT_ONCONFLICT_UNIQUE));
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(d->interval), fixed.interval);
+  gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(d->source_folder),
+                                      dt_conf_get_string_const("studio_capture/folder"));
+  gtk_entry_set_text(GTK_ENTRY(d->jobcode), values[DT_STUDIO_IMPORT_PRESET_JOBCODE]);
+  gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(d->base_folder),
+                                      dt_conf_get_string_const("studio_capture/base_directory_pattern"));
+  gtk_entry_set_text(GTK_ENTRY(d->subfolder_pattern), values[DT_STUDIO_IMPORT_PRESET_SUBFOLDER_PATTERN]);
+  gtk_entry_set_text(GTK_ENTRY(d->file_pattern), values[DT_STUDIO_IMPORT_PRESET_FILE_PATTERN]);
+
+  _studio_import_update_preview(d);
+  _studio_import_update_state(d);
+  return 0;
 }
 
 // clang-format off

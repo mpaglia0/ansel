@@ -34,7 +34,8 @@ name: Nightly Win PKG
 
 on:
   schedule:
-    - cron: "0 5 * * *"
+    # Off the hour: GitHub starts top-of-the-hour schedules the latest (doc/nightly-distribution.md).
+    - cron: "11 5 * * *"
   workflow_dispatch:
 
 jobs:
@@ -210,6 +211,16 @@ jobs:
           rm: false
           token: ${{ secrets.GITHUB_TOKEN }}
           files: ansel-*.exe
+
+      # simplematrixbotlib pins pillow <11, whose newest release (10.4.0) ships no wheel
+      # for the Python ubuntu-latest now defaults to. Without a wheel pip builds pillow from
+      # its 46 MB sdist, and that needs libjpeg headers the runner does not carry, so the
+      # step dies on "RequiredDependencyException: jpeg" and the message is never sent.
+      # Pinning to the newest Python pillow 10.4.0 HAS a wheel for keeps this a download.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
 
       - name: Install dependencies
         run: |
