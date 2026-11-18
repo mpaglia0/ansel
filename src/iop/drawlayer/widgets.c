@@ -58,7 +58,13 @@ struct dt_drawlayer_widgets_t
   float picker_chroma;   /**< Polar chroma derived from U/V. */
   int picker_drag_mode;  /**< Active drag mode (disc/plane/none). */
 
-  float color_history[DT_DRAWLAYER_COLOR_HISTORY_COUNT][3]; /**< Display-RGB history stack. */
+  /** History in PIPELINE RGB -- what a click on a swatch actually restores, and what conf
+   *  persists. The display twin below is derived from it. */
+  float color_history_work[DT_DRAWLAYER_COLOR_HISTORY_COUNT][3];
+  /** The same stack converted once to display RGB, for drawing. Derived through the monitor's
+   *  ICC profile by the owner (which has the module and therefore the work profile), never
+   *  here: these widgets draw, they do not colour-manage. */
+  float color_history[DT_DRAWLAYER_COLOR_HISTORY_COUNT][3];
   gboolean color_history_valid[DT_DRAWLAYER_COLOR_HISTORY_COUNT]; /**< Validity flags per history slot. */
 
   cairo_surface_t *color_surface;  /**< Cached picker surface. */
@@ -108,8 +114,8 @@ static void _picker_update_uv_from_polar(dt_drawlayer_widgets_t *widgets)
   widgets->picker_v = widgets->picker_chroma * sinf(widgets->picker_hue);
 }
 
-/** @brief Project opponent-space color to display RGB; fail when out of gamut. */
-static int _picker_project_opponent_to_display_rgb(const float m, const float u, const float v, float display_rgb[3])
+/** @brief Project an opponent-space position to the sRGB triple it stands for; fail when out of gamut. */
+static int _picker_project_opponent_to_srgb(const float m, const float u, const float v, float srgb[3])
 {
   const float r = m + u * 0.70710678f + v * 0.40824829f;
   const float g = m - u * 0.70710678f + v * 0.40824829f;
@@ -118,13 +124,13 @@ static int _picker_project_opponent_to_display_rgb(const float m, const float u,
   if(!isfinite(r) || !isfinite(g) || !isfinite(b)) return 1;
   if(r < 0.0f || r > 1.0f || g < 0.0f || g > 1.0f || b < 0.0f || b > 1.0f) return 1;
 
-  display_rgb[0] = r;
-  display_rgb[1] = g;
-  display_rgb[2] = b;
+  srgb[0] = r;
+  srgb[1] = g;
+  srgb[2] = b;
   return 0;
 }
 
-/** @brief Compute max reachable chroma at given lightness/hue within display gamut. */
+/** @brief Compute max reachable chroma at given lightness/hue within the sRGB gamut. */
 static float _picker_max_chroma_for_m_hue(const float m, const float hue)
 {
   const float ku = cosf(hue);
@@ -150,7 +156,7 @@ static float _picker_max_chroma_for_m_hue(const float m, const float hue)
   return limit;
 }
 
-/** @brief Clamp picker state so projected display RGB always remains valid. */
+/** @brief Clamp picker state so the projected sRGB triple always remains valid. */
 static void _picker_clamp_state_to_gamut(dt_drawlayer_widgets_t *widgets)
 {
   if(IS_NULL_PTR(widgets)) return;
@@ -165,14 +171,14 @@ static void _picker_clamp_state_to_gamut(dt_drawlayer_widgets_t *widgets)
   }
 }
 
-/** @brief Initialize picker opponent coordinates from display RGB color. */
-static void _sync_picker_from_display_rgb(dt_drawlayer_widgets_t *widgets, const float display_rgb[3])
+/** @brief Initialize picker opponent coordinates from an sRGB colour. */
+static void _sync_picker_from_srgb(dt_drawlayer_widgets_t *widgets, const float srgb[3])
 {
-  if(IS_NULL_PTR(widgets) || !display_rgb) return;
+  if(IS_NULL_PTR(widgets) || !srgb) return;
 
-  widgets->picker_m = (display_rgb[0] + display_rgb[1] + display_rgb[2]) / 3.0f;
-  widgets->picker_u = (display_rgb[0] - display_rgb[1]) * 0.70710678f;
-  widgets->picker_v = (display_rgb[0] + display_rgb[1] - 2.0f * display_rgb[2]) * 0.40824829f;
+  widgets->picker_m = (srgb[0] + srgb[1] + srgb[2]) / 3.0f;
+  widgets->picker_u = (srgb[0] - srgb[1]) * 0.70710678f;
+  widgets->picker_v = (srgb[0] + srgb[1] - 2.0f * srgb[2]) * 0.40824829f;
   _picker_clamp_state_to_gamut(widgets);
 }
 
@@ -365,33 +371,31 @@ void dt_drawlayer_widgets_cleanup(dt_drawlayer_widgets_t **widgets)
   dt_free(*widgets);
 }
 
-/** @brief Set current color and synchronize picker internals. */
-void dt_drawlayer_widgets_set_display_color(dt_drawlayer_widgets_t *widgets, const float display_rgb[3])
+/** @brief Place the marker on a colour given in sRGB, the chooser's own coordinates. */
+void dt_drawlayer_widgets_set_picker_srgb(dt_drawlayer_widgets_t *widgets, const float srgb[3])
 {
-  if(IS_NULL_PTR(widgets) || !display_rgb) return;
-  _sync_picker_from_display_rgb(widgets, display_rgb);
+  if(IS_NULL_PTR(widgets) || !srgb) return;
+  _sync_picker_from_srgb(widgets, srgb);
   widgets->color_surface_dirty = TRUE;
-}
-
-/** @brief Get current color projected to display RGB. */
-gboolean dt_drawlayer_widgets_get_display_color(const dt_drawlayer_widgets_t *widgets, float display_rgb[3])
-{
-  if(!widgets || !display_rgb) return FALSE;
-  return _picker_project_opponent_to_display_rgb(widgets->picker_m, widgets->picker_u, widgets->picker_v, display_rgb) == 0;
 }
 
 /** @brief Replace full color-history content and validity flags. */
 void dt_drawlayer_widgets_set_color_history(dt_drawlayer_widgets_t *widgets,
                                             const float history[DT_DRAWLAYER_COLOR_HISTORY_COUNT][3],
+                                            const float display_history[DT_DRAWLAYER_COLOR_HISTORY_COUNT][3],
                                             const gboolean valid[DT_DRAWLAYER_COLOR_HISTORY_COUNT])
 {
-  if(IS_NULL_PTR(widgets) || !history || !valid) return;
+  if(IS_NULL_PTR(widgets) || !history || !display_history || !valid) return;
   for(int i = 0; i < DT_DRAWLAYER_COLOR_HISTORY_COUNT; i++)
   {
     widgets->color_history_valid[i] = valid[i];
-    widgets->color_history[i][0] = _clamp01(history[i][0]);
-    widgets->color_history[i][1] = _clamp01(history[i][1]);
-    widgets->color_history[i][2] = _clamp01(history[i][2]);
+    /* Working RGB is not clamped to [0,1]; only its screen twin is. */
+    widgets->color_history_work[i][0] = fmaxf(history[i][0], 0.0f);
+    widgets->color_history_work[i][1] = fmaxf(history[i][1], 0.0f);
+    widgets->color_history_work[i][2] = fmaxf(history[i][2], 0.0f);
+    widgets->color_history[i][0] = _clamp01(display_history[i][0]);
+    widgets->color_history[i][1] = _clamp01(display_history[i][1]);
+    widgets->color_history[i][2] = _clamp01(display_history[i][2]);
   }
 }
 
@@ -404,39 +408,47 @@ void dt_drawlayer_widgets_get_color_history(const dt_drawlayer_widgets_t *widget
   for(int i = 0; i < DT_DRAWLAYER_COLOR_HISTORY_COUNT; i++)
   {
     valid[i] = widgets->color_history_valid[i];
-    history[i][0] = widgets->color_history[i][0];
-    history[i][1] = widgets->color_history[i][1];
-    history[i][2] = widgets->color_history[i][2];
+    history[i][0] = widgets->color_history_work[i][0];
+    history[i][1] = widgets->color_history_work[i][1];
+    history[i][2] = widgets->color_history_work[i][2];
   }
 }
 
 /** @brief Push one color to history head if different from current head. */
-gboolean dt_drawlayer_widgets_push_color_history(dt_drawlayer_widgets_t *widgets, const float display_rgb[3])
+gboolean dt_drawlayer_widgets_push_color_history(dt_drawlayer_widgets_t *widgets, const float work_rgb[3],
+                                                 const float display_rgb[3])
 {
-  if(!widgets || !display_rgb) return FALSE;
+  if(!widgets || !work_rgb || !display_rgb) return FALSE;
 
-  if(widgets->color_history_valid[0] && _display_rgb_equal(widgets->color_history[0], display_rgb)) return FALSE;
+  /* Deduplicate on the WORKING value. Two different working colours can land on the same
+   * display triple once the monitor profile has clipped them, and collapsing those would lose
+   * a colour the user can still tell apart in the image. */
+  if(widgets->color_history_valid[0] && _display_rgb_equal(widgets->color_history_work[0], work_rgb)) return FALSE;
 
   for(int i = DT_DRAWLAYER_COLOR_HISTORY_COUNT - 1; i > 0; i--)
   {
     widgets->color_history_valid[i] = widgets->color_history_valid[i - 1];
-    widgets->color_history[i][0] = widgets->color_history[i - 1][0];
-    widgets->color_history[i][1] = widgets->color_history[i - 1][1];
-    widgets->color_history[i][2] = widgets->color_history[i - 1][2];
+    for(int c = 0; c < 3; c++)
+    {
+      widgets->color_history_work[i][c] = widgets->color_history_work[i - 1][c];
+      widgets->color_history[i][c] = widgets->color_history[i - 1][c];
+    }
   }
 
   widgets->color_history_valid[0] = TRUE;
-  widgets->color_history[0][0] = _clamp01(display_rgb[0]);
-  widgets->color_history[0][1] = _clamp01(display_rgb[1]);
-  widgets->color_history[0][2] = _clamp01(display_rgb[2]);
+  for(int c = 0; c < 3; c++)
+  {
+    widgets->color_history_work[0][c] = fmaxf(work_rgb[c], 0.0f);
+    widgets->color_history[0][c] = _clamp01(display_rgb[c]);
+  }
   return TRUE;
 }
 
 /** @brief Update picker state from mouse position and return selected color. */
 gboolean dt_drawlayer_widgets_update_from_picker_position(dt_drawlayer_widgets_t *widgets, GtkWidget *widget,
-                                                          float x, float y, float display_rgb[3])
+                                                          float x, float y, float srgb[3])
 {
-  if(!widgets || !widget || !display_rgb) return FALSE;
+  if(!widgets || !widget || !srgb) return FALSE;
 
   float uv_x = 0.0f, uv_y = 0.0f, uv_size = 0.0f;
   float plane_x = 0.0f, plane_y = 0.0f, plane_w = 0.0f, plane_h = 0.0f;
@@ -469,7 +481,7 @@ gboolean dt_drawlayer_widgets_update_from_picker_position(dt_drawlayer_widgets_t
     const float new_chroma = tx * DT_DRAWLAYER_PICKER_C_MAX;
     const float new_u = new_chroma * cosf(widgets->picker_hue);
     const float new_v = new_chroma * sinf(widgets->picker_hue);
-    if(_picker_project_opponent_to_display_rgb(new_m, new_u, new_v, display_rgb)) return FALSE;
+    if(_picker_project_opponent_to_srgb(new_m, new_u, new_v, srgb)) return FALSE;
 
     widgets->picker_m = new_m;
     widgets->picker_chroma = new_chroma;
@@ -483,7 +495,7 @@ gboolean dt_drawlayer_widgets_update_from_picker_position(dt_drawlayer_widgets_t
   }
 
   _picker_clamp_state_to_gamut(widgets);
-  if(!_picker_project_opponent_to_display_rgb(widgets->picker_m, widgets->picker_u, widgets->picker_v, display_rgb))
+  if(!_picker_project_opponent_to_srgb(widgets->picker_m, widgets->picker_u, widgets->picker_v, srgb))
   {
     widgets->color_surface_dirty = TRUE;
     return TRUE;
@@ -492,12 +504,12 @@ gboolean dt_drawlayer_widgets_update_from_picker_position(dt_drawlayer_widgets_t
 }
 
 /** @brief End picker drag mode and optionally output current color. */
-gboolean dt_drawlayer_widgets_finish_picker_drag(dt_drawlayer_widgets_t *widgets, float display_rgb[3])
+gboolean dt_drawlayer_widgets_finish_picker_drag(dt_drawlayer_widgets_t *widgets, float srgb[3])
 {
   if(IS_NULL_PTR(widgets)) return FALSE;
   widgets->picker_drag_mode = DT_DRAWLAYER_COLOR_DRAG_NONE;
-  if(IS_NULL_PTR(display_rgb)) return FALSE;
-  return !_picker_project_opponent_to_display_rgb(widgets->picker_m, widgets->picker_u, widgets->picker_v, display_rgb);
+  if(IS_NULL_PTR(srgb)) return FALSE;
+  return !_picker_project_opponent_to_srgb(widgets->picker_m, widgets->picker_u, widgets->picker_v, srgb);
 }
 
 /** @brief Tell whether picker drag interaction is currently active. */
@@ -508,9 +520,9 @@ gboolean dt_drawlayer_widgets_is_picker_dragging(const dt_drawlayer_widgets_t *w
 
 /** @brief Pick one history swatch color from widget coordinates. */
 gboolean dt_drawlayer_widgets_pick_history_color(const dt_drawlayer_widgets_t *widgets, GtkWidget *widget,
-                                                 float x, float y, float display_rgb[3])
+                                                 float x, float y, float work_rgb[3])
 {
-  if(!widgets || !widget || !display_rgb) return FALSE;
+  if(!widgets || !widget || !work_rgb) return FALSE;
 
   const int width = gtk_widget_get_allocated_width(widget);
   const int height = gtk_widget_get_allocated_height(widget);
@@ -523,9 +535,9 @@ gboolean dt_drawlayer_widgets_pick_history_color(const dt_drawlayer_widgets_t *w
   const int index = row * DT_DRAWLAYER_COLOR_HISTORY_COLS + col;
   if(index < 0 || index >= DT_DRAWLAYER_COLOR_HISTORY_COUNT || !widgets->color_history_valid[index]) return FALSE;
 
-  display_rgb[0] = widgets->color_history[index][0];
-  display_rgb[1] = widgets->color_history[index][1];
-  display_rgb[2] = widgets->color_history[index][2];
+  work_rgb[0] = widgets->color_history_work[index][0];
+  work_rgb[1] = widgets->color_history_work[index][1];
+  work_rgb[2] = widgets->color_history_work[index][2];
   return TRUE;
 }
 
@@ -587,7 +599,7 @@ gboolean dt_drawlayer_widgets_draw_picker(dt_drawlayer_widgets_t *widgets, GtkWi
           const float ty = 1.0f - 2.0f * _clamp01((fy - uv_y) / fmaxf(uv_size, 1.0f));
           const float u = tx * DT_DRAWLAYER_PICKER_U_MAX;
           const float v = ty * DT_DRAWLAYER_PICKER_V_MAX;
-          if(_picker_project_opponent_to_display_rgb(widgets->picker_m, u, v, rgb)) paint = FALSE;
+          if(_picker_project_opponent_to_srgb(widgets->picker_m, u, v, rgb)) paint = FALSE;
         }
         else if(fx >= plane_x && fx <= plane_x + plane_w && fy >= plane_y && fy <= plane_y + plane_h)
         {
@@ -597,7 +609,7 @@ gboolean dt_drawlayer_widgets_draw_picker(dt_drawlayer_widgets_t *widgets, GtkWi
           const float chroma = tx * DT_DRAWLAYER_PICKER_C_MAX;
           const float u = chroma * cosf(widgets->picker_hue);
           const float v = chroma * sinf(widgets->picker_hue);
-          if(_picker_project_opponent_to_display_rgb(m, u, v, rgb)) paint = FALSE;
+          if(_picker_project_opponent_to_srgb(m, u, v, rgb)) paint = FALSE;
         }
         else
         {

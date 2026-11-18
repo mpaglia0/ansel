@@ -461,6 +461,235 @@ and only the contained one passes, with valgrind naming the read — `Invalid re
 memmove ... interpolation.c:955`, which is that `memcpy`. After the fix, 7/7 and `ERROR SUMMARY:
 0 errors`.
 
+## 8c. The brush colour is pipeline RGB; only the screen sees anything else
+
+*Established 2026-11-16 against `53488dd8e5`. The eyedropper paragraphs were amended the same
+day on top of `aad29756a2`, where the gesture moved into the picker proxy; what changed, and
+what turned out to be wrong, is marked where it stands.*
+
+The brush colour used to be kept in **display space** — conf held a triple converted through
+`dt_ioppr_get_pipe_output_profile_info()`, and painting converted it back the other way. It is
+now kept in **working (pipeline) RGB**, which is the space picking already produces and painting
+already consumes, so the path that matters does no conversion at all.
+
+What the old arrangement cost, in the order the symptoms appear:
+
+- **Soft-proofing made picking and painting disagree.** `iop/colorout.c` puts the pipe in a
+  soft-proof mode only for `DT_DEV_PIXELPIPE_FULL` (`d->mode = (pipe->type == FULL) ?
+  settings.mode : DT_PROFILE_NORMAL`). The picker runs on one pipe and the paint conversion read
+  `self->dev->pipe`, so with proofing on, the colour laid down was not the colour picked.
+- **A stored colour meant something different on every monitor**, because the profile it was
+  encoded against was not stored with it. Changing the display profile silently moved the saved
+  brush colour and the entire history.
+- **The clamp happened in the wrong space.** Display values were clamped to [0,1] *before* the
+  HDR exposure gain, so a pick off a specular highlight was flattened at pick time.
+
+The model now: conf and `brush_pipeline_color` hold working RGB, unclamped above 1 and only
+floored at 0. The HDR gain multiplies once, where the dab colour is produced, and is divided back
+out on the picking path so that picking a patch this brush painted returns the colour chosen for
+it. Everything the user *sees* **of the colour** — history strip, on-canvas cursor stamp — reads a
+cached display twin. *(This sentence listed the gradient widget too. That was wrong, and was a
+bug rather than a slip of the pen: see "Two triples for one colour" at the end of this section.)*
+
+**The twin is cached, and the cache key is `dt_colorprofiles_settings_t.generation`.** Converting
+costs an LCMS transform (`dt_colorprofiles_xyz_to_display()`, which is documented for exactly
+this and takes the profile read lock for the span of the call), and a redraw must not pay it.
+Two things about that key, both load-bearing:
+
+- `generation` is advanced by the settings setters **and** by `_notify_profile_changed()`
+  (`colorprofiles/colorspaces.c`), so moving the window to a screen with a different profile
+  bumps it too. That matters because the `DT_COLORSPACE_DISPLAY` entry keeps its name and
+  filename across such a change — only the bytes behind them differ — so a cache keyed on the
+  profile's *identity* would serve the previous monitor's colours indefinitely.
+- The recompute has to reach the widgets, not just `brush_display_color`. The history strip
+  holds its own screen copies; refreshing the module cache alone leaves the panel showing the
+  old monitor's colours until something unrelated touches them. *(The gradient widget was
+  listed here as well, and the code did push the twin into it. It must not: same section.)*
+
+A matrix of the display profile would have been cheaper and wrong: it is correct only for a
+matrix/TRC profile and silently wrong for a LUT-based one, which is what a real colord monitor
+profile usually is.
+
+**Ctrl+click is the eyedropper**, and it borrows the module's own image picker rather than
+sampling anything itself: the pixel it wants only exists part-way through a pipe run, and
+`color_picker_apply()` already receives it.
+
+**Aiming the sample is not enough, and that is the trap.** Writing
+`dev->color_picker.primary_sample->point` sets *where* to look, but the pipeline only samples for
+the picker **registered on the dev**, so an unarmed pick returns nothing at all — no error, no
+callback, just a gesture that does nothing. The first cut of this did exactly that. It compounded
+the mistake by trying to arm the picker with
+`gtk_toggle_button_set_active(picker_widget, TRUE)`: the picker button's arming lives on
+**`button-press-event`**, not on `toggled`, so setting the toggle flips the button's appearance
+and nothing else. The cursor looked armed and sampled nothing.
+
+Arming was first `dt_iop_color_picker_sample_point()`, written for this module alone. **It is
+gone**: the commit after this one made the same gesture available to every module with a single
+picker, and drawlayer now begins it with `dt_iop_color_picker_gesture_begin()` like any other
+caller ([`color-picker.md`](color-picker.md) has the whole account). What that function
+established still holds for its replacement: it takes **image-normalised** coordinates and lets
+`dt_lib_colorpicker_set_point()` convert to the raw-normalised space the sample is stored in —
+passing raw-normalised coordinates there samples a different pixel on any cropped or rotated
+image — and it asks for the sample unconditionally, because that setter is a no-op when the point
+did not move, which is exactly what a pick repeated on the same pixel looks like.
+
+**The gesture is modal on the key, not one-shot on the click.** While the modifier is held every
+click samples; the moment it comes up the tool is a brush again. That is what makes
+sample-then-paint fast, and it is also the only shape that is safe:
+`views/darkroom.c:button_pressed` tests the picker *before* it offers a click to the focused
+module, so a picker left armed eats every following click and the brush stops painting with no
+visible cause.
+
+Which means **the disarm has to be real**, and that is a second place the button's state lies.
+`gtk_toggle_button_set_active(picker, FALSE)` turns the button's *appearance* off and leaves
+`dev->color_picker.enabled` TRUE — the picker goes on intercepting while looking switched off.
+The disarm is `dt_iop_color_picker_reset(self, FALSE)`, which clears `enabled`, `picker`,
+`module`, `widget` and `request_color_pick` together.
+
+Nothing in the module API could see a key *release* — `dt_view_t` had `key_pressed` and no
+`key_released`, and an IOP got neither — so **the release is now plumbed**, mirroring the press
+at every level it already existed at: `OPTIONAL(int, key_released, …)` in `iop_api.h`,
+`view_api.h` and `lib_api.h`, `dt_view_manager_key_released()` beside its press twin in
+`views/view.c`, `dt_control_key_released()`, a `key-release-event` handler on both widgets that
+already carry `key-press-event`, and `key_released()` in `views/darkroom.c` handing the event to
+the focused module. The press half of that chain was always there; only the release was missing,
+because nothing had yet needed to know that a key came back *up*.
+
+Two things about that plumbing, both deliberate:
+
+- **Every handler in the chain returns 0/FALSE.** A release carries no shortcut of its own, and
+  the picking modifier is the prefix of half the application's shortcuts — claiming it would eat
+  them. The handlers observe; they never consume.
+- **Adding a name to `iop_api.h` is not enough on its own.** `tools/generate_iop_static.py`
+  writes a `DT_MODULE_HAS_<fn>` for every API name into each module's generated `_present.h`,
+  and the static-IOP binding is a compile error rather than a silent NULL when one is missing.
+  A build tree that does not regenerate that header fails with
+  `call to undeclared function 'DT_MODULE_PICK_DT_MODULE_HAS_key_released'`, which reads like a
+  macro bug and is a stale generated file. GCC let it through here and clang did not.
+
+**The mode is a flag, not a keyboard read.** `session.picking_active` is set by `key_pressed()`,
+cleared by `key_released()`, and cleared again by `gui_focus()` in *both* directions — leaving,
+because the release is delivered to the focused module and will never arrive once focus has
+moved; arriving, because the modifier may have gone down while another module had focus, so this
+one never saw the press and must not assume a mode it did not enter. `button_pressed()`,
+`button_released()`, `mouse_moved()` and `gui_post_expose()` all branch on that one flag, so the
+cursor and the click cannot disagree about which tool is in the user's hand. `button_pressed()`
+additionally accepts the modifier bit out of its own `state`, which covers the same
+focus-arrived-late case from the other side.
+
+*Amended 2026-11-17 on top of `bf17acb633`:* **the mode is that flag AND a brush that lays down a
+colour** (`_brush_is_picking()`), which is what all four now ask. The flag alone was the mode in
+erase, blur and smudge too, where there is no colour to pick and the module's picker is not even
+shown. Read from the code by an automated review (Codex) and confirmed by reading, not measured:
+there `key_pressed()` ended the stroke under way and raised the flag, the cursor became the
+cross, `mouse_moved()` stopped extending strokes, and `_pick_brush_color_at()` refused the pick
+-- a brush that neither erased nor picked for as long as the modifier was held. Now
+`key_pressed()` leaves those modes alone. Measured after, in the GUI: in erase mode the cursor
+with the modifier held is pixel-identical to the one without, and a drag made with it held
+erased the stroke it crossed (the crossing reads (30, 27, 27), the stroke either side (240, 75,
+69)); in paint mode the cross still replaces the circle and a modifier-click changed the conf
+colour from (0.5, 0.1, 0.05) to the sky's (0.216, 0.232, 0.224).
+
+The disarm is still `dt_iop_color_picker_reset()`, but **it is no longer this module's to
+call**, and how that was found is the useful part. The module reset its picker the moment the
+modifier came up. Driven in the GUI with Ctrl released in the same instant as the click, that
+threw the click away whenever the sample had not landed yet — and a sample takes 12 to 70 ms on
+an idle pipeline, 290 ms and more with a stroke under way. The picker proxy now owns the whole
+life of a picker the modifier turned on, and keeps it registered until its sample lands while
+giving the image back at once ([`color-picker.md`](color-picker.md), *The modifier comes up
+before the sample does*). `picker_armed_by_gesture` went with it: the proxy knows whose picker it
+is (`gesture_armed`).
+
+**A second defect hid behind that one.** `mouse_moved()` aborted any stroke while
+`self->request_color_pick` was set, meaning "the picker is active". That flag says the picker is
+*registered*, which now outlives its owning the image by the latency above — so a stroke begun
+right after a pick was started by `button_pressed()` and aborted on its first motion, leaving
+one dab where a line had been painted. It asks `dt_iop_color_picker_is_visible()` now.
+
+**The cursor has to promise the gesture.** While the modifier is held the brush circle is
+replaced by a cross with a gap at its centre, so the sampled pixel stays visible and can be aimed
+at — a circle exists to show an area, which is the wrong thing to show when the next click reads
+one pixel. `gui_post_expose()` draws it from `session.picking_active`, the same flag the click
+branches on, and `key_pressed()` queues the redraw that makes the swap immediate rather than
+waiting for the next pointer motion. *(An earlier state of this paragraph said the expose read
+`dt_key_modifier_state()` live. It did, for one revision; the flag replaced it so that the cursor
+and the click could not disagree, and the paragraph was not updated with it.)* The modifier is
+`DT_PRIMARY_MASK` rather than `GDK_CONTROL_MASK`, so it is Cmd on macOS.
+
+**Verified in the GUI:** the colours match between the panel and the painted image, and the
+eyedropper works as a mode held on the key. The first version of it was tried in the GUI and
+sampled nothing, which is how the arming trap above was found.
+
+### Two triples for one colour, and two callers that mixed them up
+
+*Established 2026-11-17 on top of `6e2f787835`, where an automated review of the PR (Sentry's
+Seer) flagged both. Each was measured before it was touched; the probes were `fprintf`s in
+`dt_drawlayer_sync_cached_brush_colors()` and next to the chooser's setter, run on the private
+display with the brush colour seeded in conf as working (0.5, 0.1, 0.05).*
+
+The gradient chooser is **an sRGB-defined map**: `_color_picker_set_from_position()` reads the
+triple under the pointer as sRGB and converts it to working RGB. Its marker is a position in
+those coordinates. So this module carries, for one brush colour, **three** triples — working
+RGB (conf, the cache, what is painted), the monitor twin (history strip, cursor stamp), and the
+chooser's sRGB — and the change to pipeline RGB above only renamed two of them. The chooser's
+API went on calling its own triple `display_rgb`, and two mistakes followed from that one name.
+
+**1. Two callers handed the chooser's triple to a function that takes working RGB.**
+`dt_drawlayer_sync_cached_brush_colors()` took display RGB before the change and working RGB
+after it. `gui_update()` and the HDR-exposure branch of `_widget_changed()` still fed it
+`dt_drawlayer_widgets_get_display_color()`. Measured at darkroom entry:
+
+| | cache given | conf holds |
+|---|---|---|
+| first sync (from conf) | 0.5000 0.1000 0.0500 | 0.5000 0.1000 0.0500 |
+| second sync (`gui_update`, from the chooser) | **0.8900 0.2493 0.2115** | 0.5000 0.1000 0.0500 |
+
+So every refresh of the panel replaced the brush colour by its own encoded value, and the next
+stroke laid that down, until a colour was chosen again; the HDR slider did it once per step.
+Both blocks existed to re-apply the HDR gain to the cached colour, which this same section had
+taken out of the cache ("the HDR gain multiplies once, where the dab colour is produced"), so
+they were deleted rather than converted, and `..._get_display_color()` went with them. After:
+one sync, given what conf holds. Painted after a restart without choosing a colour again, the
+layer in the sidecar holds 0.2749 0.3623 0.6577 at alpha 1 for a conf colour of 0.2750 0.3624
+0.6575 (half-float storage).
+
+**2. The chooser's marker was placed from the monitor twin.** Same triple on an sRGB display,
+a different one on any other. Measured with `ui_last/color/display_type=2` (Adobe RGB):
+working (0.5, 0.1, 0.05) is sRGB 0.8900 0.2493 0.2115 and was placed as 0.7704 0.2575 0.2243.
+A drag in one half of the chooser keeps the other half's coordinate from that state (the
+plane keeps the hue, the disc keeps the lightness), so each motion event carried the
+displacement into the next colour. The marker is now placed from
+`dt_drawlayer_brush_picker_srgb()`, the inverse of the conversion the pick uses, and
+`_refresh_brush_display_color()` no longer moves it when the monitor profile changes. After,
+on the Adobe RGB profile: the chooser is given 0.8900 0.2493 0.2115 while the twin is 0.7704
+0.2575 0.2243, and a drag released at (1440, 600) in the disc and at (1590, 560) in the plane
+leaves the marker on those two pixels.
+
+The setter is `dt_drawlayer_widgets_set_picker_srgb()` now, and the chooser's parameters say
+`srgb`. **What was not measured:** the drag on the build before the fix (the displacement is
+known as triples, not as pixels), and anything on a LUT-based monitor profile.
+
+**Not changed, and worth knowing:** the chooser paints its sRGB triples into its cairo surface
+as they are (`dt_drawlayer_widgets_draw_picker()`), with no conversion to the monitor profile,
+while the history strip and the cursor stamp are converted. Read from the code, not seen: on a
+monitor whose profile is wider than sRGB the map should look more saturated than the colour a
+click on it picks, unless the display server colour-manages the window itself.
+
+**And one thing this section had let be assumed:** the twin is the colour converted to the
+display profile, not the colour as the image will show it. The module sits before filmic in
+the pipeline (`iop_order.c`: 41.7 against 46.0), so paint goes through every later module with
+the image. Measured on the test raw's default history: working 0.2750 0.3624 0.6575 has the
+twin (135, 162, 214) and reads (212, 228, 255) on screen once painted.
+
+*This section used to end: "there is no headless path that paints a stroke or repaints a
+swatch." **That was wrong**, and believing it is what let three rounds of this gesture be
+written from reading alone. A headless compositor, a rootful Xwayland and XTest drive the real
+GUI on a display of its own; [`color-picker.md`](color-picker.md), *How this was measured*, has
+the recipe. It painted strokes, picked colours and found two defects reading had not.*
+
+The conf format changed meaning without a migration, by decision, so a brush colour and history
+saved before this commit are reinterpreted as working RGB and will look different once.
+
 ## 9. "Move the rasterizer to the GPU" — the verdict
 
 No, not as the next step, and the reasoning is not about kernel speed. The dab stream is
