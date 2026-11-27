@@ -331,8 +331,8 @@ static inline void _darkroom_sample_raw_box_to_image_norm(const dt_colorpicker_s
 }
 
 /**
- * @brief Mark, with a cross in each RGB channel's colour, the module-input pixels holding the
- * per-channel extremes the active module picker reads.
+ * @brief Mark, with a cross in each RGB channel's colour, the pixels holding the per-channel
+ * extremes the active picker reads: a module's input, or the scope stage the global picker shows.
  *
  * The channel the module kept is a +, the others smaller, dimmed diagonal crosses whose arms shrink
  * from red to blue so that crosses landing on the same pixel stay distinct.
@@ -1255,6 +1255,12 @@ void expose(
   {
     GSList samples = { .data = dt_dev_get_global()->color_picker.primary_sample, .next = NULL };
     _darkroom_pickers_draw(self, cri, width, height, pointerx, pointery, &samples, TRUE);
+
+    /* A module that began the gesture itself draws its own cursor in place of the system one,
+     * and must go on drawing it, or the pointer vanishes at the press. */
+    if(dt_iop_color_picker_gesture_is_by_module()
+       && dev->gui_module && dev->gui_module->enabled && dev->gui_module->gui_post_expose)
+      dev->gui_module->gui_post_expose(dev->gui_module, cri, width, height, pointerx, pointery);
   }
   else
   {
@@ -2482,14 +2488,27 @@ static void _darkroom_set_default_cursor(dt_view_t *self, double x, double y)
 }
 
 /* The picking modifier went down or came up: swap the cursor now, where the pointer is,
- * instead of at the next motion -- the user is holding still, aiming. */
+ * instead of at the next motion -- the user is holding still, aiming.
+ *
+ * The position is asked of the pointer, not taken from the last motion: that is the last one
+ * the centre saw, which with the pointer over a panel is the margin it left through. The cursor
+ * is set on the main window too, so the cross of that margin would go up over the panel. Outside
+ * the centre the cursor is left alone. */
 static void _darkroom_picking_modifier_changed(dt_view_t *self, const gboolean down)
 {
-  dt_control_pointer_input_t pointer = { 0 };
-  dt_control_get_pointer_input(&pointer);
-  if(!isfinite(pointer.x) || !isfinite(pointer.y)) return;
+  GtkWidget *center = dt_gui_center_widget();
+  GdkWindow *window = IS_NULL_PTR(center) ? NULL : gtk_widget_get_window(center);
+  GdkDisplay *display = IS_NULL_PTR(window) ? NULL : gdk_window_get_display(window);
+  GdkSeat *seat = IS_NULL_PTR(display) ? NULL : gdk_display_get_default_seat(display);
+  GdkDevice *pointer = IS_NULL_PTR(seat) ? NULL : gdk_seat_get_pointer(seat);
+  if(IS_NULL_PTR(window) || IS_NULL_PTR(pointer)) return;
 
-  _darkroom_set_cursor_for(self, pointer.x, pointer.y, down);
+  double x = 0.0;
+  double y = 0.0;
+  gdk_window_get_device_position_double(window, pointer, &x, &y, NULL);
+  if(!mouse_in_actionarea(self, x, y)) return;
+
+  _darkroom_set_cursor_for(self, x, y, down);
   dt_control_commit_cursor();
 }
 
@@ -2822,6 +2841,10 @@ void mouse_moved(dt_view_t *self, double x, double y, double pressure, int which
 
   // change cursor appearance by default
   _darkroom_set_default_cursor(self, x, y);
+
+  // The cursor of a module that began the gesture is drawn, not the system's: it moves by redraw.
+  if(picker_active && dt_iop_color_picker_gesture_is_by_module()) dt_control_queue_redraw_center();
+
   gboolean handled = FALSE;
   gboolean masks_handled = FALSE;
 
